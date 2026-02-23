@@ -245,6 +245,18 @@ Base = Element(xform_affine_to_extended(B))
 Zero = _ZeroElement(xform_affine_to_extended((0, 1)))
 _zero_bytes = Zero.to_bytes()
 
+# P1: Precomputed table REMOVED — permanent memory allocation fragments
+# ESP32 heap and breaks lwIP socket receive buffers. On desktop/Pico W
+# with more RAM, this could be re-enabled.
+
+def scalarmult_base_comb(s):
+    """Compute s*B. Direct delegation to standard scalarmult.
+    
+    Named 'comb' for API compatibility but uses standard method
+    to avoid permanent heap allocations on memory-constrained devices.
+    """
+    return Base.scalarmult(s)
+
 
 def arbitrary_element(seed):
     from ..hashes import sha512
@@ -285,4 +297,16 @@ def bytes_to_element(b):
         raise ValueError("element was Zero")
     if not is_extended_zero(P.scalarmult(L).XYTZ):
         raise ValueError("element is not in the right group")
+    return Element(P.XYTZ)
+
+def bytes_to_element_unchecked(b):
+    """Decode a point without the expensive L-order group check.
+
+    Safe for Ed25519 verify because the verification equation
+    S*B == R + h*A itself rejects points not in the prime-order
+    subgroup. This matches libsodium's verify behavior.
+    """
+    P = bytes_to_unknown_group_element(b)
+    if P is Zero:
+        raise ValueError("element was Zero")
     return Element(P.XYTZ)

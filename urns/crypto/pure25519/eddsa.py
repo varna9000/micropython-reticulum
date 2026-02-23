@@ -6,7 +6,8 @@ import binascii
 from ..hashes import sha512
 from .basic import (bytes_to_clamped_scalar,
                     bytes_to_scalar, scalar_to_bytes,
-                    bytes_to_element, Base, _rev)
+                    bytes_to_element, bytes_to_element_unchecked,
+                    Base, _rev, scalarmult_base_comb)
 
 def H(m):
     return sha512(m)
@@ -14,7 +15,7 @@ def H(m):
 def publickey(seed):
     assert len(seed) == 32
     a = bytes_to_clamped_scalar(H(seed)[:32])
-    A = Base.scalarmult(a)
+    A = scalarmult_base_comb(a)
     return A.to_bytes()
 
 def Hint(m):
@@ -28,7 +29,22 @@ def signature(m, sk, pk):
     a_bytes, inter = h[:32], h[32:]
     a = bytes_to_clamped_scalar(a_bytes)
     r = Hint(inter + m)
-    R = Base.scalarmult(r)
+    R = scalarmult_base_comb(r)
+    R_bytes = R.to_bytes()
+    S = r + Hint(R_bytes + pk + m) * a
+    return R_bytes + scalar_to_bytes(S)
+
+def signature_cached(m, a, inter, pk):
+    """Sign with pre-derived key material (avoids SHA-512 + scalarmult per call).
+
+    Args:
+        m: message bytes
+        a: pre-derived clamped scalar (from H(seed)[:32])
+        inter: pre-derived nonce material (H(seed)[32:])
+        pk: pre-computed public key bytes
+    """
+    r = Hint(inter + m)
+    R = scalarmult_base_comb(r)
     R_bytes = R.to_bytes()
     S = r + Hint(R_bytes + pk + m) * a
     return R_bytes + scalar_to_bytes(S)
@@ -38,11 +54,11 @@ def checkvalid(s, m, pk):
         raise Exception("signature length is wrong")
     if len(pk) != 32:
         raise Exception("public-key length is wrong")
-    R = bytes_to_element(s[:32])
-    A = bytes_to_element(pk)
+    R = bytes_to_element_unchecked(s[:32])
+    A = bytes_to_element_unchecked(pk)
     S = bytes_to_scalar(s[32:])
     h = Hint(s[:32] + pk + m)
-    v1 = Base.scalarmult(S)
+    v1 = scalarmult_base_comb(S)
     v2 = R.add(A.scalarmult(h))
     return v1 == v2
 

@@ -16,6 +16,11 @@ Usage (Desktop CPython):
 WIFI_SSID = "YourNetworkName"
 WIFI_PASS = "YourPassword"
 NODE_NAME = "ESP32 Node"
+# DEBUG levels:
+#   0 = silent (no console output)
+#   1 = messages & announces only
+#   2 = full debug logging
+DEBUG = 1
 # ------------------------
 
 import gc
@@ -134,7 +139,8 @@ def connect_wifi(ssid, password, timeout=15):
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     if not wlan.isconnected():
-        print("Connecting to WiFi:", ssid)
+        if DEBUG >= 1:
+            print("Connecting to WiFi:", ssid)
         wlan.connect(ssid, password)
         start = time.time()
         while not wlan.isconnected():
@@ -142,7 +148,8 @@ def connect_wifi(ssid, password, timeout=15):
                 raise RuntimeError("WiFi connection timed out")
             time.sleep(0.5)
     ip = wlan.ifconfig()[0]
-    print("Connected! IP:", ip)
+    if DEBUG >= 1:
+        print("Connected! IP:", ip)
     return ip
 
 
@@ -165,7 +172,7 @@ def setup_node(rns, node_name):
         packet.prove()
 
         msg = decode_lxmf_message(data, dest.hash)
-        if msg:
+        if msg and DEBUG >= 1:
             verified = "verified" if msg["signature_valid"] else "UNVERIFIED"
             sender = msg["source"].hex()[:8]
             print()
@@ -183,20 +190,20 @@ def setup_node(rns, node_name):
     # Announce handler — see other LXMF peers
     def on_announce(destination_hash, app_data, packet):
         name = parse_display_name(app_data) or "?"
-        log("Peer: " + name + " [" + destination_hash.hex()[:8] + "]", LOG_NOTICE)
+        if DEBUG >= 1:
+            print("[Peer] " + name + " [" + destination_hash.hex()[:8] + "]")
 
     dest._announce_handler = on_announce
 
     # Announce ourselves with LXMF-compatible app_data
     app_data = lxmf_app_data(node_name)
     from urns.transport import Transport
-    print("Interfaces registered:", len(Transport.interfaces))
-    for iface in Transport.interfaces:
-        print("  -", iface.name, "online:", iface.online)
+    if DEBUG >= 2:
+        print("Interfaces registered:", len(Transport.interfaces))
+        for iface in Transport.interfaces:
+            print("  -", iface.name, "online:", iface.online)
     dest.announce(app_data=app_data)
 
-    print("LXMF address:", dest.hexhash)
-    print("Announced as:", node_name)
     return dest
 
 
@@ -208,15 +215,21 @@ def main():
     gc.collect()
 
     from urns import Reticulum
-    from urns.log import LOG_DEBUG
+    from urns.log import LOG_NONE, LOG_NOTICE, LOG_DEBUG
 
-    rns = Reticulum(loglevel=LOG_DEBUG)
+    log_map = {0: LOG_NONE, 1: LOG_NONE, 2: LOG_DEBUG}
+    rns = Reticulum(loglevel=log_map.get(DEBUG, LOG_NOTICE))
     rns.setup_interfaces()
     gc.collect()
 
     dest = setup_node(rns, NODE_NAME)
     gc.collect()
-    print("Free memory:", gc.mem_free(), "bytes")
+
+    if DEBUG >= 1:
+        print("LXMF address:", dest.hexhash)
+        print("Announced as:", NODE_NAME)
+        print("Free memory:", gc.mem_free(), "bytes")
+        print("Running... (Ctrl+C to stop)")
 
     # Add periodic re-announce to the event loop
     async def reannounce_loop():
@@ -225,9 +238,11 @@ def main():
             try:
                 app_data = lxmf_app_data(NODE_NAME)
                 dest.announce(app_data=app_data)
-                print("[Re-announced]")
+                if DEBUG >= 2:
+                    print("[Re-announced]")
             except Exception as e:
-                print("Re-announce error:", e)
+                if DEBUG >= 2:
+                    print("Re-announce error:", e)
             gc.collect()
 
     # Patch rns.run to include our reannounce task
@@ -237,12 +252,12 @@ def main():
         asyncio.create_task(reannounce_loop())
         await _original_run()
 
-    print("Running... (Ctrl+C to stop)")
     try:
         asyncio.run(run_with_reannounce())
     except KeyboardInterrupt:
         rns.shutdown()
-        print("Shutdown complete")
+        if DEBUG >= 1:
+            print("Shutdown complete")
 
 
 def main_desktop():
@@ -257,14 +272,16 @@ def main_desktop():
         pass
 
     from urns import Reticulum
-    from urns.log import LOG_DEBUG
+    from urns.log import LOG_NONE, LOG_NOTICE, LOG_DEBUG
 
-    rns = Reticulum(config_path=storagedir + "/config.json", loglevel=LOG_DEBUG)
+    log_map = {0: LOG_NONE, 1: LOG_NONE, 2: LOG_DEBUG}
+    rns = Reticulum(config_path=storagedir + "/config.json", loglevel=log_map.get(DEBUG, LOG_NOTICE))
     rns.setup_interfaces()
 
     dest = setup_node(rns, "Desktop uRNS Node")
 
-    print("Running...")
+    if DEBUG >= 1:
+        print("Running...")
     try:
         import threading, time as _time
 
@@ -273,9 +290,11 @@ def main_desktop():
                 _time.sleep(120)
                 try:
                     dest.announce(app_data=lxmf_app_data("Desktop uRNS Node"))
-                    print("[Re-announced]")
+                    if DEBUG >= 2:
+                        print("[Re-announced]")
                 except Exception as e:
-                    print("Re-announce error:", e)
+                    if DEBUG >= 2:
+                        print("Re-announce error:", e)
 
         threading.Thread(target=reannounce, daemon=True).start()
         asyncio.run(rns.run())

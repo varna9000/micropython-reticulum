@@ -123,6 +123,8 @@ class Reticulum:
 
     def setup_interfaces(self):
         """Initialize network interfaces from config. Call after WiFi is connected."""
+        # Free memory before interface setup — sockets need lwIP buffer headroom
+        gc.collect()
         for iface_config in self.config.get("interfaces", []):
             if not iface_config.get("enabled", True):
                 continue

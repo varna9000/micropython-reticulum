@@ -405,11 +405,12 @@ class LXMRouter:
     def _delivery_packet(self, data, packet):
         """Handle incoming opportunistic LXMF packet"""
         try:
-            log("LXMF delivery_packet: " + str(len(data)) + "B from interface", LOG_DEBUG)
+            log("LXMF delivery_packet: " + str(len(data)) + "B", LOG_DEBUG)
 
             # For opportunistic delivery, prepend destination hash
             # (it's inferred from the packet destination, not included in payload)
-            lxmf_data = packet.destination.hash + data
+            dest_hash = self.delivery_destination.hash
+            lxmf_data = dest_hash + data
 
             log("LXMF unpacking: " + str(len(lxmf_data)) + "B total", LOG_DEBUG)
             message = LXMessage.unpack_from_bytes(lxmf_data)
