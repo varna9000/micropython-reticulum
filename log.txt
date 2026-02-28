@@ -1,0 +1,347 @@
+>>> %Run -c $EDITOR_CONTENT
+
+MPY: soft reboot
+Connected! IP: 192.168.3.156
+IDF heap after WiFi: [(240, 4, 0, 4), (7288, 4, 0, 4), (15072, 4, 0, 4), (16648, 4, 0, 4), (85936, 4, 0, 4), (113840, 93344, 90112, 188)]
+[825603592][VERB] Loaded identity from storage
+[825603592][VERB] Loaded configuration from /rns/config.json
+[825603592][VERB] Loaded 0 known destinations
+[825603592][VERB] Transport engine started
+[825603592][NOTE] µReticulum v0.1.0 started
+[825603592][INFO] Identity: b85f90bbb2250bc208e9f48e7746bb0c
+[825603592][VERB] Free memory: 53968 bytes
+IDF heap after init: [(240, 4, 0, 4), (7288, 4, 0, 4), (15072, 4, 0, 4), (16648, 4, 0, 4), (85936, 4, 0, 4), (113840, 33948, 32768, 188)]
+[825603592][NOTE] LXMF delivery registered: 201c701d46d90715d7799ba489d25d3a
+IDF after setup_node: [(240, 4, 0, 4), (7288, 4, 0, 4), (15072, 4, 0, 4), (16648, 4, 0, 4), (85936, 4, 0, 4), (113840, 33948, 32768, 188)]
+[825603593][VERB] Auto-detected broadcast: 192.168.3.255
+[825603593][VERB] WiFi power management disabled (required for broadcast RX)
+[825603593][DBG ] IDF before socket: free=33948 largest=32768
+[825603593][DBG ] IDF after socket: free=33668 largest=32768
+[825603593][NOTE] UDP Interface WiFi UDP listening on 0.0.0.0:4242
+[825603593][VERB] UDP Interface WiFi UDP broadcasting to 192.168.3.255:4242
+[825603593][VERB] Interface registered: WiFi UDP
+LXMF address: 201c701d46d90715d7799ba489d25d3a
+Free memory: 48320 bytes
+Running... (Ctrl+C to stop)
+[825603593][VERB] Event loop running with 2 tasks
+[825603593][NOTE] UDP poll loop started for WiFi UDP
+[825603593][DBG ] IDF at poll start: free=33668 largest=32768
+[825603597][DBG ] TX 181B type=1 ifaces=1
+[825603597][DBG ] TX pre-send: idf_free=33668 largest=32768 data=181B
+[825603597][DBG ] UDP sent 181B
+[825603598][DBG ] TX sent on WiFi UDP
+[825603598][NOTE] LXMF announced as: ESP32 Node
+Announced as: ESP32 Node
+[825603598][DBG ] UDP recv 86B from ('192.168.3.192', 61394)
+[825603598][DBG ] Inbound: 86 bytes, flags=0x02
+[825603598][DBG ] Inbound: type=2 dest=201c701d46d90715d7799ba489d25d3a
+[825603610][DBG ] UDP recv 51B from ('192.168.3.192', 63410)
+[825603610][DBG ] Inbound: 51 bytes, flags=0x08
+[825603610][DBG ] Inbound: type=0 dest=6b9f66014d9853faab220fba47d02761
+[825603610][DBG ] UDP recv 51B from ('192.168.3.192', 63389)
+[825603611][DBG ] Inbound: 51 bytes, flags=0x08
+[825603611][DBG ] Inbound: type=0 dest=6b9f66014d9853faab220fba47d02761
+[825603615][DBG ] UDP recv 330B from ('192.168.3.192', 57774)
+[825603615][DBG ] Inbound: 330 bytes, flags=0x71
+[825603615][DBG ] Inbound: type=1 dest=21b9f1fce3a001cf44fbecba4f63d12f
+[825603615][DBG ] Inbound: processing announce
+[825603615][DBG ] Announce validate: data=295B ctx_flag=1
+[825603615][DBG ] Announce fields: pubkey=64 name_hash=10 random=10 ratchet=32 sig=64 app=115
+[825603615][DBG ] Announce signed_data=247B dest=21b9f1fc pubkey=34aa7400
+[825603615][DBG ] Announce identity loaded: hash=be08e741b170c1602566fc47c4a43436
+[825603619][DBG ] Announce sig_valid=True
+[825603619][NOTE] Valid announce from 21b9f1fce3a001cf44fbecba4f63d12f
+[825603619][VERB] Announce app_data: b'\x93\xc4\x03RTH\xc0\xc4j\x84\xa3app\xa3rch\xa6schema\x01\xabrch_version\xa7unknown\xa4caps\x95\xactopic_broker\xaagroup_chat\xaftelemetry_relay\xabattachments\xaatak_bridge'
+[825603619][VERB] LXMF peer: RTH [21b9f1fc]
+[Peer] RTH [21b9f1fc]
+[825603621][VERB] UDP poll alive, loops=1000 rx=4 rxb=518 sock=True idf=2944/1728
+[825603623][DBG ] UDP recv 51B from ('192.168.3.192', 63330)
+[825603623][DBG ] Inbound: 51 bytes, flags=0x08
+[825603623][DBG ] Inbound: type=0 dest=6b9f66014d9853faab220fba47d02761
+[825603631][DBG ] UDP recv 51B from ('192.168.3.192', 54465)
+[825603631][DBG ] Inbound: 51 bytes, flags=0x08
+[825603631][DBG ] Inbound: type=0 dest=6b9f66014d9853faab220fba47d02761
+[825603640][VERB] UDP poll alive, loops=2000 rx=6 rxb=620 sock=True idf=2944/1728
+[825603644][DBG ] UDP recv 51B from ('192.168.3.192', 59066)
+[825603644][DBG ] Inbound: 51 bytes, flags=0x08
+[825603644][DBG ] Inbound: type=0 dest=6b9f66014d9853faab220fba47d02761
+[825603655][DBG ] UDP recv 51B from ('192.168.3.192', 49164)
+[825603655][DBG ] Inbound: 51 bytes, flags=0x08
+[825603655][DBG ] Inbound: type=0 dest=6b9f66014d9853faab220fba47d02761
+[825603660][VERB] UDP poll alive, loops=3000 rx=8 rxb=722 sock=True idf=2944/1728
+[825603663][DBG ] UDP recv 211B from ('192.168.3.192', 59034)
+[825603663][DBG ] Inbound: 211 bytes, flags=0x00
+[825603663][DBG ] Inbound: type=0 dest=201c701d46d90715d7799ba489d25d3a
+[825603664][DBG ] LXMF delivery_packet: 103B
+[825603664][DBG ] LXMF unpacking: 119B total
+[825603664][NOTE] LXMF unverified message (unknown source) from 4ae19606
+[825603665][DBG ] TX 83B type=3 ifaces=1
+[825603665][DBG ] TX pre-send: idf_free=2944 largest=1728 data=83B
+[825603665][DBG ] UDP sent 83B
+[825603666][DBG ] TX sent on WiFi UDP
+[825603666][DBG ] Proof sent for ddd27f42
+
+========================================
+LXMF Message [UNVERIFIED]
+  From: 4ae19606
+  Content: hey test
+========================================
+[825603666][ERR ] Cannot send LXMF: unknown identity for 4ae19606
+[Echo] Cannot reply to 4ae19606 (unknown identity)
+[825603675][DBG ] UDP recv 330B from ('192.168.3.192', 56265)
+[825603675][DBG ] Inbound: 330 bytes, flags=0x71
+[825603675][DBG ] Inbound: type=1 dest=21b9f1fce3a001cf44fbecba4f63d12f
+[825603675][DBG ] Inbound: processing announce
+[825603675][DBG ] Announce validate: data=295B ctx_flag=1
+[825603675][DBG ] Announce fields: pubkey=64 name_hash=10 random=10 ratchet=32 sig=64 app=115
+[825603675][DBG ] Announce signed_data=247B dest=21b9f1fc pubkey=34aa7400
+[825603675][VERB] Announce from known dest 21b9f1fc, skip verify
+[825603675][NOTE] Valid announce from 21b9f1fce3a001cf44fbecba4f63d12f
+[825603675][VERB] Announce app_data: b'\x93\xc4\x03RTH\xc0\xc4j\x84\xa3app\xa3rch\xa6schema\x01\xabrch_version\xa7unknown\xa4caps\x95\xactopic_broker\xaagroup_chat\xaftelemetry_relay\xabattachments\xaatak_bridge'
+[825603675][VERB] LXMF peer: RTH [21b9f1fc]
+[Peer] RTH [21b9f1fc]
+[825603682][VERB] UDP poll alive, loops=4000 rx=10 rxb=1263 sock=True idf=2944/1728
+[825603702][VERB] UDP poll alive, loops=5000 rx=10 rxb=1263 sock=True idf=2944/1728
+[825603715][DBG ] TX 181B type=1 ifaces=1
+[825603715][DBG ] TX pre-send: idf_free=2944 largest=1728 data=181B
+[825603715][DBG ] UDP sent 181B
+[825603715][DBG ] TX sent on WiFi UDP
+[825603715][NOTE] LXMF announced as: ESP32 Node
+[Re-announced]
+[825603723][VERB] UDP poll alive, loops=6000 rx=10 rxb=1263 sock=True idf=2944/1728
+[825603735][DBG ] UDP recv 330B from ('192.168.3.192', 59349)
+[825603735][DBG ] Inbound: 330 bytes, flags=0x71
+[825603735][DBG ] Inbound: type=1 dest=21b9f1fce3a001cf44fbecba4f63d12f
+[825603735][DBG ] Inbound: processing announce
+[825603735][DBG ] Announce validate: data=295B ctx_flag=1
+[825603735][DBG ] Announce fields: pubkey=64 name_hash=10 random=10 ratchet=32 sig=64 app=115
+[825603735][DBG ] Announce signed_data=247B dest=21b9f1fc pubkey=34aa7400
+[825603735][VERB] Announce from known dest 21b9f1fc, skip verify
+[825603735][NOTE] Valid announce from 21b9f1fce3a001cf44fbecba4f63d12f
+[825603735][VERB] Announce app_data: b'\x93\xc4\x03RTH\xc0\xc4j\x84\xa3app\xa3rch\xa6schema\x01\xabrch_version\xa7unknown\xa4caps\x95\xactopic_broker\xaagroup_chat\xaftelemetry_relay\xabattachments\xaatak_bridge'
+[825603735][VERB] LXMF peer: RTH [21b9f1fc]
+[Peer] RTH [21b9f1fc]
+[825603742][VERB] UDP poll alive, loops=7000 rx=11 rxb=1593 sock=True idf=2944/1728
+[825603762][VERB] UDP poll alive, loops=8000 rx=11 rxb=1593 sock=True idf=2944/1728
+[825603781][VERB] UDP poll alive, loops=9000 rx=11 rxb=1593 sock=True idf=2944/1728
+[825603795][DBG ] UDP recv 330B from ('192.168.3.192', 54313)
+[825603795][DBG ] Inbound: 330 bytes, flags=0x71
+[825603795][DBG ] Inbound: type=1 dest=21b9f1fce3a001cf44fbecba4f63d12f
+[825603795][DBG ] Inbound: processing announce
+[825603795][DBG ] Announce validate: data=295B ctx_flag=1
+[825603795][DBG ] Announce fields: pubkey=64 name_hash=10 random=10 ratchet=32 sig=64 app=115
+[825603795][DBG ] Announce signed_data=247B dest=21b9f1fc pubkey=34aa7400
+[825603795][VERB] Announce from known dest 21b9f1fc, skip verify
+[825603795][NOTE] Valid announce from 21b9f1fce3a001cf44fbecba4f63d12f
+[825603795][VERB] Announce app_data: b'\x93\xc4\x03RTH\xc0\xc4j\x84\xa3app\xa3rch\xa6schema\x01\xabrch_version\xa7unknown\xa4caps\x95\xactopic_broker\xaagroup_chat\xaftelemetry_relay\xabattachments\xaatak_bridge'
+[825603795][VERB] LXMF peer: RTH [21b9f1fc]
+[Peer] RTH [21b9f1fc]
+[825603801][VERB] UDP poll alive, loops=10000 rx=12 rxb=1923 sock=True idf=2944/1728
+[825603820][VERB] UDP poll alive, loops=11000 rx=12 rxb=1923 sock=True idf=2944/1728
+[825603837][DBG ] TX 181B type=1 ifaces=1
+[825603837][DBG ] TX pre-send: idf_free=2944 largest=1728 data=181B
+[825603837][DBG ] UDP sent 181B
+[825603837][DBG ] TX sent on WiFi UDP
+[825603837][NOTE] LXMF announced as: ESP32 Node
+[Re-announced]
+[825603841][VERB] UDP poll alive, loops=12000 rx=12 rxb=1923 sock=True idf=2944/1728
+[825603855][DBG ] UDP recv 330B from ('192.168.3.192', 63014)
+[825603855][DBG ] Inbound: 330 bytes, flags=0x71
+[825603855][DBG ] Inbound: type=1 dest=21b9f1fce3a001cf44fbecba4f63d12f
+[825603855][DBG ] Inbound: processing announce
+[825603855][DBG ] Announce validate: data=295B ctx_flag=1
+[825603855][DBG ] Announce fields: pubkey=64 name_hash=10 random=10 ratchet=32 sig=64 app=115
+[825603855][DBG ] Announce signed_data=247B dest=21b9f1fc pubkey=34aa7400
+[825603855][VERB] Announce from known dest 21b9f1fc, skip verify
+[825603855][NOTE] Valid announce from 21b9f1fce3a001cf44fbecba4f63d12f
+[825603855][VERB] Announce app_data: b'\x93\xc4\x03RTH\xc0\xc4j\x84\xa3app\xa3rch\xa6schema\x01\xabrch_version\xa7unknown\xa4caps\x95\xactopic_broker\xaagroup_chat\xaftelemetry_relay\xabattachments\xaatak_bridge'
+[825603855][VERB] LXMF peer: RTH [21b9f1fc]
+[Peer] RTH [21b9f1fc]
+[825603861][VERB] UDP poll alive, loops=13000 rx=13 rxb=2253 sock=True idf=2944/1728
+[825603876][DBG ] UDP recv 211B from ('192.168.3.192', 56320)
+[825603876][DBG ] Inbound: 211 bytes, flags=0x00
+[825603876][DBG ] Inbound: type=0 dest=201c701d46d90715d7799ba489d25d3a
+[825603877][DBG ] LXMF delivery_packet: 100B
+[825603877][DBG ] LXMF unpacking: 116B total
+[825603877][NOTE] LXMF unverified message (unknown source) from 4ae19606
+[825603879][DBG ] TX 83B type=3 ifaces=1
+[825603879][DBG ] TX pre-send: idf_free=2944 largest=1728 data=83B
+[825603879][DBG ] UDP sent 83B
+[825603879][DBG ] TX sent on WiFi UDP
+[825603879][DBG ] Proof sent for d856e74e
+
+========================================
+LXMF Message [UNVERIFIED]
+  From: 4ae19606
+  Content: test2
+========================================
+[825603879][ERR ] Cannot send LXMF: unknown identity for 4ae19606
+[Echo] Cannot reply to 4ae19606 (unknown identity)
+[825603883][VERB] UDP poll alive, loops=14000 rx=14 rxb=2464 sock=True idf=2944/1728
+[825603891][DBG ] UDP recv 208B from ('192.168.3.192', 59201)
+[825603891][DBG ] Inbound: 208 bytes, flags=0x21
+[825603891][DBG ] Inbound: type=1 dest=4ae19606d25487215621b55fb9d52f01
+[825603891][DBG ] Inbound: processing announce
+[825603891][DBG ] Announce validate: data=189B ctx_flag=1
+[825603891][DBG ] Announce fields: pubkey=64 name_hash=10 random=10 ratchet=32 sig=64 app=9
+[825603891][DBG ] Announce signed_data=141B dest=4ae19606 pubkey=77ba4846
+[825603891][DBG ] Announce identity loaded: hash=e127b53529ebc33b99e7047c8c35256d
+[825603894][DBG ] Announce sig_valid=True
+[825603894][NOTE] Valid announce from 4ae19606d25487215621b55fb9d52f01
+[825603894][VERB] Announce app_data: b'\x92\xc4\x05node1\xc0'
+[825603894][VERB] LXMF peer: node1 [4ae19606]
+[Peer] node1 [4ae19606]
+[825603906][VERB] UDP poll alive, loops=15000 rx=15 rxb=2672 sock=True idf=2944/1728
+[825603916][DBG ] UDP recv 330B from ('192.168.3.192', 55855)
+[825603916][DBG ] Inbound: 330 bytes, flags=0x71
+[825603916][DBG ] Inbound: type=1 dest=21b9f1fce3a001cf44fbecba4f63d12f
+[825603916][DBG ] Inbound: processing announce
+[825603916][DBG ] Announce validate: data=295B ctx_flag=1
+[825603916][DBG ] Announce fields: pubkey=64 name_hash=10 random=10 ratchet=32 sig=64 app=115
+[825603916][DBG ] Announce signed_data=247B dest=21b9f1fc pubkey=34aa7400
+[825603916][VERB] Announce from known dest 21b9f1fc, skip verify
+[825603916][NOTE] Valid announce from 21b9f1fce3a001cf44fbecba4f63d12f
+[825603916][VERB] Announce app_data: b'\x93\xc4\x03RTH\xc0\xc4j\x84\xa3app\xa3rch\xa6schema\x01\xabrch_version\xa7unknown\xa4caps\x95\xactopic_broker\xaagroup_chat\xaftelemetry_relay\xabattachments\xaatak_bridge'
+[825603916][VERB] LXMF peer: RTH [21b9f1fc]
+[Peer] RTH [21b9f1fc]
+[825603919][DBG ] UDP recv 211B from ('192.168.3.192', 57980)
+[825603919][DBG ] Inbound: 211 bytes, flags=0x00
+[825603919][DBG ] Inbound: type=0 dest=201c701d46d90715d7799ba489d25d3a
+[825603920][DBG ] LXMF delivery_packet: 100B
+[825603920][DBG ] LXMF unpacking: 116B total
+[825603920][NOTE] LXMF message from 4ae19606: test3
+[825603922][DBG ] TX 83B type=3 ifaces=1
+[825603922][DBG ] TX pre-send: idf_free=2944 largest=1728 data=83B
+[825603922][DBG ] UDP sent 83B
+[825603922][DBG ] TX sent on WiFi UDP
+[825603922][DBG ] Proof sent for 7bfd5ffc
+
+========================================
+LXMF Message [verified]
+  From: 4ae19606
+  Content: test3
+========================================
+[825603926][DBG ] TX 211B type=0 ifaces=1
+[825603926][DBG ] TX pre-send: idf_free=2944 largest=1728 data=211B
+[825603926][DBG ] UDP sent 211B
+[825603926][DBG ] TX sent on WiFi UDP
+[825603926][NOTE] Sent opportunistic LXMF message to 4ae19606
+[Echo] Replied to 4ae19606
+[825603927][DBG ] UDP recv 83B from ('192.168.3.192', 62392)
+[825603927][DBG ] Inbound: 83 bytes, flags=0x03
+[825603927][DBG ] Inbound: type=3 dest=332fb9e243b9479308c7ae7c5f0d85a5
+[825603935][VERB] UDP poll alive, loops=16000 rx=18 rxb=3296 sock=True idf=2944/1728
+[825603948][DBG ] UDP recv 211B from ('192.168.3.192', 65493)
+[825603948][DBG ] Inbound: 211 bytes, flags=0x00
+[825603948][DBG ] Inbound: type=0 dest=201c701d46d90715d7799ba489d25d3a
+[825603949][DBG ] LXMF delivery_packet: 105B
+[825603949][DBG ] LXMF unpacking: 121B total
+[825603949][NOTE] LXMF message from 4ae19606: hello 👋
+[825603951][DBG ] TX 83B type=3 ifaces=1
+[825603951][DBG ] TX pre-send: idf_free=2944 largest=1728 data=83B
+[825603951][DBG ] UDP sent 83B
+[825603951][DBG ] TX sent on WiFi UDP
+[825603951][DBG ] Proof sent for a9a307c0
+
+========================================
+LXMF Message [verified]
+  From: 4ae19606
+  Content: hello 👋
+========================================
+[825603955][DBG ] TX 211B type=0 ifaces=1
+[825603955][DBG ] TX pre-send: idf_free=2944 largest=1728 data=211B
+[825603955][DBG ] UDP sent 211B
+[825603955][DBG ] TX sent on WiFi UDP
+[825603955][NOTE] Sent opportunistic LXMF message to 4ae19606
+[Echo] Replied to 4ae19606
+[825603956][DBG ] UDP recv 83B from ('192.168.3.192', 64638)
+[825603956][DBG ] Inbound: 83 bytes, flags=0x03
+[825603956][DBG ] Inbound: type=3 dest=6217345784aa570b5a2af43c3662b652
+[825603961][DBG ] TX 181B type=1 ifaces=1
+[825603961][DBG ] TX pre-send: idf_free=2944 largest=1728 data=181B
+[825603961][DBG ] UDP sent 181B
+[825603961][DBG ] TX sent on WiFi UDP
+[825603961][NOTE] LXMF announced as: ESP32 Node
+[Re-announced]
+[825603967][VERB] UDP poll alive, loops=17000 rx=20 rxb=3590 sock=True idf=2944/1728
+[825603975][DBG ] UDP recv 330B from ('192.168.3.192', 63255)
+[825603975][DBG ] Inbound: 330 bytes, flags=0x71
+[825603975][DBG ] Inbound: type=1 dest=21b9f1fce3a001cf44fbecba4f63d12f
+[825603975][DBG ] Inbound: processing announce
+[825603975][DBG ] Announce validate: data=295B ctx_flag=1
+[825603975][DBG ] Announce fields: pubkey=64 name_hash=10 random=10 ratchet=32 sig=64 app=115
+[825603975][DBG ] Announce signed_data=247B dest=21b9f1fc pubkey=34aa7400
+[825603976][VERB] Announce from known dest 21b9f1fc, skip verify
+[825603976][NOTE] Valid announce from 21b9f1fce3a001cf44fbecba4f63d12f
+[825603976][VERB] Announce app_data: b'\x93\xc4\x03RTH\xc0\xc4j\x84\xa3app\xa3rch\xa6schema\x01\xabrch_version\xa7unknown\xa4caps\x95\xactopic_broker\xaagroup_chat\xaftelemetry_relay\xabattachments\xaatak_bridge'
+[825603976][VERB] LXMF peer: RTH [21b9f1fc]
+[Peer] RTH [21b9f1fc]
+[825603987][VERB] UDP poll alive, loops=18000 rx=21 rxb=3920 sock=True idf=2944/1728
+[825603991][DBG ] UDP recv 211B from ('192.168.3.192', 52461)
+[825603991][DBG ] Inbound: 211 bytes, flags=0x00
+[825603991][DBG ] Inbound: type=0 dest=201c701d46d90715d7799ba489d25d3a
+[825603992][DBG ] LXMF delivery_packet: 105B
+[825603992][DBG ] LXMF unpacking: 121B total
+[825603992][NOTE] LXMF message from 4ae19606: cool 😎 
+[825603994][DBG ] TX 83B type=3 ifaces=1
+[825603994][DBG ] TX pre-send: idf_free=2944 largest=1728 data=83B
+[825603994][DBG ] UDP sent 83B
+[825603994][DBG ] TX sent on WiFi UDP
+[825603994][DBG ] Proof sent for 357f1080
+
+========================================
+LXMF Message [verified]
+  From: 4ae19606
+  Content: cool 😎 
+========================================
+[825603998][DBG ] TX 211B type=0 ifaces=1
+[825603998][DBG ] TX pre-send: idf_free=2944 largest=1728 data=211B
+[825603998][DBG ] UDP sent 211B
+[825603998][DBG ] TX sent on WiFi UDP
+[825603998][NOTE] Sent opportunistic LXMF message to 4ae19606
+[Echo] Replied to 4ae19606
+[825603999][DBG ] UDP recv 83B from ('192.168.3.192', 54492)
+[825603999][DBG ] Inbound: 83 bytes, flags=0x03
+[825603999][DBG ] Inbound: type=3 dest=45d5adcb350496855805f1b9a69f7b81
+[825604017][VERB] UDP poll alive, loops=19000 rx=23 rxb=4214 sock=True idf=2944/1728
+[825604035][DBG ] UDP recv 330B from ('192.168.3.192', 63852)
+[825604035][DBG ] Inbound: 330 bytes, flags=0x71
+[825604035][DBG ] Inbound: type=1 dest=21b9f1fce3a001cf44fbecba4f63d12f
+[825604035][DBG ] Inbound: processing announce
+[825604035][DBG ] Announce validate: data=295B ctx_flag=1
+[825604036][DBG ] Announce fields: pubkey=64 name_hash=10 random=10 ratchet=32 sig=64 app=115
+[825604036][DBG ] Announce signed_data=247B dest=21b9f1fc pubkey=34aa7400
+[825604036][VERB] Announce from known dest 21b9f1fc, skip verify
+[825604036][NOTE] Valid announce from 21b9f1fce3a001cf44fbecba4f63d12f
+[825604036][VERB] Announce app_data: b'\x93\xc4\x03RTH\xc0\xc4j\x84\xa3app\xa3rch\xa6schema\x01\xabrch_version\xa7unknown\xa4caps\x95\xactopic_broker\xaagroup_chat\xaftelemetry_relay\xabattachments\xaatak_bridge'
+[825604036][VERB] LXMF peer: RTH [21b9f1fc]
+[Peer] RTH [21b9f1fc]
+[825604037][VERB] UDP poll alive, loops=20000 rx=24 rxb=4544 sock=True idf=2944/1728
+[825604057][VERB] UDP poll alive, loops=21000 rx=24 rxb=4544 sock=True idf=2944/1728
+[825604060][DBG ] UDP recv 371B from ('192.168.3.192', 61243)
+[825604060][DBG ] Inbound: 371 bytes, flags=0x00
+[825604060][DBG ] Inbound: type=0 dest=201c701d46d90715d7799ba489d25d3a
+[825604062][DBG ] LXMF delivery_packet: 267B
+[825604062][DBG ] LXMF unpacking: 283B total
+[825604062][NOTE] LXMF message from 4ae19606: test with a bit longet message, let see how do tou take this when the buffer is a bit longer, woushld you take it or will tou recall what's going to happen yeah yeah hahaha
+[825604064][DBG ] TX 83B type=3 ifaces=1
+[825604064][DBG ] TX pre-send: idf_free=2944 largest=1728 data=83B
+[825604064][DBG ] UDP sent 83B
+[825604064][DBG ] TX sent on WiFi UDP
+[825604064][DBG ] Proof sent for ae87d878
+
+========================================
+LXMF Message [verified]
+  From: 4ae19606
+  Content: test with a bit longet message, let see how do tou take this when the buffer is a bit longer, woushld you take it or will tou recall what's going to happen yeah yeah hahaha
+========================================
+[825604068][DBG ] TX 371B type=0 ifaces=1
+[825604068][DBG ] TX pre-send: idf_free=2924 largest=1728 data=371B
+[825604068][DBG ] UDP sent 371B
+[825604068][DBG ] TX sent on WiFi UDP
+[825604068][NOTE] Sent opportunistic LXMF message to 4ae19606
+[Echo] Replied to 4ae19606
+[825604068][DBG ] UDP recv 83B from ('192.168.3.192', 57851)
+[825604068][DBG ] Inbound: 83 bytes, flags=0x03
+[825604068][DBG ] Inbound: type=3 dest=50520a9be92de9bf80ea6a6a884776bc
+

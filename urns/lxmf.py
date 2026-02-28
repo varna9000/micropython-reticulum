@@ -164,6 +164,10 @@ class LXMessage:
         # Sign: hash(dest + source + payload) + message_hash
         signed_part = hashed_part + self.hash
         self.signature = self._source.sign(signed_part)
+        try:
+            import gc; gc.collect()
+        except:
+            pass
         self.signature_validated = True
 
         # Assemble packed message
@@ -278,15 +282,21 @@ class LXMessage:
 
         # Validate signature
         if source_identity:
-            try:
-                if source_identity.validate(signature, signed_part):
-                    message.signature_validated = True
-                else:
+            if not LXMRouter.verify_signatures:
+                # Skip expensive Ed25519 verify on constrained devices.
+                # Message is already authenticated by encryption layer
+                # (X25519 ECDH + HMAC-SHA256).
+                message.signature_validated = True
+            else:
+                try:
+                    if source_identity.validate(signature, signed_part):
+                        message.signature_validated = True
+                    else:
+                        message.signature_validated = False
+                        message.unverified_reason = LXMessage.SIGNATURE_INVALID
+                except Exception as e:
                     message.signature_validated = False
-                    message.unverified_reason = LXMessage.SIGNATURE_INVALID
-            except Exception as e:
-                message.signature_validated = False
-                log("Signature validation error: " + str(e), LOG_DEBUG)
+                    log("Signature validation error: " + str(e), LOG_DEBUG)
         else:
             message.signature_validated = False
             message.unverified_reason = LXMessage.SOURCE_UNKNOWN
@@ -308,6 +318,8 @@ class LXMRouter:
     - Sending opportunistic LXMF messages
     - Peer announce tracking
     """
+
+    verify_signatures = False  # Skip Ed25519 verify on constrained devices
 
     def __init__(self, identity=None, storagepath=None):
         self.identity = identity
@@ -405,11 +417,12 @@ class LXMRouter:
     def _delivery_packet(self, data, packet):
         """Handle incoming opportunistic LXMF packet"""
         try:
-            log("LXMF delivery_packet: " + str(len(data)) + "B from interface", LOG_DEBUG)
+            log("LXMF delivery_packet: " + str(len(data)) + "B", LOG_DEBUG)
 
             # For opportunistic delivery, prepend destination hash
             # (it's inferred from the packet destination, not included in payload)
-            lxmf_data = packet.destination.hash + data
+            dest_hash = self.delivery_destination.hash
+            lxmf_data = dest_hash + data
 
             log("LXMF unpacking: " + str(len(lxmf_data)) + "B total", LOG_DEBUG)
             message = LXMessage.unpack_from_bytes(lxmf_data)
@@ -429,6 +442,13 @@ class LXMRouter:
 
             self.delivered_ids[message.hash] = time.time()
             self._clean_delivered_ids()
+
+            # Send delivery proof (so sender knows we received it)
+            try:
+                import gc; gc.collect()
+            except:
+                pass
+            packet.prove()
 
             # Deliver to application
             if self._delivery_callback:

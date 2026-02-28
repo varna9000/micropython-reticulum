@@ -26,6 +26,13 @@ class SigningKey:
         self.sk_s = sk_s  # seed+pubkey
         self.vk_s = sk_s[32:]  # just pubkey
 
+        # P0a: Pre-derive key material to avoid SHA-512 + clamping per sign
+        from ..hashes import sha512
+        from .basic import bytes_to_clamped_scalar
+        h = sha512(self.sk_s[:32])
+        self._cached_a = bytes_to_clamped_scalar(h[:32])
+        self._cached_inter = h[32:]
+
     def to_bytes(self):
         return self.sk_s
 
@@ -42,9 +49,11 @@ class SigningKey:
 
     def sign(self, msg):
         assert isinstance(msg, (bytes, bytearray))
-        sig_and_msg = _ed25519.sign(msg, self.sk_s)
-        sig_R = sig_and_msg[0:32]
-        sig_S = sig_and_msg[32:64]
+        # P0a: Use cached key derivation - avoids H(seed) + clamping per sign
+        from . import eddsa
+        sig = eddsa.signature_cached(msg, self._cached_a, self._cached_inter, self.vk_s)
+        sig_R = sig[0:32]
+        sig_S = sig[32:64]
         return sig_R + sig_S
 
 

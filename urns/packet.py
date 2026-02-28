@@ -238,6 +238,10 @@ class Packet:
         """Send a proof (delivery receipt) back to the sender"""
         if self.destination and self.destination.identity and self.destination.identity.prv:
             signature = self.destination.identity.sign(self.packet_hash)
+            try:
+                import gc; gc.collect()
+            except:
+                pass
             # Implicit proof: just the signature
             proof_data = signature
 
@@ -246,6 +250,10 @@ class Packet:
 
             proof = Packet(destination, proof_data, const.PKT_PROOF,
                            attached_interface=self.receiving_interface)
+            try:
+                import gc; gc.collect()
+            except:
+                pass
             proof.send()
             log("Proof sent for " + self.packet_hash.hex()[:8], LOG_DEBUG)
         else:

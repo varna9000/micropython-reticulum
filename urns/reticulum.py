@@ -25,6 +25,14 @@ class Reticulum:
         if loglevel is not None:
             set_loglevel(loglevel)
 
+        # Prevent MicroPython split heap from growing into IDF heap.
+        # 4096 triggers GC sooner, reducing fragmentation-driven IDF expansion.
+        gc.collect()
+        try:
+            gc.threshold(4096)
+        except Exception:
+            pass
+
         Reticulum._instance = self
 
         self.is_connected_to_shared_instance = False
@@ -123,6 +131,7 @@ class Reticulum:
 
     def setup_interfaces(self):
         """Initialize network interfaces from config. Call after WiFi is connected."""
+        gc.collect()
         for iface_config in self.config.get("interfaces", []):
             if not iface_config.get("enabled", True):
                 continue
