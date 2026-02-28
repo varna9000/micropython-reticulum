@@ -2,6 +2,15 @@
 
 A pure MicroPython implementation of the [Reticulum](https://reticulum.network/) network stack for ESP32 microcontrollers.
 
+
+
+![demo](images/image.png "Demo")
+
+
+
+You an check also the [Youtube demo](https://youtu.be/Z38h_L_7n5E?si=eokB7pQE_kPDuqo0)
+
+
 **Wire-compatible with reference Reticulum** — µReticulum nodes appear as standard peers in MeshChat, Sideband, and NomadNet. Full LXMF messaging support: send and receive encrypted, signed messages with delivery receipts.
 
 ## Target Hardware
