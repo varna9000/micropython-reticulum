@@ -1,23 +1,15 @@
 # µReticulum - MicroPython port of the Reticulum Network Stack
-# For Raspberry Pi Pico W (RP2040)
+# For ESP32-S3 / Raspberry Pi Pico W
 
 __version__ = "0.1.0"
 
 from .log import log, LOG_NONE, LOG_CRITICAL, LOG_ERROR, LOG_WARNING
 from .log import LOG_NOTICE, LOG_INFO, LOG_VERBOSE, LOG_DEBUG, LOG_EXTREME
 from . import const
-
 from .identity import Identity
 from .destination import Destination
 from .packet import Packet, PacketReceipt
 from .transport import Transport
-# Pre-import lxmf (and umsgpack) so their bytecode is loaded BEFORE
-# Reticulum.__init__ does heavy crypto (Ed25519/X25519 key derivation).
-# Key derivation creates massive big-integer temporaries that fragment
-# the MicroPython split heap. If lxmf/umsgpack are imported AFTER that
-# fragmentation, their bytecode can't find contiguous space in existing
-# heap segments and claims new IDF blocks — starving lwIP of receive
-# buffer memory. Importing here loads bytecode while heap is compact.
 from . import lxmf
 from .reticulum import Reticulum
 

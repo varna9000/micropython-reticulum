@@ -1,12 +1,25 @@
 # µReticulum
 
-A pure MicroPython implementation of the [Reticulum](https://reticulum.network/) network stack, designed to run on microcontrollers like the ESP32 and Raspberry Pi Pico W.
+A pure MicroPython implementation of the [Reticulum](https://reticulum.network/) network stack for ESP32 microcontrollers.
 
 **Wire-compatible with reference Reticulum** — µReticulum nodes appear as standard peers in MeshChat, Sideband, and NomadNet. Full LXMF messaging support: send and receive encrypted, signed messages with delivery receipts.
 
+## Target Hardware
+
+Developed and tested on the [Waveshare ESP32-S3-Zero](https://www.waveshare.com/wiki/ESP32-S3-Zero) — a compact ($4) board with:
+
+- ESP32-S3 dual-core LX7 @ 240MHz
+- 4MB Flash, 2MB PSRAM, 512KB SRAM
+- 2.4GHz WiFi (802.11 b/g/n) + Bluetooth 5 (LE)
+- Onboard WS2812 NeoPixel LED (GPIO 21)
+- USB-C, castellated pads, 24.8mm x 18mm
+
+Requires MicroPython 1.22+. Should also work on other ESP32-S3 boards and Raspberry Pi Pico W.
+
 ## What Works
 
-- **LXMF Messaging** — Send and receive encrypted messages with MeshChat/Sideband, verify Ed25519 signatures, send delivery proofs (receipts). Messages show as "delivered ✓" in MeshChat. Includes an echo bot example that auto-replies to incoming messages.
+- **LXMF Messaging** — Send and receive encrypted messages with MeshChat/Sideband, verify Ed25519 signatures, send delivery proofs (receipts). Messages show as "delivered" in MeshChat. Includes an echo bot example that auto-replies to incoming messages.
+- **NeoPixel Control via LXMF** — Send color commands (`red`, `green`, `blue`, `off`) from MeshChat to control the onboard LED. Demonstrates using Reticulum as a hardware control channel.
 - **Announce & Discovery** — ESP32 announces itself with an LXMF-compatible display name. Appears in MeshChat's network visualizer. Receives and parses announces from other peers.
 - **Full Crypto Stack** — X25519 key exchange, Ed25519 signatures, AES-128-CBC encryption, HKDF, HMAC-SHA256 — all in pure Python, no C extensions.
 - **Wire Protocol** — Byte-identical packet format to reference Reticulum. Validated bidirectionally against the reference implementation.
@@ -16,15 +29,13 @@ A pure MicroPython implementation of the [Reticulum](https://reticulum.network/)
 
 ## Quick Start
 
-### ESP32 / Pico W (MicroPython)
-
-1. Flash MicroPython to your board
+1. Flash MicroPython to your ESP32-S3-Zero
 2. Copy the `urns/` folder and `example_node.py` to the device
 3. Edit WiFi credentials in `example_node.py`:
    ```python
    WIFI_SSID = "YourNetwork"
    WIFI_PASS = "YourPassword"
-   NODE_NAME = "ESP32 Node"
+   NODE_NAME = "ESP32s3"
    ```
 4. Run:
    ```python
@@ -33,20 +44,24 @@ A pure MicroPython implementation of the [Reticulum](https://reticulum.network/)
 
 The node will connect to WiFi, announce itself, and begin receiving LXMF messages. It auto-replies with an echo of each message received. Open MeshChat on the same LAN and your ESP32 will appear as a peer.
 
-### Desktop (CPython)
+### NeoPixel Control
 
-```bash
-python example_node.py
-```
+The example node controls the onboard WS2812 NeoPixel LED via LXMF messages. Send any of these commands from MeshChat/Sideband:
 
-Runs with the same codebase — useful for testing without hardware.
+| Message | Effect |
+|---------|--------|
+| `red` | LED turns red |
+| `green` | LED turns green |
+| `blue` | LED turns blue |
+| `off` | LED turns off |
+
+Commands are case-insensitive. Any other message is echoed back as a reply. This demonstrates using Reticulum as a control channel for IoT hardware — the same pattern works for relays, sensors, motors, or any GPIO-connected device.
 
 ## Project Structure
 
 ```
 ureticulum/
-├── example_node.py          # Ready-to-run LXMF messaging node
-├── test_crypto.py           # 53 tests covering the full crypto stack
+├── example_node.py          # LXMF messaging node with NeoPixel control
 ├── urns/
 │   ├── __init__.py          # Package entry point
 │   ├── const.py             # Protocol constants (matching reference RNS)
@@ -65,10 +80,10 @@ ureticulum/
 │   └── crypto/
 │       ├── x25519.py        # X25519 ECDH key exchange
 │       ├── ed25519.py       # Ed25519 signing/verification
-│       ├── aes.py           # AES-128-CBC encryption
+│       ├── aes.py           # AES-128/256-CBC encryption (via ucryptolib)
 │       ├── hkdf.py          # HKDF key derivation
 │       ├── hmac.py          # HMAC-SHA256
-│       ├── hashes.py        # SHA-256 (via hardware when available)
+│       ├── hashes.py        # SHA-256 (via uhashlib), SHA-512 (pure Python)
 │       ├── sha512.py        # SHA-512 (pure Python for Ed25519)
 │       ├── pkcs7.py         # PKCS7 padding
 │       ├── token.py         # Fernet-style token encryption
@@ -84,7 +99,7 @@ ureticulum/
 ### Message Flow (MeshChat → ESP32)
 
 ```
-MeshChat                          ESP32 (µReticulum)
+MeshChat                          ESP32-S3 (µReticulum)
    │                                    │
    ├─ LXMF announce ──────────────────► │ Validates Ed25519 signature
    │                                    │ Stores peer identity & display name
@@ -94,15 +109,15 @@ MeshChat                          ESP32 (µReticulum)
    │ network visualizer                 │
    │                                    │
    ├─ Encrypted LXMF message ────────► │ X25519 ECDH decrypt
-   │  (opportunistic, single-packet)    │ Unpack msgpack payload
+   │  (e.g. "green")                    │ Unpack msgpack payload
    │                                    │ Verify Ed25519 signature
-   │                                    │ Display message content
+   │                                    │ Set NeoPixel color / echo reply
    │                                    │
    │ ◄──────────────── Delivery proof ──┤ Sign packet hash with Ed25519
-   │ Shows "delivered ✓"                │ Send PKT_PROOF back
+   │ Shows "delivered"                  │ Send PKT_PROOF back
    │                                    │
    │ ◄────────── Echo reply (LXMF) ────┤ Encrypt + sign reply message
-   │ Receives "Echo: ..."              │ Send via opportunistic delivery
+   │ Receives "Echo: green"            │ Send via opportunistic delivery
    │                                    │
 ```
 
@@ -125,11 +140,11 @@ Announces carry msgpack-encoded app data so peers know the node's display name:
 
 ```python
 # Wire format: msgpack [name_bytes, stamp_cost]
-# Example: [b"ESP32 Node", None]
-b'\x92\xc4\x0aESP32 Node\xc0'
+# Example: [b"ESP32s3", None]
+b'\x92\xc4\x07ESP32s3\xc0'
 ```
 
-## Performance on ESP32
+## Performance on ESP32-S3
 
 | Operation | Time |
 |-----------|------|
@@ -191,14 +206,6 @@ Setting `forward_ip` to `null` enables auto-detection of the subnet broadcast ad
 }
 ```
 
-## Testing
-
-```bash
-python test_crypto.py
-```
-
-Runs 53 tests covering SHA-256, SHA-512, HMAC, HKDF, PKCS7, AES-128-CBC, X25519, Ed25519, Identity, Destination, and Packet. All tests validate against reference Reticulum outputs.
-
 ## Compatibility
 
 Tested and confirmed working with:
@@ -207,24 +214,20 @@ Tested and confirmed working with:
 - **Reference Reticulum** (Python) — Wire-compatible packets, announces, encryption
 - **Reference LXMF** — Cross-validated message packing/unpacking, signature verification
 
-Runs on:
-
-- ESP32 (MicroPython 1.22+)
-- Raspberry Pi Pico W (MicroPython)
-- Desktop CPython 3.8+ (for development/testing)
-
 ## ESP32 Socket Workarounds
 
 The UDP interface includes several workarounds for ESP32 MicroPython lwIP quirks:
 
-- **Separate TX/RX sockets** — Using `sendto()` on a socket registered with `select.poll()` breaks `POLLIN` on ESP32. The TX socket is dedicated to sending and never polled.
-- **No `select.poll()`** — `poll(0)` (non-blocking) does not reliably detect incoming UDP data on ESP32. The poll loop uses direct non-blocking `recvfrom()` with `except OSError` instead, matching the pattern used by the serial interface.
-- **`setblocking(False)` re-assertion after TX** — Broadcasting via the TX socket on the same port the RX socket is bound to corrupts the RX socket's non-blocking state in lwIP. After every `sendto()`, the RX socket's non-blocking flag is explicitly re-set. Without this, `recvfrom()` silently switches to blocking mode after the first proof/packet send, freezing the entire async event loop.
-- **RX socket watchdog** — If the interface previously received traffic but hasn't for 120 seconds, the RX socket is closed and recreated. This catches any remaining socket corruption scenarios.
-- **WiFi power management disabled** — `wlan.config(pm=0)` is required to receive broadcast UDP packets on ESP32.
+- **Single TX/RX socket** — saves ~280 bytes IDF heap vs two sockets
+- **`settimeout(0)` re-asserted after every `sendto()`** — ESP32 lwIP bug: `sendto()` corrupts the socket's non-blocking state. Without this, `recvfrom()` silently blocks after the first send, freezing the async event loop.
+- **No `select.poll()`** — `poll(0)` doesn't reliably detect incoming UDP on ESP32 lwIP. Uses direct non-blocking `recvfrom()` + `except OSError` instead.
+- **RX socket watchdog** — If the interface previously received traffic but hasn't for 60 seconds, the socket is closed and recreated.
+- **WiFi power management disabled** — `wlan.config(pm=0)` is required to receive broadcast UDP packets.
+- **AP_IF deactivated** — dual-interface mode routes broadcast packets to AP instead of STA, preventing UDP broadcast reception.
 
 ## Limitations
 
+- **MicroPython only** — no CPython/desktop support. Uses `uhashlib`, `ucryptolib`, `uasyncio`, `micropython.const` directly.
 - **Opportunistic delivery only** — Single-packet messages up to ~295 bytes content. Link-based delivery (for larger messages) is not yet implemented.
 - **No propagation nodes** — Cannot store-and-forward messages for offline peers.
 - **No transport nodes** — Cannot relay packets between interfaces (single-interface only).
@@ -237,8 +240,8 @@ Potential areas for expansion:
 - **Viper-accelerated crypto** — `@micropython.viper` native compilation for field arithmetic could bring X25519 from ~1.4s to ~0.2s
 - **Link-based delivery** — Support for messages larger than a single packet
 - **RNode integration** — Test with LoRa radio over serial interface
-- **Multi-interface routing** — Bridge WiFi ↔ Serial for mesh relay
-- **Pico W support** — Verify and tune for RP2040
+- **Multi-interface routing** — Bridge WiFi <-> Serial for mesh relay
+- **More hardware control** — Expand NeoPixel example to sensors, relays, displays
 - **Propagation node** — Store-and-forward for offline peers
 
 ## License

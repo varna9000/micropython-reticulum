@@ -37,8 +37,5 @@ def set_loglevel(level):
 
 
 def trace_exception(e):
-    try:
-        import sys
-        sys.print_exception(e)
-    except:
-        log("Exception: " + str(e), LOG_ERROR)
+    import sys
+    sys.print_exception(e)

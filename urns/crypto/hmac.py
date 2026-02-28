@@ -16,21 +16,10 @@ class HMAC:
             raise TypeError("key: expected bytes or bytearray")
 
         if digestmod is None:
-            # Default to SHA-256 via uhashlib or hashlib
-            try:
-                import hashlib
-                digestmod = hashlib.sha256
-            except ImportError:
-                from uhashlib import sha256
-                digestmod = sha256
+            from uhashlib import sha256
+            digestmod = sha256
 
-        if callable(digestmod):
-            self._digest_cons = digestmod
-        elif isinstance(digestmod, str):
-            import hashlib
-            self._digest_cons = lambda d=b'': hashlib.new(digestmod, d)
-        else:
-            self._digest_cons = lambda d=b'': digestmod.new(d)
+        self._digest_cons = digestmod
 
         inner = self._digest_cons()
         self.digest_size = inner.digest_size if hasattr(inner, 'digest_size') else 32
@@ -80,20 +69,10 @@ def new(key, msg=None, digestmod=None):
 
 def digest(key, msg, digest_func):
     if digest_func is None:
-        try:
-            import hashlib
-            digest_func = hashlib.sha256
-        except ImportError:
-            from uhashlib import sha256
-            digest_func = sha256
+        from uhashlib import sha256
+        digest_func = sha256
 
-    if callable(digest_func):
-        digest_cons = digest_func
-    elif isinstance(digest_func, str):
-        import hashlib
-        digest_cons = lambda d=b'': hashlib.new(digest_func, d)
-    else:
-        digest_cons = lambda d=b'': digest_func.new(d)
+    digest_cons = digest_func
 
     inner = digest_cons()
     outer = digest_cons()

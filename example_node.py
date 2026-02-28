@@ -7,38 +7,34 @@ Usage (MicroPython on ESP32/Pico W):
   1. Update WIFI_SSID and WIFI_PASS below
   2. Copy the urns/ folder and this file to the device
   3. Run with: import example_node
-
-Usage (Desktop CPython):
-  python example_node.py
 """
 
 # ---- Configuration ----
-WIFI_SSID = "YourNetworkName"
-WIFI_PASS = "YourPassword"
-NODE_NAME = "ESP32 Node"
+WIFI_SSID = "AP"
+WIFI_PASS = "pass"
+NODE_NAME = "ESP32s3"
 # DEBUG levels:
 #   0 = silent (no console output)
 #   1 = messages & announces only
 #   2 = full debug logging
-DEBUG = 1
+DEBUG = 2
 # ------------------------
 
 import gc
 gc.collect()
-# Prevent MicroPython split heap from growing into IDF heap.
-# Without a threshold, GC only runs when heap is full — by then,
-# new IDF heap blocks have been claimed and are never returned.
-# 4096 triggers GC sooner during imports/LXMF processing, reducing
-# fragmentation-driven IDF expansion.
-gc.threshold(4096)
 
+from machine import Pin
+import neopixel
+
+led = neopixel.NeoPixel(Pin(21),1)
+colors={"green":(255,0,0),
+        "red":(0,255,0),
+        "blue":(0,0,255),
+        "off":(0,0,0)}
 
 async def send_echo_reply(router, source_hash, content):
     """Send echo reply as async task (crypto takes ~7s, must not block poll loop)."""
-    try:
-        import uasyncio as asyncio
-    except ImportError:
-        import asyncio
+    import uasyncio as asyncio
 
     # Yield so the poll loop can resume immediately
     await asyncio.sleep(0)
@@ -86,19 +82,22 @@ def connect_wifi(ssid, password, timeout=15):
 
 
 def setup_node(rns, node_name):
-    # NO intermediate gc.collect() — frequent GC creates fragmented holes in
-    # split-heap segments that can't be reused, forcing new IDF allocations.
-    # One gc.collect() at the end packs objects more densely.
     from urns.lxmf import LXMRouter
     router = LXMRouter(identity=rns.identity)
     dest = router.register_delivery_identity(rns.identity, display_name=node_name)
 
     # Incoming LXMF message handler (proof is sent automatically by LXMRouter)
     def on_message(message):
+        import uasyncio as asyncio
+
         verified = "verified" if message.signature_validated else "UNVERIFIED"
         sender = message.source_hash.hex()[:8]
         content = message.content_as_string() or "(binary)"
 
+        if content.lower() in colors.keys():
+            led[0]=colors[content.lower()]
+            led.write()
+            
         if DEBUG >= 1:
             print()
             print("=" * 40)
@@ -111,10 +110,6 @@ def setup_node(rns, node_name):
             print("=" * 40)
 
         # Queue async echo reply (non-blocking)
-        try:
-            import uasyncio as asyncio
-        except ImportError:
-            import asyncio
         asyncio.create_task(send_echo_reply(router, message.source_hash, content))
         gc.collect()
 
@@ -137,62 +132,26 @@ def main():
     ip = connect_wifi(WIFI_SSID, WIFI_PASS)
     gc.collect()
 
-    # Log IDF heap baseline before any crypto imports
-    try:
-        import esp32
-        print("IDF heap after WiFi:", esp32.idf_heap_info(esp32.HEAP_DATA))
-    except:
-        pass
-
     from urns import Reticulum
     from urns.log import LOG_NONE, LOG_NOTICE, LOG_DEBUG
 
     log_map = {0: LOG_NONE, 1: LOG_NONE, 2: LOG_DEBUG}
     rns = Reticulum(loglevel=log_map.get(DEBUG, LOG_NOTICE))
 
-    # Log IDF heap after identity load + crypto imports
-    try:
-        print("IDF heap after init:", esp32.idf_heap_info(esp32.HEAP_DATA))
-    except:
-        pass
-
-    # Setup LXMF BEFORE interfaces — this import + object creation consumes
-    # ~33K of IDF through split-heap expansion. Sockets must be created AFTER
-    # all Python imports are done, so lwIP has accurate IDF headroom.
     dest, router = setup_node(rns, NODE_NAME)
     gc.collect()
 
-    try:
-        print("IDF after setup_node:", esp32.idf_heap_info(esp32.HEAP_DATA))
-    except:
-        pass
-
     rns.setup_interfaces()
     gc.collect()
-
-    # All imports done, IDF protected by pre-imports in urns/__init__.py.
-    # Disable the aggressive 4KB GC threshold — it causes ~252 GC calls
-    # per Ed25519 verify (~5s overhead). Runtime crypto uses explicit
-    # gc.collect() in scalarmult_element every 16 iterations instead.
-    gc.threshold(-1)
-
-    # Switch crypto to fast GC mode now that sockets are allocated.
-    # Boot uses aggressive GC (mask=1, every 2 iters) to prevent IDF
-    # heap expansion. Runtime uses relaxed GC saving ~4s per message.
-    import urns.crypto.x25519 as _x25519
-    _x25519._gc_mask = 7   # X25519: every 8 iters (was every 2)
-    import urns.crypto.pure25519.basic as _ed
-    _ed._gc_mask = 15       # Ed25519: every 16 iters (was every 2)
 
     if DEBUG >= 1:
         print("LXMF address:", dest.hexhash)
         print("Free memory:", gc.mem_free(), "bytes")
         print("Running... (Ctrl+C to stop)")
 
-    # Deferred initial announce — runs AFTER poll loop starts so RX sockets
-    # are active before Ed25519 signing consumes IDF heap.
+    # Deferred initial announce — runs AFTER poll loop starts
     async def initial_announce():
-        await asyncio.sleep(0.5)  # Let poll loop start first
+        await asyncio.sleep(0.5)
         try:
             router.announce()
             if DEBUG >= 1:
@@ -231,52 +190,5 @@ def main():
             print("Shutdown complete")
 
 
-def main_desktop():
-    """Run on desktop CPython for testing (no WiFi needed)"""
-    import asyncio
-    import os
+main()
 
-    storagedir = "/tmp/urns"
-    try:
-        os.makedirs(storagedir, exist_ok=True)
-    except Exception:
-        pass
-
-    from urns import Reticulum
-    from urns.log import LOG_NONE, LOG_NOTICE, LOG_DEBUG
-
-    log_map = {0: LOG_NONE, 1: LOG_NONE, 2: LOG_DEBUG}
-    rns = Reticulum(config_path=storagedir + "/config.json", loglevel=log_map.get(DEBUG, LOG_NOTICE))
-    rns.setup_interfaces()
-
-    dest, router = setup_node(rns, "Desktop uRNS Node")
-    router.announce()
-
-    if DEBUG >= 1:
-        print("Running...")
-    try:
-        import threading, time as _time
-
-        def reannounce():
-            while True:
-                _time.sleep(120)
-                try:
-                    router.announce()
-                    if DEBUG >= 2:
-                        print("[Re-announced]")
-                except Exception as e:
-                    if DEBUG >= 2:
-                        print("Re-announce error:", e)
-
-        threading.Thread(target=reannounce, daemon=True).start()
-        asyncio.run(rns.run())
-    except KeyboardInterrupt:
-        rns.shutdown()
-
-
-if __name__ == "__main__":
-    import sys
-    if hasattr(sys.implementation, 'name') and sys.implementation.name == 'micropython':
-        main()
-    else:
-        main_desktop()

@@ -175,15 +175,9 @@ class Transport:
     @staticmethod
     def _handle_announce(packet):
         from .identity import Identity
-        try:
-            import gc; gc.collect()
-        except:
-            pass
+        import gc; gc.collect()
         valid = Identity.validate_announce(packet)
-        try:
-            import gc; gc.collect()
-        except:
-            pass
+        gc.collect()
         if valid:
             log("Valid announce from " + packet.destination_hash.hex(), LOG_NOTICE)
             app_data = Identity.recall_app_data(packet.destination_hash)
@@ -211,10 +205,7 @@ class Transport:
 
     @staticmethod
     def _handle_data(packet):
-        try:
-            import gc; gc.collect()
-        except:
-            pass
+        import gc; gc.collect()
         for dest in Transport.destinations:
             if dest.hash == packet.destination_hash:
                 dest.receive(packet)
@@ -280,8 +271,5 @@ class Transport:
             except Exception as e:
                 log("Transport job error: " + str(e), LOG_ERROR)
 
-            try:
-                import uasyncio as asyncio
-            except ImportError:
-                import asyncio
+            import uasyncio as asyncio
             await asyncio.sleep(0.25)

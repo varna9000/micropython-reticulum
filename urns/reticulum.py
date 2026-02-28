@@ -25,14 +25,7 @@ class Reticulum:
         if loglevel is not None:
             set_loglevel(loglevel)
 
-        # Prevent MicroPython split heap from growing into IDF heap.
-        # 4096 triggers GC sooner, reducing fragmentation-driven IDF expansion.
         gc.collect()
-        try:
-            gc.threshold(4096)
-        except Exception:
-            pass
-
         Reticulum._instance = self
 
         self.is_connected_to_shared_instance = False
@@ -64,10 +57,7 @@ class Reticulum:
 
         log("µReticulum v0.1.0 started", LOG_NOTICE)
         log("Identity: " + self.identity.hexhash, LOG_INFO)
-        try:
-            log("Free memory: " + str(gc.mem_free()) + " bytes", LOG_VERBOSE)
-        except AttributeError:
-            pass
+        log("Free memory: " + str(gc.mem_free()) + " bytes", LOG_VERBOSE)
 
     def _load_or_create_identity(self):
         identity_path = self.storagepath + "/identity"
@@ -131,7 +121,6 @@ class Reticulum:
 
     def setup_interfaces(self):
         """Initialize network interfaces from config. Call after WiFi is connected."""
-        gc.collect()
         for iface_config in self.config.get("interfaces", []):
             if not iface_config.get("enabled", True):
                 continue
@@ -150,14 +139,11 @@ class Reticulum:
                 else:
                     log("Unknown interface type: " + itype, LOG_ERROR)
             except Exception as e:
-                log("Failed to init interface " + itype + ": " + str(e), LOG_ERROR)
+                log("Interface " + itype + " init failed: " + str(e), LOG_ERROR)
 
     async def run(self):
         """Main async event loop. Run with asyncio.run(reticulum.run())"""
-        try:
-            import uasyncio as asyncio
-        except ImportError:
-            import asyncio
+        import uasyncio as asyncio
 
         tasks = [
             asyncio.create_task(Transport.job_loop()),

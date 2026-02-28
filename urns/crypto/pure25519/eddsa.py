@@ -24,17 +24,14 @@ def Hint(m):
 def signature(m, sk, pk):
     assert len(sk) == 32
     assert len(pk) == 32
-    try:
-        import gc; _gc = gc.collect
-    except:
-        _gc = None
-    if _gc: _gc()
+    import gc
+    gc.collect()
     h = H(sk[:32])
     a_bytes, inter = h[:32], h[32:]
     a = bytes_to_clamped_scalar(a_bytes)
     r = Hint(inter + m)
     R = scalarmult_base_comb(r)
-    if _gc: _gc()
+    gc.collect()
     R_bytes = R.to_bytes()
     S = r + Hint(R_bytes + pk + m) * a
     return R_bytes + scalar_to_bytes(S)
@@ -48,14 +45,11 @@ def signature_cached(m, a, inter, pk):
         inter: pre-derived nonce material (H(seed)[32:])
         pk: pre-computed public key bytes
     """
-    try:
-        import gc; _gc = gc.collect
-    except:
-        _gc = None
-    if _gc: _gc()
+    import gc
+    gc.collect()
     r = Hint(inter + m)
     R = scalarmult_base_comb(r)
-    if _gc: _gc()
+    gc.collect()
     R_bytes = R.to_bytes()
     S = r + Hint(R_bytes + pk + m) * a
     return R_bytes + scalar_to_bytes(S)
@@ -65,17 +59,14 @@ def checkvalid(s, m, pk):
         raise Exception("signature length is wrong")
     if len(pk) != 32:
         raise Exception("public-key length is wrong")
-    try:
-        import gc; _gc = gc.collect
-    except:
-        _gc = None
-    if _gc: _gc()
+    import gc
+    gc.collect()
     R = bytes_to_element_unchecked(s[:32])
     A = bytes_to_element_unchecked(pk)
     S = bytes_to_scalar(s[32:])
     h = Hint(s[:32] + pk + m)
     v1 = scalarmult_base_comb(S)
-    if _gc: _gc()
+    gc.collect()
     v2 = R.add(A.scalarmult(h))
     return v1 == v2
 

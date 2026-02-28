@@ -10,9 +10,8 @@ _A = 486662
 _a24 = (_A - 2) >> 2  # = 121665 per RFC 7748
 
 # GC frequency mask for Montgomery ladder.
-# 1 = every 2 iters (slow, safe for boot — prevents IDF heap expansion)
-# 7 = every 8 iters (fast, for runtime after sockets are allocated)
-_gc_mask = 1
+# Lower = more frequent gc.collect() = slower but less memory pressure.
+_gc_mask = 7
 
 
 def _point_add(point_n, point_m, point_diff):
@@ -54,11 +53,8 @@ def _raw_curve25519(base, n):
     z_3 = 1
     swap = 0
 
-    try:
-        import gc
-        _gc = gc.collect
-    except:
-        _gc = None
+    import gc
+    _gc = gc.collect
 
     for t in reversed(range(255)):
         k_t = (n >> t) & 1
@@ -83,7 +79,7 @@ def _raw_curve25519(base, n):
         x_2 = (AA * BB) % P
         z_2 = (E * (AA + _a24 * E)) % P
 
-        if _gc and t & _gc_mask == 0:
+        if t & _gc_mask == 0:
             _gc()
 
     # Final conditional swap

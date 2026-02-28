@@ -1,6 +1,5 @@
 # µReticulum Serial Interface
 # HDLC-framed serial communication, wire-compatible with RNS SerialInterface
-# Works on MicroPython (machine.UART) and CPython (pyserial)
 
 import time
 from . import Interface
@@ -35,7 +34,6 @@ class SerialInterface(Interface):
         name = config.get("name", "Serial")
         super().__init__(name)
 
-        self.port = config.get("port", None)
         self.speed = config.get("speed", 115200)
         self.databits = config.get("databits", 8)
         self.parity = config.get("parity", None)
@@ -60,62 +58,21 @@ class SerialInterface(Interface):
         self._open_port()
 
     def _open_port(self):
-        """Open serial port - auto-detects MicroPython vs CPython"""
-        try:
-            # Try MicroPython first
-            from machine import UART, Pin
-            self._backend = "micropython"
+        """Open serial port via MicroPython machine.UART"""
+        from machine import UART, Pin
 
-            kwargs = {"baudrate": self.speed}
+        kwargs = {"baudrate": self.speed}
 
-            if self.tx_pin is not None and self.rx_pin is not None:
-                kwargs["tx"] = Pin(self.tx_pin)
-                kwargs["rx"] = Pin(self.rx_pin)
+        if self.tx_pin is not None and self.rx_pin is not None:
+            kwargs["tx"] = Pin(self.tx_pin)
+            kwargs["rx"] = Pin(self.rx_pin)
 
-            kwargs["txbuf"] = 1024
-            kwargs["rxbuf"] = 1024
+        kwargs["txbuf"] = 1024
+        kwargs["rxbuf"] = 1024
 
-            self._uart = UART(self.uart_id, **kwargs)
-            self.online = True
-            log("Serial port UART" + str(self.uart_id) + " opened at " + str(self.speed) + " baud", LOG_NOTICE)
-
-        except ImportError:
-            # CPython with pyserial
-            try:
-                import serial
-                self._backend = "cpython"
-
-                if self.port is None:
-                    raise ValueError("No port specified for serial interface")
-
-                parity_map = {
-                    None: serial.PARITY_NONE,
-                    "none": serial.PARITY_NONE,
-                    "N": serial.PARITY_NONE,
-                    "even": serial.PARITY_EVEN,
-                    "E": serial.PARITY_EVEN,
-                    "odd": serial.PARITY_ODD,
-                    "O": serial.PARITY_ODD,
-                }
-                parity = parity_map.get(self.parity, serial.PARITY_NONE)
-
-                self._uart = serial.Serial(
-                    port=self.port,
-                    baudrate=self.speed,
-                    bytesize=self.databits,
-                    parity=parity,
-                    stopbits=self.stopbits,
-                    xonxoff=False,
-                    rtscts=False,
-                    timeout=0,
-                    write_timeout=None,
-                    dsrdtr=False,
-                )
-                self.online = self._uart.is_open
-                log("Serial port " + self.port + " opened at " + str(self.speed) + " baud", LOG_NOTICE)
-
-            except ImportError:
-                raise RuntimeError("No serial backend available (need machine.UART or pyserial)")
+        self._uart = UART(self.uart_id, **kwargs)
+        self.online = True
+        log("Serial port UART" + str(self.uart_id) + " opened at " + str(self.speed) + " baud", LOG_NOTICE)
 
     def process_outgoing(self, data):
         """Send HDLC-framed data"""
@@ -158,29 +115,17 @@ class SerialInterface(Interface):
 
     def _read_available(self):
         """Read and process all available bytes"""
-        if self._backend == "micropython":
-            while self._uart.any():
-                chunk = self._uart.read(self._uart.any())
-                if chunk:
-                    self._last_read_ms = time.ticks_ms()
-                    for b in chunk:
-                        self._process_byte(b)
-        else:
-            # CPython pyserial
-            if self._uart.in_waiting:
-                chunk = self._uart.read(self._uart.in_waiting)
-                if chunk:
-                    self._last_read_ms = int(time.time() * 1000)
-                    for b in chunk:
-                        self._process_byte(b)
+        while self._uart.any():
+            chunk = self._uart.read(self._uart.any())
+            if chunk:
+                self._last_read_ms = time.ticks_ms()
+                for b in chunk:
+                    self._process_byte(b)
 
     def _check_timeout(self):
         """Clear stale buffer on timeout"""
         if len(self._buffer) > 0:
-            if self._backend == "micropython":
-                elapsed = time.ticks_diff(time.ticks_ms(), self._last_read_ms)
-            else:
-                elapsed = int(time.time() * 1000) - self._last_read_ms
+            elapsed = time.ticks_diff(time.ticks_ms(), self._last_read_ms)
 
             if elapsed > self.timeout:
                 self._buffer = bytearray()
@@ -189,10 +134,7 @@ class SerialInterface(Interface):
 
     async def poll_loop(self):
         """Async poll loop for incoming serial data"""
-        try:
-            import uasyncio as asyncio
-        except ImportError:
-            import asyncio
+        import uasyncio as asyncio
 
         log("Serial poll loop started for " + self.name, LOG_VERBOSE)
 
@@ -211,10 +153,7 @@ class SerialInterface(Interface):
         super().close()
         if self._uart:
             try:
-                if self._backend == "cpython":
-                    self._uart.close()
-                else:
-                    self._uart.deinit()
+                self._uart.deinit()
             except:
                 pass
             self._uart = None

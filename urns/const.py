@@ -1,10 +1,7 @@
 # µReticulum Protocol Constants
 # No internal imports - this module is the dependency root
 
-try:
-    from micropython import const
-except ImportError:
-    const = lambda x: x  # no-op on CPython
+from micropython import const
 
 # Protocol MTU and sizes
 MTU                   = const(500)
