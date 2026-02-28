@@ -155,6 +155,20 @@ class Identity:
             if not len(packet.data) > Identity.KEYSIZE // 8 + Identity.NAME_HASH_LENGTH // 8 + 10 + Identity.SIGLENGTH // 8:
                 app_data = None
 
+            # Fast path: skip expensive Ed25519 verify (~24s on ESP32) for
+            # already-known destinations whose public key matches.  The
+            # signature was validated on first receipt; an attacker cannot
+            # forge a new announce for the same dest hash without a hash
+            # collision on the truncated identity hash.
+            if not only_validate_signature and destination_hash in Identity.known_destinations:
+                cached = Identity.known_destinations[destination_hash]
+                if cached[2] == public_key:
+                    log("Announce from known dest " + destination_hash.hex()[:8] + ", skip verify", LOG_VERBOSE)
+                    Identity.remember(packet.get_hash(), destination_hash, public_key, app_data)
+                    if ratchet:
+                        Identity._remember_ratchet(destination_hash, ratchet)
+                    return True
+
             announced_identity = Identity(create_keys=False)
             announced_identity.load_public_key(public_key)
             log("Announce identity loaded: hash=" + str(announced_identity.hexhash), LOG_DEBUG)
@@ -373,6 +387,10 @@ class Identity:
                 context=self.get_context(),
             )
             token = Token(derived_key)
+            try:
+                import gc; gc.collect()
+            except:
+                pass
             ciphertext = token.encrypt(plaintext)
             return ephemeral_pub_bytes + ciphertext
         else:

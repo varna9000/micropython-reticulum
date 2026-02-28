@@ -250,6 +250,10 @@ class Packet:
 
             proof = Packet(destination, proof_data, const.PKT_PROOF,
                            attached_interface=self.receiving_interface)
+            try:
+                import gc; gc.collect()
+            except:
+                pass
             proof.send()
             log("Proof sent for " + self.packet_hash.hex()[:8], LOG_DEBUG)
         else:

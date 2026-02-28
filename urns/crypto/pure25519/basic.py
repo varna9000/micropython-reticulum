@@ -4,6 +4,11 @@
 Q = 2**255 - 19
 L = 2**252 + 27742317777372353535851937790883648493
 
+# GC frequency mask for scalarmult loop.
+# 1 = every 2 iters (slow, safe for boot — prevents IDF heap expansion)
+# 15 = every 16 iters (fast, for runtime after sockets are allocated)
+_gc_mask = 1
+
 def inv(x):
     return pow(x, Q - 2, Q)
 
@@ -151,7 +156,7 @@ def scalarmult_element(pt, n):
         addend, tmp = tmp, addend                  # swap refs, no alloc
         n >>= 1
         _i += 1
-        if _gc and _i & 1 == 0:
+        if _gc and _i & _gc_mask == 0:
             _gc()
     return (result[0], result[1], result[2], result[3])
 

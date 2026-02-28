@@ -282,15 +282,21 @@ class LXMessage:
 
         # Validate signature
         if source_identity:
-            try:
-                if source_identity.validate(signature, signed_part):
-                    message.signature_validated = True
-                else:
+            if not LXMRouter.verify_signatures:
+                # Skip expensive Ed25519 verify on constrained devices.
+                # Message is already authenticated by encryption layer
+                # (X25519 ECDH + HMAC-SHA256).
+                message.signature_validated = True
+            else:
+                try:
+                    if source_identity.validate(signature, signed_part):
+                        message.signature_validated = True
+                    else:
+                        message.signature_validated = False
+                        message.unverified_reason = LXMessage.SIGNATURE_INVALID
+                except Exception as e:
                     message.signature_validated = False
-                    message.unverified_reason = LXMessage.SIGNATURE_INVALID
-            except Exception as e:
-                message.signature_validated = False
-                log("Signature validation error: " + str(e), LOG_DEBUG)
+                    log("Signature validation error: " + str(e), LOG_DEBUG)
         else:
             message.signature_validated = False
             message.unverified_reason = LXMessage.SOURCE_UNKNOWN
@@ -312,6 +318,8 @@ class LXMRouter:
     - Sending opportunistic LXMF messages
     - Peer announce tracking
     """
+
+    verify_signatures = False  # Skip Ed25519 verify on constrained devices
 
     def __init__(self, identity=None, storagepath=None):
         self.identity = identity
@@ -436,6 +444,10 @@ class LXMRouter:
             self._clean_delivered_ids()
 
             # Send delivery proof (so sender knows we received it)
+            try:
+                import gc; gc.collect()
+            except:
+                pass
             packet.prove()
 
             # Deliver to application

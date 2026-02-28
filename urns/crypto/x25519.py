@@ -4,11 +4,15 @@
 # Adapted for MicroPython timing
 
 import os
-import time
 
 P = 2**255 - 19
 _A = 486662
 _a24 = (_A - 2) >> 2  # = 121665 per RFC 7748
+
+# GC frequency mask for Montgomery ladder.
+# 1 = every 2 iters (slow, safe for boot — prevents IDF heap expansion)
+# 7 = every 8 iters (fast, for runtime after sockets are allocated)
+_gc_mask = 1
 
 
 def _point_add(point_n, point_m, point_diff):
@@ -79,7 +83,7 @@ def _raw_curve25519(base, n):
         x_2 = (AA * BB) % P
         z_2 = (E * (AA + _a24 * E)) % P
 
-        if _gc and t & 1 == 0:
+        if _gc and t & _gc_mask == 0:
             _gc()
 
     # Final conditional swap
@@ -136,14 +140,6 @@ class X25519PublicKey:
 
 
 class X25519PrivateKey:
-    # Timing constants (milliseconds for MicroPython)
-    MIN_EXEC_TIME = 2     # ms
-    MAX_EXEC_TIME = 500   # ms
-    DELAY_WINDOW = 10000  # ms
-
-    T_CLEAR = None
-    T_MAX = 0
-
     def __init__(self, a):
         self.a = a
 
@@ -165,47 +161,4 @@ class X25519PrivateKey:
         if isinstance(peer_public_key, bytes):
             peer_public_key = X25519PublicKey.from_public_bytes(peer_public_key)
 
-        # Use ticks_ms for MicroPython compatibility
-        try:
-            start = time.ticks_ms()
-            _use_ticks = True
-        except AttributeError:
-            start = int(time.time() * 1000)
-            _use_ticks = False
-
-        shared = _pack_number(_raw_curve25519(peer_public_key.x, self.a))
-
-        if _use_ticks:
-            end = time.ticks_ms()
-            duration = time.ticks_diff(end, start)
-        else:
-            end = int(time.time() * 1000)
-            duration = end - start
-
-        if X25519PrivateKey.T_CLEAR is None:
-            X25519PrivateKey.T_CLEAR = end + X25519PrivateKey.DELAY_WINDOW
-
-        if _use_ticks:
-            if time.ticks_diff(end, X25519PrivateKey.T_CLEAR) > 0:
-                X25519PrivateKey.T_CLEAR = end + X25519PrivateKey.DELAY_WINDOW
-                X25519PrivateKey.T_MAX = 0
-        else:
-            if end > X25519PrivateKey.T_CLEAR:
-                X25519PrivateKey.T_CLEAR = end + X25519PrivateKey.DELAY_WINDOW
-                X25519PrivateKey.T_MAX = 0
-
-        if duration < X25519PrivateKey.T_MAX or duration < X25519PrivateKey.MIN_EXEC_TIME:
-            target_duration = X25519PrivateKey.T_MAX
-            if target_duration > X25519PrivateKey.MAX_EXEC_TIME:
-                target_duration = X25519PrivateKey.MAX_EXEC_TIME
-            if target_duration < X25519PrivateKey.MIN_EXEC_TIME:
-                target_duration = X25519PrivateKey.MIN_EXEC_TIME
-
-            remaining = target_duration - duration
-            if remaining > 0:
-                time.sleep_ms(remaining) if hasattr(time, 'sleep_ms') else time.sleep(remaining / 1000)
-
-        elif duration > X25519PrivateKey.T_MAX:
-            X25519PrivateKey.T_MAX = duration
-
-        return shared
+        return _pack_number(_raw_curve25519(peer_public_key.x, self.a))

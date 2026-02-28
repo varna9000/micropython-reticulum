@@ -170,6 +170,20 @@ def main():
     rns.setup_interfaces()
     gc.collect()
 
+    # All imports done, IDF protected by pre-imports in urns/__init__.py.
+    # Disable the aggressive 4KB GC threshold — it causes ~252 GC calls
+    # per Ed25519 verify (~5s overhead). Runtime crypto uses explicit
+    # gc.collect() in scalarmult_element every 16 iterations instead.
+    gc.threshold(-1)
+
+    # Switch crypto to fast GC mode now that sockets are allocated.
+    # Boot uses aggressive GC (mask=1, every 2 iters) to prevent IDF
+    # heap expansion. Runtime uses relaxed GC saving ~4s per message.
+    import urns.crypto.x25519 as _x25519
+    _x25519._gc_mask = 7   # X25519: every 8 iters (was every 2)
+    import urns.crypto.pure25519.basic as _ed
+    _ed._gc_mask = 15       # Ed25519: every 16 iters (was every 2)
+
     if DEBUG >= 1:
         print("LXMF address:", dest.hexhash)
         print("Free memory:", gc.mem_free(), "bytes")
