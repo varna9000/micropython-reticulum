@@ -6,7 +6,7 @@ A pure MicroPython implementation of the [Reticulum](https://reticulum.network/)
 
 ## What Works
 
-- **LXMF Messaging** — Receive and decrypt messages from MeshChat/Sideband, verify Ed25519 signatures, send delivery proofs (receipts). Messages show as "delivered ✓" in MeshChat.
+- **LXMF Messaging** — Send and receive encrypted messages with MeshChat/Sideband, verify Ed25519 signatures, send delivery proofs (receipts). Messages show as "delivered ✓" in MeshChat. Includes an echo bot example that auto-replies to incoming messages.
 - **Announce & Discovery** — ESP32 announces itself with an LXMF-compatible display name. Appears in MeshChat's network visualizer. Receives and parses announces from other peers.
 - **Full Crypto Stack** — X25519 key exchange, Ed25519 signatures, AES-128-CBC encryption, HKDF, HMAC-SHA256 — all in pure Python, no C extensions.
 - **Wire Protocol** — Byte-identical packet format to reference Reticulum. Validated bidirectionally against the reference implementation.
@@ -31,7 +31,7 @@ A pure MicroPython implementation of the [Reticulum](https://reticulum.network/)
    import example_node
    ```
 
-The node will connect to WiFi, announce itself, and begin receiving LXMF messages. Open MeshChat on the same LAN and your ESP32 will appear as a peer.
+The node will connect to WiFi, announce itself, and begin receiving LXMF messages. It auto-replies with an echo of each message received. Open MeshChat on the same LAN and your ESP32 will appear as a peer.
 
 ### Desktop (CPython)
 
@@ -89,7 +89,7 @@ MeshChat                          ESP32 (µReticulum)
    ├─ LXMF announce ──────────────────► │ Validates Ed25519 signature
    │                                    │ Stores peer identity & display name
    │                                    │
-   │ ◄────────────────── LXMF announce ─┤ Sends own announce
+   │ ◄────────────────── LXMF announce ─┤ Sends own announce (+ periodic re-announce)
    │ Peer appears in                    │
    │ network visualizer                 │
    │                                    │
@@ -100,6 +100,9 @@ MeshChat                          ESP32 (µReticulum)
    │                                    │
    │ ◄──────────────── Delivery proof ──┤ Sign packet hash with Ed25519
    │ Shows "delivered ✓"                │ Send PKT_PROOF back
+   │                                    │
+   │ ◄────────── Echo reply (LXMF) ────┤ Encrypt + sign reply message
+   │ Receives "Echo: ..."              │ Send via opportunistic delivery
    │                                    │
 ```
 
@@ -136,8 +139,21 @@ b'\x92\xc4\x0aESP32 Node\xc0'
 | **Total message round-trip** | **~4s** |
 | Announce validation | ~6s |
 | Free RAM after boot | ~63 KB |
+| IDF heap after init | ~34 KB |
+| IDF heap during runtime | ~3 KB free (stable) |
 
 The bottleneck is pure-Python Curve25519 arithmetic. For a mesh messaging node on a $4 microcontroller, this is functional for real-world use.
+
+### Memory Management
+
+ESP32's MicroPython uses a split-heap architecture where the Python heap can expand into IDF (C runtime) heap. Crypto operations create large big-integer temporaries that fragment the split heap, permanently consuming IDF memory needed by lwIP for socket receive buffers.
+
+Mitigations:
+- **`gc.threshold(4096)`** during boot triggers early GC, reducing fragmentation-driven IDF expansion
+- **`_gc_mask` tuning** — crypto loops call `gc.collect()` every N iterations. Boot uses aggressive GC (mask=1, every 2 iters) to prevent IDF heap expansion. After sockets are allocated, runtime switches to relaxed GC (mask=7/15) saving ~4s per message.
+- **Pre-importing** `lxmf` and `umsgpack` in `urns/__init__.py` loads bytecode while heap is compact, before crypto key derivation fragments memory
+- **Deferred interface setup** — UDP sockets are created after all Python imports, so lwIP gets accurate IDF headroom
+- **`gc.threshold(-1)`** at runtime disables the aggressive threshold to avoid ~252 GC calls per Ed25519 verify
 
 ## Configuration
 
@@ -212,17 +228,18 @@ The UDP interface includes several workarounds for ESP32 MicroPython lwIP quirks
 - **Opportunistic delivery only** — Single-packet messages up to ~295 bytes content. Link-based delivery (for larger messages) is not yet implemented.
 - **No propagation nodes** — Cannot store-and-forward messages for offline peers.
 - **No transport nodes** — Cannot relay packets between interfaces (single-interface only).
-- **Pure Python crypto** — ~4 second message processing on ESP32. Hardware accelerated boards would be significantly faster.
+- **Pure Python crypto** — ~4 second message round-trip on ESP32. `@micropython.viper` could significantly speed this up.
 
 ## What's Next
 
 Potential areas for expansion:
 
-- **Send messages from ESP32** — Compose and send LXMF messages to discovered peers
+- **Viper-accelerated crypto** — `@micropython.viper` native compilation for field arithmetic could bring X25519 from ~1.4s to ~0.2s
 - **Link-based delivery** — Support for messages larger than a single packet
 - **RNode integration** — Test with LoRa radio over serial interface
 - **Multi-interface routing** — Bridge WiFi ↔ Serial for mesh relay
 - **Pico W support** — Verify and tune for RP2040
+- **Propagation node** — Store-and-forward for offline peers
 
 ## License
 
