@@ -1,0 +1,32 @@
+Connected! IP: 192.168.3.156
+IDF heap after WiFi: [(240, 4, 0, 4), (7288, 4, 0, 4), (15072, 4, 0, 4), (16648, 4, 0, 4), (85936, 4, 0, 4), (113840, 93532, 90112, 408)]
+[825584861][VERB] Loaded identity from storage
+[825584861][VERB] Loaded configuration from /rns/config.json
+[825584861][VERB] Loaded 0 known destinations
+[825584861][VERB] Transport engine started
+[825584861][NOTE] µReticulum v0.1.0 started
+[825584861][INFO] Identity: eeb8837fd80e36a52b04b2f62864dcbc
+[825584861][VERB] Free memory: 64544 bytes
+IDF heap after init: [(240, 4, 0, 4), (7288, 4, 0, 4), (15072, 4, 0, 4), (16648, 4, 0, 4), (85936, 4, 0, 4), (113840, 34136, 32768, 408)]
+[825584862][NOTE] LXMF delivery registered: bc5e763b761d9d605117ca9ec1226bde
+IDF after setup_node: [(240, 4, 0, 4), (7288, 4, 0, 4), (15072, 4, 0, 4), (16648, 4, 0, 4), (85936, 4, 0, 4), (113840, 1364, 1280, 408)]
+[825584862][VERB] Auto-detected broadcast: 192.168.3.255
+[825584862][VERB] WiFi power management disabled (required for broadcast RX)
+[825584862][DBG ] IDF before socket: free=1364 largest=1280
+[825584862][DBG ] IDF after socket: free=1088 largest=1024
+[825584862][NOTE] UDP Interface WiFi UDP listening on 0.0.0.0:4242
+[825584862][VERB] UDP Interface WiFi UDP broadcasting to 192.168.3.255:4242
+[825584862][VERB] Interface registered: WiFi UDP
+LXMF address: bc5e763b761d9d605117ca9ec1226bde
+Free memory: 48576 bytes
+Running... (Ctrl+C to stop)
+[825584862][VERB] Event loop running with 2 tasks
+[825584862][NOTE] UDP poll loop started for WiFi UDP
+[825584862][DBG ] IDF at poll start: free=1088 largest=1024
+[825584872][DBG ] TX 181B type=1 ifaces=1
+[825584873][DBG ] TX pre-send: idf_free=1088 largest=1024 data=181B
+[825584873][DBG ] UDP sent 181B
+[825584873][DBG ] TX sent on WiFi UDP
+[825584873][NOTE] LXMF announced as: ESP32 Node
+Announced as: ESP32 Node
+[825584895][VERB] UDP poll alive, loops=1000 rx=0 rxb=0 sock=True

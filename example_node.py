@@ -25,117 +25,49 @@ DEBUG = 1
 
 import gc
 gc.collect()
+# Prevent MicroPython split heap from growing into IDF heap.
+# Without a threshold, GC only runs when heap is full — by then,
+# new IDF heap blocks have been claimed and are never returned.
+# 4096 triggers GC sooner during imports/LXMF processing, reducing
+# fragmentation-driven IDF expansion.
+gc.threshold(4096)
 
 
-def lxmf_app_data(display_name):
-    """Encode display name as LXMF-compatible msgpack: [name_bytes, None]"""
-    if isinstance(display_name, str):
-        display_name = display_name.encode("utf-8")
-    n = len(display_name)
-    if n < 256:
-        return bytes([0x92, 0xc4, n]) + display_name + bytes([0xc0])
-    else:
-        return bytes([0x92, 0xc5, n >> 8, n & 0xFF]) + display_name + bytes([0xc0])
-
-
-def parse_display_name(app_data):
-    """Parse display name from LXMF announce app_data"""
-    if not app_data or len(app_data) == 0:
-        return None
+async def send_echo_reply(router, source_hash, content):
+    """Send echo reply as async task (crypto takes ~7s, must not block poll loop)."""
     try:
-        first = app_data[0]
-        if (0x90 <= first <= 0x9f) or first == 0xdc:
-            # msgpack array: [name_bytes, stamp_cost]
-            if app_data[1] == 0xc4:
-                name_len = app_data[2]
-                return app_data[3:3 + name_len].decode("utf-8")
-            elif app_data[1] == 0xc0:
-                return None
-        return app_data.decode("utf-8")
-    except Exception:
-        return None
+        import uasyncio as asyncio
+    except ImportError:
+        import asyncio
 
+    # Yield so the poll loop can resume immediately
+    await asyncio.sleep(0)
 
-def decode_lxmf_message(data, dest_hash):
-    """Decode incoming LXMF opportunistic message.
-    data: decrypted packet payload (without dest hash)
-    dest_hash: our destination hash (16 bytes)
-    Returns dict with message info, or None on failure.
-    """
     try:
-        from urns import umsgpack
-
-        # Reassemble full LXMF frame: dest_hash + data
-        lxmf_bytes = dest_hash + data
-
-        # Parse: [dest_hash(16)] [source_hash(16)] [signature(64)] [msgpack_payload]
-        DL = 16   # destination length
-        SL = 64   # signature length
-
-        source_hash = lxmf_bytes[DL:2 * DL]
-        signature = lxmf_bytes[2 * DL:2 * DL + SL]
-        packed_payload = lxmf_bytes[2 * DL + SL:]
-
-        payload = umsgpack.unpackb(packed_payload)
-
-        # payload = [timestamp, title, content, fields, ?stamp]
-        timestamp = payload[0]
-        title = payload[1]
-        content = payload[2]
-        fields = payload[3] if len(payload) > 3 else {}
-
-        # Try to validate signature
-        from urns.identity import Identity
-        from urns.crypto.hashes import sha256
-
-        # Strip stamp for hashing if present
-        if len(payload) > 4:
-            payload = payload[:4]
-            packed_payload = umsgpack.packb(payload)
-
-        hashed_part = dest_hash + source_hash + packed_payload
-        message_hash = sha256(hashed_part)
-        signed_part = hashed_part + message_hash
-
-        sig_valid = False
-        source_identity = Identity.recall(source_hash)
-        if source_identity:
-            try:
-                sig_valid = source_identity.validate(signature, signed_part)
-            except Exception:
-                pass
-
-        # Decode content
-        if isinstance(title, bytes):
-            try:
-                title = title.decode("utf-8")
-            except Exception:
-                pass
-        if isinstance(content, bytes):
-            try:
-                content = content.decode("utf-8")
-            except Exception:
-                pass
-
-        return {
-            "source": source_hash,
-            "content": content,
-            "title": title,
-            "fields": fields,
-            "timestamp": timestamp,
-            "hash": message_hash,
-            "signature_valid": sig_valid,
-        }
-
+        reply_content = "Echo: " + str(content)
+        msg = router.send_message(source_hash, reply_content)
+        if msg:
+            if DEBUG >= 1:
+                print("[Echo] Replied to " + source_hash.hex()[:8])
+        else:
+            if DEBUG >= 1:
+                print("[Echo] Cannot reply to " + source_hash.hex()[:8] + " (unknown identity)")
     except Exception as e:
         from urns.log import log, LOG_ERROR
-        log("LXMF decode error: " + str(e), LOG_ERROR)
-        return None
+        log("Echo reply error: " + str(e), LOG_ERROR)
+    gc.collect()
 
 
 def connect_wifi(ssid, password, timeout=15):
     import network
     import time
+    # Deactivate AP interface — dual-interface mode can route broadcast
+    # packets to AP instead of STA, preventing UDP broadcast reception.
+    ap = network.WLAN(network.AP_IF)
+    if ap.active():
+        ap.active(False)
+        if DEBUG >= 2:
+            print("AP_IF deactivated")
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     if not wlan.isconnected():
@@ -154,57 +86,48 @@ def connect_wifi(ssid, password, timeout=15):
 
 
 def setup_node(rns, node_name):
-    from urns import Destination
-    from urns.log import log, LOG_NOTICE
+    # NO intermediate gc.collect() — frequent GC creates fragmented holes in
+    # split-heap segments that can't be reused, forcing new IDF allocations.
+    # One gc.collect() at the end packs objects more densely.
+    from urns.lxmf import LXMRouter
+    router = LXMRouter(identity=rns.identity)
+    dest = router.register_delivery_identity(rns.identity, display_name=node_name)
 
-    # Create LXMF delivery destination — visible in MeshChat/Sideband
-    dest = Destination(
-        rns.identity,
-        Destination.IN,
-        Destination.SINGLE,
-        "lxmf",
-        "delivery",
-    )
+    # Incoming LXMF message handler (proof is sent automatically by LXMRouter)
+    def on_message(message):
+        verified = "verified" if message.signature_validated else "UNVERIFIED"
+        sender = message.source_hash.hex()[:8]
+        content = message.content_as_string() or "(binary)"
 
-    # Incoming LXMF message handler
-    def on_packet(data, packet):
-        # Send delivery proof first (so MeshChat knows we received it)
-        packet.prove()
-
-        msg = decode_lxmf_message(data, dest.hash)
-        if msg and DEBUG >= 1:
-            verified = "verified" if msg["signature_valid"] else "UNVERIFIED"
-            sender = msg["source"].hex()[:8]
+        if DEBUG >= 1:
             print()
             print("=" * 40)
             print("LXMF Message [" + verified + "]")
             print("  From: " + sender)
-            if msg["title"]:
-                print("  Title: " + str(msg["title"]))
-            print("  Content: " + str(msg["content"]))
+            title = message.title_as_string()
+            if title:
+                print("  Title: " + title)
+            print("  Content: " + content)
             print("=" * 40)
+
+        # Queue async echo reply (non-blocking)
+        try:
+            import uasyncio as asyncio
+        except ImportError:
+            import asyncio
+        asyncio.create_task(send_echo_reply(router, message.source_hash, content))
         gc.collect()
 
-    dest.set_packet_callback(on_packet)
+    router.register_delivery_callback(on_message)
 
     # Announce handler — see other LXMF peers
-    def on_announce(destination_hash, app_data, packet):
-        name = parse_display_name(app_data) or "?"
+    def on_announce(destination_hash, display_name):
         if DEBUG >= 1:
-            print("[Peer] " + name + " [" + destination_hash.hex()[:8] + "]")
+            print("[Peer] " + (display_name or "?") + " [" + destination_hash.hex()[:8] + "]")
 
-    dest._announce_handler = on_announce
+    router.register_announce_callback(on_announce)
 
-    # Announce ourselves with LXMF-compatible app_data
-    app_data = lxmf_app_data(node_name)
-    from urns.transport import Transport
-    if DEBUG >= 2:
-        print("Interfaces registered:", len(Transport.interfaces))
-        for iface in Transport.interfaces:
-            print("  -", iface.name, "online:", iface.online)
-    dest.announce(app_data=app_data)
-
-    return dest
+    return dest, router
 
 
 def main():
@@ -214,30 +137,63 @@ def main():
     ip = connect_wifi(WIFI_SSID, WIFI_PASS)
     gc.collect()
 
+    # Log IDF heap baseline before any crypto imports
+    try:
+        import esp32
+        print("IDF heap after WiFi:", esp32.idf_heap_info(esp32.HEAP_DATA))
+    except:
+        pass
+
     from urns import Reticulum
     from urns.log import LOG_NONE, LOG_NOTICE, LOG_DEBUG
 
     log_map = {0: LOG_NONE, 1: LOG_NONE, 2: LOG_DEBUG}
     rns = Reticulum(loglevel=log_map.get(DEBUG, LOG_NOTICE))
-    rns.setup_interfaces()
+
+    # Log IDF heap after identity load + crypto imports
+    try:
+        print("IDF heap after init:", esp32.idf_heap_info(esp32.HEAP_DATA))
+    except:
+        pass
+
+    # Setup LXMF BEFORE interfaces — this import + object creation consumes
+    # ~33K of IDF through split-heap expansion. Sockets must be created AFTER
+    # all Python imports are done, so lwIP has accurate IDF headroom.
+    dest, router = setup_node(rns, NODE_NAME)
     gc.collect()
 
-    dest = setup_node(rns, NODE_NAME)
+    try:
+        print("IDF after setup_node:", esp32.idf_heap_info(esp32.HEAP_DATA))
+    except:
+        pass
+
+    rns.setup_interfaces()
     gc.collect()
 
     if DEBUG >= 1:
         print("LXMF address:", dest.hexhash)
-        print("Announced as:", NODE_NAME)
         print("Free memory:", gc.mem_free(), "bytes")
         print("Running... (Ctrl+C to stop)")
+
+    # Deferred initial announce — runs AFTER poll loop starts so RX sockets
+    # are active before Ed25519 signing consumes IDF heap.
+    async def initial_announce():
+        await asyncio.sleep(0.5)  # Let poll loop start first
+        try:
+            router.announce()
+            if DEBUG >= 1:
+                print("Announced as:", NODE_NAME)
+        except Exception as e:
+            if DEBUG >= 2:
+                print("Initial announce error:", e)
+        gc.collect()
 
     # Add periodic re-announce to the event loop
     async def reannounce_loop():
         while True:
             await asyncio.sleep(120)
             try:
-                app_data = lxmf_app_data(NODE_NAME)
-                dest.announce(app_data=app_data)
+                router.announce()
                 if DEBUG >= 2:
                     print("[Re-announced]")
             except Exception as e:
@@ -245,10 +201,11 @@ def main():
                     print("Re-announce error:", e)
             gc.collect()
 
-    # Patch rns.run to include our reannounce task
+    # Patch rns.run to include our announce + reannounce tasks
     _original_run = rns.run
 
     async def run_with_reannounce():
+        asyncio.create_task(initial_announce())
         asyncio.create_task(reannounce_loop())
         await _original_run()
 
@@ -278,7 +235,8 @@ def main_desktop():
     rns = Reticulum(config_path=storagedir + "/config.json", loglevel=log_map.get(DEBUG, LOG_NOTICE))
     rns.setup_interfaces()
 
-    dest = setup_node(rns, "Desktop uRNS Node")
+    dest, router = setup_node(rns, "Desktop uRNS Node")
+    router.announce()
 
     if DEBUG >= 1:
         print("Running...")
@@ -289,7 +247,7 @@ def main_desktop():
             while True:
                 _time.sleep(120)
                 try:
-                    dest.announce(app_data=lxmf_app_data("Desktop uRNS Node"))
+                    router.announce()
                     if DEBUG >= 2:
                         print("[Re-announced]")
                 except Exception as e:

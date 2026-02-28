@@ -164,6 +164,10 @@ class LXMessage:
         # Sign: hash(dest + source + payload) + message_hash
         signed_part = hashed_part + self.hash
         self.signature = self._source.sign(signed_part)
+        try:
+            import gc; gc.collect()
+        except:
+            pass
         self.signature_validated = True
 
         # Assemble packed message
@@ -430,6 +434,9 @@ class LXMRouter:
 
             self.delivered_ids[message.hash] = time.time()
             self._clean_delivered_ids()
+
+            # Send delivery proof (so sender knows we received it)
+            packet.prove()
 
             # Deliver to application
             if self._delivery_callback:

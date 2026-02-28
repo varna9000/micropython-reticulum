@@ -160,6 +160,10 @@ class Identity:
             log("Announce identity loaded: hash=" + str(announced_identity.hexhash), LOG_DEBUG)
 
             sig_valid = announced_identity.validate(signature, signed_data)
+            try:
+                import gc; gc.collect()
+            except:
+                pass
             log("Announce sig_valid=" + str(sig_valid), LOG_DEBUG)
 
             if announced_identity.pub is not None and sig_valid:
@@ -347,6 +351,10 @@ class Identity:
         if self.pub is not None:
             ephemeral_key = X25519PrivateKey.generate()
             ephemeral_pub_bytes = ephemeral_key.public_key().public_bytes()
+            try:
+                import gc; gc.collect()
+            except:
+                pass
 
             if ratchet is not None:
                 target_public_key = X25519PublicKey.from_public_bytes(ratchet)
@@ -354,6 +362,10 @@ class Identity:
                 target_public_key = self.pub
 
             shared_key = ephemeral_key.exchange(target_public_key)
+            try:
+                import gc; gc.collect()
+            except:
+                pass
             derived_key = hkdf(
                 length=Identity.DERIVED_KEY_LENGTH,
                 derive_from=shared_key,

@@ -7,6 +7,9 @@ import struct
 def new(m=None):
     return sha512(m)
 
+# Module-level shared working buffer (saves ~2.2KB per instance)
+_shared_w = [0] * 80
+
 class sha512:
     _k = (0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
           0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
@@ -51,7 +54,7 @@ class sha512:
         return ((x >> y) | (x << (64 - y))) & 0xFFFFFFFFFFFFFFFF
 
     def _sha512_process(self, chunk):
-        w = [0] * 80
+        w = _shared_w
         w[0:16] = struct.unpack('!16Q', chunk)
 
         for i in range(16, 80):
@@ -102,9 +105,20 @@ class sha512:
         else:
             padlen = 239 - mdi
 
-        r = self.copy()
-        r.update(b'\x80' + (b'\x00' * (padlen + 8)) + length)
-        return b''.join([struct.pack('!Q', i) for i in r._h[:self._output_size]])
+        # Save state inline instead of creating a full copy()
+        saved_h = list(self._h)
+        saved_buffer = self._buffer
+        saved_counter = self._counter
+
+        self.update(b'\x80' + (b'\x00' * (padlen + 8)) + length)
+        result = b''.join([struct.pack('!Q', i) for i in self._h[:self._output_size]])
+
+        # Restore state
+        self._h = saved_h
+        self._buffer = saved_buffer
+        self._counter = saved_counter
+
+        return result
 
     def hexdigest(self):
         import binascii

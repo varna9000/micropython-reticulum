@@ -10,7 +10,7 @@ A pure MicroPython implementation of the [Reticulum](https://reticulum.network/)
 - **Announce & Discovery** — ESP32 announces itself with an LXMF-compatible display name. Appears in MeshChat's network visualizer. Receives and parses announces from other peers.
 - **Full Crypto Stack** — X25519 key exchange, Ed25519 signatures, AES-128-CBC encryption, HKDF, HMAC-SHA256 — all in pure Python, no C extensions.
 - **Wire Protocol** — Byte-identical packet format to reference Reticulum. Validated bidirectionally against the reference implementation.
-- **UDP Interface** — WiFi networking with auto-detected subnet broadcast. Non-blocking async I/O.
+- **UDP Interface** — WiFi networking with auto-detected subnet broadcast. Non-blocking async I/O with ESP32 socket recovery.
 - **Serial Interface** — HDLC-framed UART for RNode, LoRa radios, packet radio TNCs, or ESP32-to-ESP32 links.
 - **Persistent Identity** — Keys and known destinations survive reboots. JSON configuration.
 
@@ -196,6 +196,16 @@ Runs on:
 - ESP32 (MicroPython 1.22+)
 - Raspberry Pi Pico W (MicroPython)
 - Desktop CPython 3.8+ (for development/testing)
+
+## ESP32 Socket Workarounds
+
+The UDP interface includes several workarounds for ESP32 MicroPython lwIP quirks:
+
+- **Separate TX/RX sockets** — Using `sendto()` on a socket registered with `select.poll()` breaks `POLLIN` on ESP32. The TX socket is dedicated to sending and never polled.
+- **No `select.poll()`** — `poll(0)` (non-blocking) does not reliably detect incoming UDP data on ESP32. The poll loop uses direct non-blocking `recvfrom()` with `except OSError` instead, matching the pattern used by the serial interface.
+- **`setblocking(False)` re-assertion after TX** — Broadcasting via the TX socket on the same port the RX socket is bound to corrupts the RX socket's non-blocking state in lwIP. After every `sendto()`, the RX socket's non-blocking flag is explicitly re-set. Without this, `recvfrom()` silently switches to blocking mode after the first proof/packet send, freezing the entire async event loop.
+- **RX socket watchdog** — If the interface previously received traffic but hasn't for 120 seconds, the RX socket is closed and recreated. This catches any remaining socket corruption scenarios.
+- **WiFi power management disabled** — `wlan.config(pm=0)` is required to receive broadcast UDP packets on ESP32.
 
 ## Limitations
 

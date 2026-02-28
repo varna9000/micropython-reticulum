@@ -143,7 +143,15 @@ class Destination:
         if app_data is not None:
             signed_data += app_data
 
+        try:
+            import gc; gc.collect()
+        except:
+            pass
         signature = self.identity.sign(signed_data)
+        try:
+            gc.collect()
+        except:
+            pass
         announce_data = self.identity.get_public_key() + self.name_hash + random_hash + ratchet + signature
 
         if app_data is not None:

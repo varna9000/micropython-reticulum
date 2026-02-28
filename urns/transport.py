@@ -89,9 +89,12 @@ class Transport:
             for interface in Transport.interfaces:
                 if interface.online:
                     try:
-                        interface.process_outgoing(raw)
-                        sent = True
-                        log("TX sent on " + interface.name, LOG_DEBUG)
+                        result = interface.process_outgoing(raw)
+                        if result or result is None:
+                            sent = True
+                            log("TX sent on " + interface.name, LOG_DEBUG)
+                        else:
+                            log("TX failed on " + interface.name, LOG_WARNING)
                     except Exception as e:
                         log("Error sending on " + str(interface) + ": " + str(e), LOG_ERROR)
 
@@ -172,7 +175,15 @@ class Transport:
     @staticmethod
     def _handle_announce(packet):
         from .identity import Identity
+        try:
+            import gc; gc.collect()
+        except:
+            pass
         valid = Identity.validate_announce(packet)
+        try:
+            import gc; gc.collect()
+        except:
+            pass
         if valid:
             log("Valid announce from " + packet.destination_hash.hex(), LOG_NOTICE)
             app_data = Identity.recall_app_data(packet.destination_hash)
@@ -200,6 +211,10 @@ class Transport:
 
     @staticmethod
     def _handle_data(packet):
+        try:
+            import gc; gc.collect()
+        except:
+            pass
         for dest in Transport.destinations:
             if dest.hash == packet.destination_hash:
                 dest.receive(packet)

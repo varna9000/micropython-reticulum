@@ -2,12 +2,11 @@
 # Adapted for µReticulum
 
 import os
-import binascii
 from ..hashes import sha512
 from .basic import (bytes_to_clamped_scalar,
                     bytes_to_scalar, scalar_to_bytes,
                     bytes_to_element, bytes_to_element_unchecked,
-                    Base, _rev, scalarmult_base_comb)
+                    Base, scalarmult_base_comb)
 
 def H(m):
     return sha512(m)
@@ -20,16 +19,22 @@ def publickey(seed):
 
 def Hint(m):
     h = H(m)
-    return int(binascii.hexlify(_rev(h)), 16)
+    return int.from_bytes(h, "little")
 
 def signature(m, sk, pk):
     assert len(sk) == 32
     assert len(pk) == 32
+    try:
+        import gc; _gc = gc.collect
+    except:
+        _gc = None
+    if _gc: _gc()
     h = H(sk[:32])
     a_bytes, inter = h[:32], h[32:]
     a = bytes_to_clamped_scalar(a_bytes)
     r = Hint(inter + m)
     R = scalarmult_base_comb(r)
+    if _gc: _gc()
     R_bytes = R.to_bytes()
     S = r + Hint(R_bytes + pk + m) * a
     return R_bytes + scalar_to_bytes(S)
@@ -43,8 +48,14 @@ def signature_cached(m, a, inter, pk):
         inter: pre-derived nonce material (H(seed)[32:])
         pk: pre-computed public key bytes
     """
+    try:
+        import gc; _gc = gc.collect
+    except:
+        _gc = None
+    if _gc: _gc()
     r = Hint(inter + m)
     R = scalarmult_base_comb(r)
+    if _gc: _gc()
     R_bytes = R.to_bytes()
     S = r + Hint(R_bytes + pk + m) * a
     return R_bytes + scalar_to_bytes(S)
@@ -54,11 +65,17 @@ def checkvalid(s, m, pk):
         raise Exception("signature length is wrong")
     if len(pk) != 32:
         raise Exception("public-key length is wrong")
+    try:
+        import gc; _gc = gc.collect
+    except:
+        _gc = None
+    if _gc: _gc()
     R = bytes_to_element_unchecked(s[:32])
     A = bytes_to_element_unchecked(pk)
     S = bytes_to_scalar(s[32:])
     h = Hint(s[:32] + pk + m)
     v1 = scalarmult_base_comb(S)
+    if _gc: _gc()
     v2 = R.add(A.scalarmult(h))
     return v1 == v2
 

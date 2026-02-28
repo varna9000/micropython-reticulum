@@ -50,6 +50,12 @@ def _raw_curve25519(base, n):
     z_3 = 1
     swap = 0
 
+    try:
+        import gc
+        _gc = gc.collect
+    except:
+        _gc = None
+
     for t in reversed(range(255)):
         k_t = (n >> t) & 1
         swap ^= k_t
@@ -72,6 +78,9 @@ def _raw_curve25519(base, n):
         z_3 = (x_1 * pow(DA - CB, 2, P)) % P
         x_2 = (AA * BB) % P
         z_2 = (E * (AA + _a24 * E)) % P
+
+        if _gc and t & 1 == 0:
+            _gc()
 
     # Final conditional swap
     if swap:
