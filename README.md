@@ -23,6 +23,8 @@ Developed and tested on the [Waveshare ESP32-S3-Zero](https://www.waveshare.com/
 - Onboard WS2812 NeoPixel LED (GPIO 21)
 - USB-C, castellated pads, 24.8mm x 18mm
 
+Also tested on [Seeed XIAO ESP32S3](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/) + [Wio-SX1262](https://wiki.seeedstudio.com/wio_sx1262_xiao_esp32s3_for_lora/) for LoRa communication.
+
 Requires MicroPython 1.22+. Should also work on other ESP32-S3 boards and Raspberry Pi Pico W.
 
 ## What Works
@@ -33,6 +35,7 @@ Requires MicroPython 1.22+. Should also work on other ESP32-S3 boards and Raspbe
 - **Full Crypto Stack** — X25519 key exchange, Ed25519 signatures, AES-128-CBC encryption, HKDF, HMAC-SHA256 — all in pure Python, no C extensions.
 - **Wire Protocol** — Byte-identical packet format to reference Reticulum. Validated bidirectionally against the reference implementation.
 - **UDP Interface** — WiFi networking with auto-detected subnet broadcast. Non-blocking async I/O with ESP32 socket recovery.
+- **SX1262 SPI LoRa Interface** — Native SPI control of SX1262 LoRa radios (e.g. Seeed XIAO ESP32S3 + Wio-SX1262). Interoperates with RNode (SX1276/SX1278) and reference Reticulum over LoRa — bidirectional LXMF messaging, announces, and delivery proofs all work. Built-in fragmentation for Reticulum's 500-byte MTU over 255-byte LoRa packets. RSSI/SNR reporting.
 - **Serial Interface** — HDLC-framed UART for RNode, LoRa radios, packet radio TNCs, or ESP32-to-ESP32 links.
 - **Persistent Identity** — Keys and known destinations survive reboots. JSON configuration.
 
@@ -85,7 +88,8 @@ ureticulum/
 │   ├── interfaces/
 │   │   ├── __init__.py      # Base Interface class
 │   │   ├── udp.py           # WiFi UDP with broadcast discovery
-│   │   └── serial.py        # HDLC-framed UART (RNode, LoRa, ESP-to-ESP)
+│   │   ├── serial.py        # HDLC-framed UART (RNode, LoRa, ESP-to-ESP)
+│   │   └── lora.py          # SX1262 SPI LoRa with fragmentation
 │   └── crypto/
 │       ├── x25519.py        # X25519 ECDH key exchange
 │       ├── ed25519.py       # Ed25519 signing/verification
@@ -215,13 +219,88 @@ Setting `forward_ip` to `null` enables auto-detection of the subnet broadcast ad
 }
 ```
 
+### E220 LoRa Interface (EByte E220-900T)
+
+Transparent LoRa radio with AUX flow control, AT auto-configuration, and chunked writes for packets exceeding the 400-byte hardware buffer.
+
+```json
+{
+  "type": "E220Interface",
+  "name": "LoRa E220",
+  "enabled": true,
+  "uart_id": 2,
+  "tx_pin": 17,
+  "rx_pin": 16,
+  "speed": 9600,
+  "m0_pin": 4,
+  "m1_pin": 5,
+  "aux_pin": 6,
+  "auto_configure": true,
+  "channel": 18,
+  "air_rate": 2,
+  "tx_power": 0,
+  "lbt": true
+}
+```
+
+### SX1262 SPI LoRa Interface (e.g. Seeed XIAO ESP32S3 + Wio-SX1262)
+
+Native SPI LoRa using the `lora-sx126x` driver from `micropython-lib`. Talks directly to the SX1262 radio — no external UART module needed.
+
+**Prerequisites:** Install the LoRa driver on your device first:
+
+```
+mpremote mip install lora-sx126x
+```
+
+```json
+{
+  "type": "LoRaInterface",
+  "name": "LoRa SX1262",
+  "enabled": true,
+  "spi_bus": 1,
+  "sck_pin": 7,
+  "mosi_pin": 9,
+  "miso_pin": 8,
+  "cs_pin": 41,
+  "busy_pin": 40,
+  "dio1_pin": 39,
+  "reset_pin": 42,
+  "freq_khz": 868000,
+  "sf": 7,
+  "bw": "125",
+  "coding_rate": 5,
+  "tx_power": 14,
+  "syncword": 5156,
+  "dio2_rf_sw": true,
+  "dio3_tcxo_millivolts": 1800
+}
+```
+
+**Pin variants** — the pins above are for the Wio-SX1262 kit version. For the header board version use: CS=5, DIO1=2, RESET=3, BUSY=4. SPI pins (SCK/MOSI/MISO) are the same for both.
+
+**Radio parameters:**
+- `freq_khz`: 868000 (EU), 915000 (US), 923000 (AS)
+- `sf`: 7–12 (higher = longer range, slower)
+- `bw`: "125" / "250" / "500" (lower = longer range, slower)
+- `tx_power`: -9 to +22 dBm
+- `syncword`: 0x1424 (5156 decimal) — Reticulum/RNode compatible
+- `dio2_rf_sw`: `true` — SX1262 internally drives DIO2 as RF switch (default, correct for Wio-SX1262)
+- `dio3_tcxo_millivolts`: `1800` for Wio-SX1262 TCXO (default). Set `null` to disable for modules with a crystal oscillator instead of TCXO.
+
+**Fragmentation:** The SX1262 has a 255-byte packet limit while Reticulum's MTU is 500 bytes. The interface automatically fragments and reassembles packets — no configuration needed.
+
+See `config.py` for all config variants (UDP-only, LoRa-only, dual WiFi+LoRa). Set `CONFIG` at the bottom to choose the active one.
+
 ## Compatibility
 
 Tested and confirmed working with:
 
 - **MeshChat** — Bi-directional announces, opportunistic messaging, delivery receipts
+- **Sideband / NomadNet** — Peer discovery, LXMF messaging
 - **Reference Reticulum** (Python) — Wire-compatible packets, announces, encryption
 - **Reference LXMF** — Cross-validated message packing/unpacking, signature verification
+- **RNode** (SX1276/SX1278) — Bidirectional LoRa: announces, encrypted LXMF messages, delivery proofs. Tested with Heltec Wireless Stick Lite V1 running RNode firmware on 868 MHz
 
 ## ESP32 Socket Workarounds
 
@@ -233,6 +312,16 @@ The UDP interface includes several workarounds for ESP32 MicroPython lwIP quirks
 - **RX socket watchdog** — If the interface previously received traffic but hasn't for 60 seconds, the socket is closed and recreated.
 - **WiFi power management disabled** — `wlan.config(pm=0)` is required to receive broadcast UDP packets.
 - **AP_IF deactivated** — dual-interface mode routes broadcast packets to AP instead of STA, preventing UDP broadcast reception.
+
+## SX1262 LoRa Workarounds
+
+The LoRa interface includes workarounds for a FIFO buffer offset issue in the `lora-sx126x` driver on ESP32-S3 + Wio-SX1262 hardware:
+
+- **RX byte stripping** — The SX1262 receive path prepends one spurious byte (a FIFO status/offset artifact) before the actual LoRa payload. This byte varies between receptions of the same packet while bytes 1+ remain stable. The interface strips this leading byte before passing data to the Reticulum stack.
+- **TX byte prepending** — Symmetrically, the transmit path loses the first byte of data written to the FIFO. A dummy `0x00` byte is prepended before sending so the actual packet data starts at the correct offset.
+- **IFAC filtering** — Packets with bit 7 set in the flags byte (IFAC-tagged) are dropped on receipt, since µReticulum does not implement Interface Access Codes. This matches reference Reticulum behavior for non-IFAC interfaces.
+
+The driver source code appears correct (it uses `n_read=1` to consume the SX1262 NOP byte), so this is likely a platform-specific SPI timing issue on ESP32-S3 rather than a driver bug.
 
 ## Limitations
 
@@ -248,8 +337,7 @@ Potential areas for expansion:
 
 - **Viper-accelerated crypto** — `@micropython.viper` native compilation for field arithmetic could bring X25519 from ~1.4s to ~0.2s
 - **Link-based delivery** — Support for messages larger than a single packet
-- **RNode integration** — Test with LoRa radio over serial interface
-- **Multi-interface routing** — Bridge WiFi <-> Serial for mesh relay
+- **Multi-interface routing** — Bridge WiFi <-> LoRa for mesh relay
 - **More hardware control** — Expand NeoPixel example to sensors, relays, displays
 - **Propagation node** — Store-and-forward for offline peers
 

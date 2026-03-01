@@ -132,7 +132,17 @@ class Transport:
         from .identity import Identity
 
         try:
+            if len(raw) < 2:
+                return
+
             log("Inbound: " + str(len(raw)) + " bytes, flags=0x" + ("%02x" % raw[0]), LOG_DEBUG)
+
+            # Drop IFAC-tagged packets (bit 7 set). µReticulum does not
+            # implement IFAC, so these cannot be decoded. Per reference RNS,
+            # interfaces without IFAC must drop IFAC-flagged packets.
+            if raw[0] & 0x80:
+                log("Inbound: IFAC flag set, dropping (IFAC not supported)", LOG_DEBUG)
+                return
 
             packet = Packet(destination=None, data=raw)
             if not packet.unpack():

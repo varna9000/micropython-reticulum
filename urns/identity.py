@@ -128,31 +128,34 @@ class Identity:
 
             public_key = packet.data[:keysize]
 
-            log("Announce validate: data=" + str(len(packet.data)) + "B ctx_flag=" + str(packet.context_flag), LOG_DEBUG)
+            log("Announce validate: data=" + str(len(packet.data)) + "B hdr=" + str(packet.header_type) + " ctx_flag=" + str(packet.context_flag) + " ctx=" + str(packet.context), LOG_DEBUG)
 
-            if packet.context_flag == const.FLAG_SET:
-                name_hash = packet.data[keysize:keysize + name_hash_len]
-                random_hash = packet.data[keysize + name_hash_len:keysize + name_hash_len + 10]
-                ratchet = packet.data[keysize + name_hash_len + 10:keysize + name_hash_len + 10 + ratchetsize]
-                signature = packet.data[keysize + name_hash_len + 10 + ratchetsize:keysize + name_hash_len + 10 + ratchetsize + sig_len]
+            base = keysize + name_hash_len + 10
+            has_ratchet = packet.context_flag == const.FLAG_SET
+            name_hash = packet.data[keysize:keysize + name_hash_len]
+            random_hash = packet.data[keysize + name_hash_len:keysize + name_hash_len + 10]
+            if has_ratchet:
+                ratchet = packet.data[base:base + ratchetsize]
+                signature = packet.data[base + ratchetsize:base + ratchetsize + sig_len]
                 app_data = b""
-                if len(packet.data) > keysize + name_hash_len + 10 + sig_len + ratchetsize:
-                    app_data = packet.data[keysize + name_hash_len + 10 + sig_len + ratchetsize:]
+                if len(packet.data) > base + ratchetsize + sig_len:
+                    app_data = packet.data[base + ratchetsize + sig_len:]
             else:
                 ratchet = b""
-                name_hash = packet.data[keysize:keysize + name_hash_len]
-                random_hash = packet.data[keysize + name_hash_len:keysize + name_hash_len + 10]
-                signature = packet.data[keysize + name_hash_len + 10:keysize + name_hash_len + 10 + sig_len]
+                signature = packet.data[base:base + sig_len]
                 app_data = b""
-                if len(packet.data) > keysize + name_hash_len + 10 + sig_len:
-                    app_data = packet.data[keysize + name_hash_len + 10 + sig_len:]
+                if len(packet.data) > base + sig_len:
+                    app_data = packet.data[base + sig_len:]
 
-            log("Announce fields: pubkey=" + str(len(public_key)) + " name_hash=" + str(len(name_hash)) + " random=" + str(len(random_hash)) + " ratchet=" + str(len(ratchet)) + " sig=" + str(len(signature)) + " app=" + str(len(app_data)), LOG_DEBUG)
+            log("Announce fields: ratchet=" + str(len(ratchet)) + " sig=" + str(len(signature)) + " app=" + str(len(app_data)), LOG_DEBUG)
+
+            if len(signature) != sig_len:
+                log("Announce rejected: bad sig length " + str(len(signature)) + " (expected " + str(sig_len) + ")", LOG_DEBUG)
+                return False
 
             signed_data = destination_hash + public_key + name_hash + random_hash + ratchet + app_data
-            log("Announce signed_data=" + str(len(signed_data)) + "B dest=" + destination_hash.hex()[:8] + " pubkey=" + public_key[:4].hex(), LOG_DEBUG)
 
-            if not len(packet.data) > Identity.KEYSIZE // 8 + Identity.NAME_HASH_LENGTH // 8 + 10 + Identity.SIGLENGTH // 8:
+            if not len(packet.data) > keysize + name_hash_len + 10 + sig_len:
                 app_data = None
 
             # Fast path: skip expensive Ed25519 verify (~24s on ESP32) for
@@ -179,6 +182,36 @@ class Identity:
             except:
                 pass
             log("Announce sig_valid=" + str(sig_valid), LOG_DEBUG)
+
+            # Fallback: if verification failed, try opposite ratchet assumption.
+            # Some transport paths or older Reticulum versions may encode the
+            # context_flag differently, causing ratchet field misalignment.
+            if not sig_valid:
+                if has_ratchet:
+                    log("Ratchet path failed, retrying without ratchet", LOG_DEBUG)
+                    ratchet = b""
+                    signature = packet.data[base:base + sig_len]
+                    app_data = b""
+                    if len(packet.data) > base + sig_len:
+                        app_data = packet.data[base + sig_len:]
+                elif len(packet.data) >= base + ratchetsize + sig_len:
+                    log("No-ratchet path failed, retrying with ratchet", LOG_DEBUG)
+                    ratchet = packet.data[base:base + ratchetsize]
+                    signature = packet.data[base + ratchetsize:base + ratchetsize + sig_len]
+                    app_data = b""
+                    if len(packet.data) > base + ratchetsize + sig_len:
+                        app_data = packet.data[base + ratchetsize + sig_len:]
+                if len(signature) == sig_len:
+                    signed_data = destination_hash + public_key + name_hash + random_hash + ratchet + app_data
+                    sig_valid = announced_identity.validate(signature, signed_data)
+                    try:
+                        import gc; gc.collect()
+                    except:
+                        pass
+                    if sig_valid:
+                        log("Announce verified with alternate layout", LOG_DEBUG)
+                if not len(packet.data) > keysize + name_hash_len + 10 + sig_len:
+                    app_data = None
 
             if announced_identity.pub is not None and sig_valid:
                 if only_validate_signature:

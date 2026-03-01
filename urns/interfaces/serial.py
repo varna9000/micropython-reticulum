@@ -57,6 +57,9 @@ class SerialInterface(Interface):
 
         self._open_port()
 
+    # Map config parity strings to MicroPython UART integers
+    _PARITY_MAP = {"E": 0, "e": 0, "O": 1, "o": 1}
+
     def _open_port(self):
         """Open serial port via MicroPython machine.UART"""
         from machine import UART, Pin
@@ -70,21 +73,34 @@ class SerialInterface(Interface):
         kwargs["txbuf"] = 1024
         kwargs["rxbuf"] = 1024
 
+        if self.databits != 8:
+            kwargs["bits"] = self.databits
+
+        if self.parity and self.parity in self._PARITY_MAP:
+            kwargs["parity"] = self._PARITY_MAP[self.parity]
+
+        if self.stopbits and self.stopbits != 1:
+            kwargs["stop"] = self.stopbits
+
         self._uart = UART(self.uart_id, **kwargs)
         self.online = True
         log("Serial port UART" + str(self.uart_id) + " opened at " + str(self.speed) + " baud", LOG_NOTICE)
 
     def process_outgoing(self, data):
         """Send HDLC-framed data"""
-        if self.online and self._uart:
-            try:
-                frame = bytes([FLAG]) + hdlc_escape(data) + bytes([FLAG])
-                self._uart.write(frame)
-                self.txb += len(data)
-                self.tx += 1
-                self._last_activity = time.time()
-            except Exception as e:
-                log("Serial send error: " + str(e), LOG_ERROR)
+        if not self.online or not self._uart:
+            return False
+
+        try:
+            frame = bytes([FLAG]) + hdlc_escape(data) + bytes([FLAG])
+            self._uart.write(frame)
+            self.txb += len(data)
+            self.tx += 1
+            self._last_activity = time.time()
+            return True
+        except Exception as e:
+            log("Serial send error: " + str(e), LOG_ERROR)
+            return False
 
     def _process_byte(self, byte):
         """Process one incoming byte through HDLC state machine"""
@@ -132,22 +148,48 @@ class SerialInterface(Interface):
                 self._in_frame = False
                 self._escape = False
 
+    MAX_ERROR_RETRIES = 5
+    MAX_REOPEN_RETRIES = 3
+
     async def poll_loop(self):
         """Async poll loop for incoming serial data"""
         import uasyncio as asyncio
 
         log("Serial poll loop started for " + self.name, LOG_VERBOSE)
 
+        _err_count = 0
+        _reopen_count = 0
+
         while self.online:
             try:
+                had_data = self._uart.any() if self._uart else False
                 self._read_available()
                 self._check_timeout()
+                if had_data:
+                    _err_count = 0
             except Exception as e:
-                log("Serial poll error: " + str(e), LOG_ERROR)
-                self.online = False
-                break
+                _err_count += 1
+                log("Serial poll error (" + str(_err_count) + "/"
+                    + str(self.MAX_ERROR_RETRIES) + "): " + str(e), LOG_ERROR)
+
+                if _err_count >= self.MAX_ERROR_RETRIES:
+                    _reopen_count += 1
+                    if _reopen_count > self.MAX_REOPEN_RETRIES:
+                        log("Serial UART reopen retries exhausted, giving up", LOG_ERROR)
+                        self.online = False
+                        break
+
+                    log("Serial UART reopening (" + str(_reopen_count) + "/"
+                        + str(self.MAX_REOPEN_RETRIES) + ")", LOG_NOTICE)
+                    try:
+                        self._open_port()
+                        _err_count = 0
+                    except Exception as e2:
+                        log("Serial UART reopen failed: " + str(e2), LOG_ERROR)
 
             await asyncio.sleep(0.005)  # 5ms poll interval for serial
+
+        log("Serial poll loop EXITED for " + self.name, LOG_ERROR)
 
     def close(self):
         super().close()

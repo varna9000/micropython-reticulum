@@ -4,21 +4,12 @@
 Compatible with MeshChat, Sideband, NomadNet over UDP on the same LAN.
 
 Usage (MicroPython on ESP32/Pico W):
-  1. Update WIFI_SSID and WIFI_PASS below
-  2. Copy the urns/ folder and this file to the device
+  1. Edit config.py — set WiFi credentials, node name, and interfaces
+  2. Copy the urns/ folder, config.py, and this file to the device
   3. Run with: import example_node
 """
 
-# ---- Configuration ----
-WIFI_SSID = "AP"
-WIFI_PASS = "pass"
-NODE_NAME = "ESP32s3"
-# DEBUG levels:
-#   0 = silent (no console output)
-#   1 = messages & announces only
-#   2 = full debug logging
-DEBUG = 2
-# ------------------------
+from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
 
 import gc
 gc.collect()
@@ -55,15 +46,21 @@ async def send_echo_reply(router, source_hash, content):
 
 
 def connect_wifi(ssid, password, timeout=15):
+    import sys
     import network
     import time
-    # Deactivate AP interface — dual-interface mode can route broadcast
+
+    platform = sys.platform  # "esp32" or "rp2"
+
+    # ESP32: deactivate AP interface — dual-interface mode routes broadcast
     # packets to AP instead of STA, preventing UDP broadcast reception.
-    ap = network.WLAN(network.AP_IF)
-    if ap.active():
-        ap.active(False)
-        if DEBUG >= 2:
-            print("AP_IF deactivated")
+    if platform == "esp32":
+        ap = network.WLAN(network.AP_IF)
+        if ap.active():
+            ap.active(False)
+            if DEBUG >= 2:
+                print("AP_IF deactivated")
+
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     if not wlan.isconnected():
@@ -75,9 +72,16 @@ def connect_wifi(ssid, password, timeout=15):
             if time.time() - start > timeout:
                 raise RuntimeError("WiFi connection timed out")
             time.sleep(0.5)
+
+    # Disable WiFi power management to reliably receive broadcast UDP
+    if platform == "esp32":
+        wlan.config(pm=0)
+    elif platform == "rp2":
+        wlan.config(pm=0xa11140)
+
     ip = wlan.ifconfig()[0]
     if DEBUG >= 1:
-        print("Connected! IP:", ip)
+        print("Connected! IP:", ip, "(" + platform + ")")
     return ip
 
 
@@ -137,6 +141,7 @@ def main():
 
     log_map = {0: LOG_NONE, 1: LOG_NONE, 2: LOG_DEBUG}
     rns = Reticulum(loglevel=log_map.get(DEBUG, LOG_NOTICE))
+    rns.config = CONFIG
 
     dest, router = setup_node(rns, NODE_NAME)
     gc.collect()

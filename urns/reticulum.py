@@ -119,25 +119,32 @@ class Reticulum:
         except OSError:
             pass
 
+    # Map interface type names to their module files.
+    # Add new interfaces here: "TypeName": "module_name"
+    _INTERFACE_MAP = {
+        "UDPInterface":    "udp",
+        "SerialInterface": "serial",
+        "E220Interface":   "e220",
+        "LoRaInterface":   "lora",
+    }
+
     def setup_interfaces(self):
-        """Initialize network interfaces from config. Call after WiFi is connected."""
+        """Initialize network interfaces from config. Call after WiFi is connected.
+        Only the modules for configured interfaces are imported."""
         for iface_config in self.config.get("interfaces", []):
             if not iface_config.get("enabled", True):
                 continue
             itype = iface_config.get("type", "")
+            modname = self._INTERFACE_MAP.get(itype)
+            if modname is None:
+                log("Unknown interface type: " + itype, LOG_ERROR)
+                continue
             try:
-                if itype == "UDPInterface":
-                    from .interfaces.udp import UDPInterface
-                    iface = UDPInterface(iface_config)
-                    self.interfaces.append(iface)
-                    Transport.register_interface(iface)
-                elif itype == "SerialInterface":
-                    from .interfaces.serial import SerialInterface
-                    iface = SerialInterface(iface_config)
-                    self.interfaces.append(iface)
-                    Transport.register_interface(iface)
-                else:
-                    log("Unknown interface type: " + itype, LOG_ERROR)
+                mod = __import__("urns.interfaces." + modname, None, None, (itype,))
+                cls = getattr(mod, itype)
+                iface = cls(iface_config)
+                self.interfaces.append(iface)
+                Transport.register_interface(iface)
             except Exception as e:
                 log("Interface " + itype + " init failed: " + str(e), LOG_ERROR)
 
