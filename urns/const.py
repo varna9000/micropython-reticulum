@@ -90,6 +90,7 @@ MAX_PATH_TABLE        = const(32)
 MAX_ACTIVE_LINKS      = const(4)
 MAX_ANNOUNCE_QUEUE    = const(16)
 MAX_RECEIPTS          = const(32)
+TRANSPORT_HOPLIMIT    = const(128)
 
 # Timing
 RATCHET_EXPIRY        = const(60 * 60 * 24 * 30)  # 30 days

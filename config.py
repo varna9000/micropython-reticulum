@@ -18,20 +18,21 @@ DEBUG = 2
 # Multiple interfaces can be active at the same time (e.g. WiFi + LoRa).
 CONFIG = {
     "loglevel": 3,
+    "enable_transport": True,
     "interfaces": [
 
         # ---- WiFi UDP ----
         # Broadcasts on the local LAN. Works with MeshChat / Sideband.
         # Set forward_ip to None for auto-detected subnet broadcast.
-        # {
-        #     "type": "UDPInterface",
-        #     "name": "WiFi UDP",
-        #     "enabled": True,
-        #     "listen_ip": "0.0.0.0",
-        #     "listen_port": 4242,
-        #     "forward_ip": "255.255.255.255",
-        #     "forward_port": 4242,
-        # },
+         # {
+         #     "type": "UDPInterface",
+         #     "name": "WiFi UDP",
+         #     "enabled": True,
+         #     "listen_ip": "0.0.0.0",
+         #     "listen_port": 4242,
+         #     "forward_ip": "255.255.255.255",
+         #     "forward_port": 4242,
+         # },
 
         # ---- E220 LoRa (EByte E220-900T) ----
         # Transparent serial LoRa. Both nodes must share channel and air_rate.
@@ -92,28 +93,39 @@ CONFIG = {
         # dio2_rf_sw: true = SX1262 internally drives DIO2 as RF switch (default, correct for Wio-SX1262)
         # dio3_tcxo_millivolts: 1800 for Wio-SX1262 TCXO. Set null to disable.
         #
+        # {
+        #     "type": "LoRaInterface",
+        #     "name": "LoRa SX1262",
+        #     "enabled": True,
+        #     "spi_bus": 1,
+        #     "sck_pin": 7,
+        #     "mosi_pin": 9,
+        #     "miso_pin": 8,
+        #     "cs_pin": 41,
+        #     "busy_pin": 40,
+        #     "dio1_pin": 39,
+        #     "reset_pin": 42,
+        #     "freq_khz": 868000,
+        #     "sf": 7,
+        #     "bw": "125",
+        #     "coding_rate": 5,
+        #     "tx_power": 14,
+        #     "preamble_len": 8,
+        #     "crc_en": True,
+        #     "syncword": 0x1424,
+        #     "dio2_rf_sw": True,
+        #     "dio3_tcxo_millivolts": 1800,
+        # },
+
+        # ---- TCP Client ----
+        # Connects to a remote RNS TCP server (TCPServerInterface).
+        # Uses HDLC framing, wire-compatible with reference Reticulum.
         {
-            "type": "LoRaInterface",
-            "name": "LoRa SX1262",
+            "type": "TCPClientInterface",
+            "name": "VarnaTransport",
             "enabled": True,
-            "spi_bus": 1,
-            "sck_pin": 7,
-            "mosi_pin": 9,
-            "miso_pin": 8,
-            "cs_pin": 41,
-            "busy_pin": 40,
-            "dio1_pin": 39,
-            "reset_pin": 42,
-            "freq_khz": 868000,
-            "sf": 7,
-            "bw": "125",
-            "coding_rate": 5,
-            "tx_power": 14,
-            "preamble_len": 8,
-            "crc_en": True,
-            "syncword": 0x1424,
-            "dio2_rf_sw": True,
-            "dio3_tcxo_millivolts": 1800,
+            "target_host": "rn.varnatransport.com",
+            "target_port": 4243,
         },
 
         # ---- Serial (for RNode / wired link) ----

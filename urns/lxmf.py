@@ -498,7 +498,7 @@ class LXMRouter:
                 peer_data = umsgpack.unpackb(app_data)
                 if isinstance(peer_data, list) and len(peer_data) >= 1:
                     dn = peer_data[0]
-                    if dn is None:
+                    if dn is None or dn is False:
                         return None
                     if isinstance(dn, bytes):
                         return dn.decode("utf-8")
