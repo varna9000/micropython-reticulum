@@ -10,6 +10,7 @@ from .identity import Identity
 from .destination import Destination
 from .packet import Packet, PacketReceipt
 from .transport import Transport
+from .link import Link
 from . import lxmf
 from .reticulum import Reticulum
 

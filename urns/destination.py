@@ -235,11 +235,25 @@ class Destination:
             return self.identity.sign(message)
         return None
 
+    def register_request_handler(self, path, response_generator=None, allow=ALLOW_NONE):
+        path_hash = Identity.truncated_hash(path.encode("utf-8"))
+        self.request_handlers[path_hash] = {
+            "path": path,
+            "generator": response_generator,
+            "allow": allow,
+        }
+        log("Registered request handler for " + path, LOG_VERBOSE)
+
     def receive(self, packet):
         if packet.packet_type == const.PKT_LINKREQUEST:
             if self.accept_link_requests:
-                # Link handling will be implemented in Phase 4
-                pass
+                try:
+                    from .link import Link
+                    import gc; gc.collect()
+                    link = Link(self, packet)
+                    gc.collect()
+                except Exception as e:
+                    log("Link creation failed: " + str(e), LOG_ERROR)
         else:
             plaintext = self.decrypt(packet.data)
             if plaintext is not None:

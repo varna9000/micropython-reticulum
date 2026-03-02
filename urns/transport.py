@@ -309,6 +309,16 @@ class Transport:
                     if l in Transport.pending_links:
                         Transport.pending_links.remove(l)
 
+                # Check active link keepalives and stale cleanup
+                closed_links = []
+                for link in Transport.active_links:
+                    link.check_keepalive()
+                    if link.status == 0x02:  # CLOSED
+                        closed_links.append(link)
+                for l in closed_links:
+                    if l in Transport.active_links:
+                        Transport.active_links.remove(l)
+
                 import gc
                 gc.collect()
 
