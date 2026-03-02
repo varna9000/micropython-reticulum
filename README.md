@@ -34,7 +34,10 @@ Requires MicroPython 1.22+. Should also work on other ESP32-S3 boards and Raspbe
 - **Announce & Discovery** — ESP32 announces itself with an LXMF-compatible display name. Appears in MeshChat's network visualizer. Receives and parses announces from other peers.
 - **Full Crypto Stack** — X25519 key exchange, Ed25519 signatures, AES-128-CBC encryption, HKDF, HMAC-SHA256 — all in pure Python, no C extensions.
 - **Wire Protocol** — Byte-identical packet format to reference Reticulum. Validated bidirectionally against the reference implementation.
+- **NomadNet Page Serving** — Serve micron-format pages to NomadNet clients over Reticulum Links. Full ECDH link handshake with request/response RPC for small pages (< ~350 bytes).
+- **Transport Mode** — Blind flood forwarding between interfaces. Bridge WiFi and LoRa so packets from one interface are relayed to all others.
 - **UDP Interface** — WiFi networking with auto-detected subnet broadcast. Non-blocking async I/O with ESP32 socket recovery.
+- **TCP Client Interface** — HDLC-framed TCP connection to remote RNS transport servers. Enables long-range connectivity beyond the local LAN.
 - **SX1262 SPI LoRa Interface** — Native SPI control of SX1262 LoRa radios (e.g. Seeed XIAO ESP32S3 + Wio-SX1262). Interoperates with RNode (SX1276/SX1278) and reference Reticulum over LoRa — bidirectional LXMF messaging, announces, and delivery proofs all work. Built-in fragmentation for Reticulum's 500-byte MTU over 255-byte LoRa packets. RSSI/SNR reporting.
 - **Serial Interface** — HDLC-framed UART for RNode, LoRa radios, packet radio TNCs, or ESP32-to-ESP32 links.
 - **Persistent Identity** — Keys and known destinations survive reboots. JSON configuration.
@@ -74,6 +77,8 @@ Commands are case-insensitive. Any other message is echoed back as a reply. This
 ```
 ureticulum/
 ├── example_node.py          # LXMF messaging node with NeoPixel control
+├── example_nomadnet_node.py # NomadNet page-serving node
+├── config.py                # Node configuration (WiFi, interfaces)
 ├── urns/
 │   ├── __init__.py          # Package entry point
 │   ├── const.py             # Protocol constants (matching reference RNS)
@@ -82,12 +87,14 @@ ureticulum/
 │   ├── destination.py       # Destination addressing, encryption, announce sending
 │   ├── packet.py            # Packet framing, proof generation, receipts
 │   ├── transport.py         # Packet routing, announce handling, interface management
+│   ├── link.py              # Server-side Reticulum Links (ECDH handshake, request/response)
 │   ├── lxmf.py              # LXMF message format, LXMessage, LXMRouter
 │   ├── umsgpack.py          # Minimal MessagePack (subset needed for LXMF)
 │   ├── log.py               # Logging with configurable verbosity
 │   ├── interfaces/
 │   │   ├── __init__.py      # Base Interface class
 │   │   ├── udp.py           # WiFi UDP with broadcast discovery
+│   │   ├── tcp.py           # HDLC-framed TCP client (for RNS transport servers)
 │   │   ├── serial.py        # HDLC-framed UART (RNode, LoRa, ESP-to-ESP)
 │   │   └── lora.py          # SX1262 SPI LoRa with fragmentation
 │   └── crypto/
@@ -290,17 +297,117 @@ mpremote mip install lora-sx126x
 
 **Fragmentation:** The SX1262 has a 255-byte packet limit while Reticulum's MTU is 500 bytes. The interface automatically fragments and reassembles packets — no configuration needed.
 
-See `config.py` for all config variants (UDP-only, LoRa-only, dual WiFi+LoRa). Set `CONFIG` at the bottom to choose the active one.
+### TCP Client Interface
+
+Connects to a remote RNS TCP server (e.g. a transport node). Uses HDLC framing, wire-compatible with reference Reticulum's `TCPServerInterface`. Auto-reconnects on connection loss.
+
+```json
+{
+  "type": "TCPClientInterface",
+  "name": "Transport Hub",
+  "enabled": true,
+  "target_host": "rn.example.com",
+  "target_port": 4243
+}
+```
+
+### Transport Mode
+
+Enable transport mode to relay packets between interfaces. This turns your ESP32 into a bridge — for example, forwarding between WiFi and LoRa so that LoRa-only nodes can reach the wider network.
+
+```json
+{
+  "enable_transport": true,
+  "interfaces": [
+    { "type": "UDPInterface", ... },
+    { "type": "LoRaInterface", ... }
+  ]
+}
+```
+
+Transport uses blind flood forwarding: packets received on one interface are re-sent on all others (with hop count incremented). No path computation or routing tables — simple and RAM-friendly.
+
+See `config.py` for all config variants (UDP, LoRa, TCP, dual WiFi+LoRa). Uncomment the interfaces you need.
+
+## NomadNet Page Serving
+
+µReticulum can serve [micron-format](https://github.com/markqvist/NomadNet) pages to NomadNet clients over Reticulum Links. This requires the full ECDH link handshake (3-packet exchange), after which the client can request pages via RPC.
+
+### Running the NomadNet Node
+
+1. Edit `config.py` with your WiFi credentials and interfaces
+2. Copy `urns/`, `config.py`, `pages/`, and `example_nomadnet_node.py` to the device
+3. Run:
+   ```python
+   import example_nomadnet_node
+   ```
+
+The node announces as `nomadnetwork.node` and serves pages from the `pages/` directory. Open NomadNet or MeshChat on another machine, discover the node, and browse to it.
+
+### Page Files
+
+Pages are `.mu` files in the `pages/` directory using NomadNet's [micron markup format](https://github.com/markqvist/NomadNet). Each file is automatically registered as a request handler at `/page/<filename>`.
+
+Example `pages/index.mu`:
+```
+>Welcome to {node_name}
+
+This node is running uReticulum on an ESP32.
+
+>> Status
+  Free memory: {mem_free}
+  Uptime: {uptime}
+```
+
+Supported template variables (substituted at serve time):
+
+| Variable | Description | Example output |
+|----------|-------------|----------------|
+| `{node_name}` | Node display name from config | `ESP32s3` |
+| `{mem_free}` | Free heap memory (human-readable) | `7.6 MB` |
+| `{uptime}` | Time since boot | `2h 15m 30s` |
+
+To add more pages, just drop `.mu` files into `pages/` — they are picked up automatically on boot. For example, `pages/about.mu` would be served at `/page/about.mu`.
+
+### Page Size Limits
+
+Pages are served as single encrypted link packets. After encryption overhead (AES-256-CBC IV, PKCS7 padding, HMAC-SHA256) and Reticulum packet headers, the maximum page content is **~350 bytes**. This is sufficient for status pages and short informational content.
+
+Pages exceeding this limit will be rejected with a log error. Serving larger pages would require Reticulum's Resource transfer protocol, which is not yet implemented.
+
+### Link Handshake
+
+When a NomadNet client connects, the following exchange occurs:
+
+```
+NomadNet Client                     ESP32 (µReticulum)
+   │                                       │
+   ├─ Link Request (X25519 pub key) ─────► │ Generate ephemeral X25519 keypair (~2s)
+   │                                       │ ECDH shared secret → HKDF → AES-256 Token
+   │                                       │
+   │ ◄───── Link Proof (signature + pub) ──┤ Sign with destination Ed25519 identity
+   │                                       │
+   ├─ RTT (encrypted) ──────────────────► │ Link ACTIVE
+   │                                       │
+   ├─ Page Request (encrypted RPC) ──────► │ Decrypt, look up handler by path hash
+   │                                       │ Read .mu file, substitute variables
+   │ ◄──────── Page Response (encrypted) ──┤ Encrypt and send
+   │                                       │
+```
+
+Each link consumes ~350 bytes of RAM. Up to 4 concurrent links are supported (`MAX_ACTIVE_LINKS=4`). Idle links are automatically cleaned up after 12 minutes.
 
 ## Compatibility
 
 Tested and confirmed working with:
 
 - **MeshChat** — Bi-directional announces, opportunistic messaging, delivery receipts
-- **Sideband / NomadNet** — Peer discovery, LXMF messaging
-- **Reference Reticulum** (Python) — Wire-compatible packets, announces, encryption
+- **Sideband** — Peer discovery, LXMF messaging
+- **NomadNet** — Peer discovery, LXMF messaging, page serving over Links
+- **Reference Reticulum** (Python) — Wire-compatible packets, announces, encryption, link handshake
 - **Reference LXMF** — Cross-validated message packing/unpacking, signature verification
 - **RNode** (SX1276/SX1278) — Bidirectional LoRa: announces, encrypted LXMF messages, delivery proofs. Tested with Heltec Wireless Stick Lite V1 running RNode firmware on 868 MHz
+- **RNS Transport Servers** — TCP client connectivity to remote transport hubs
 
 ## ESP32 Socket Workarounds
 
@@ -326,9 +433,10 @@ The driver source code appears correct (it uses `n_read=1` to consume the SX1262
 ## Limitations
 
 - **MicroPython only** — no CPython/desktop support. Uses `uhashlib`, `ucryptolib`, `uasyncio`, `micropython.const` directly.
-- **Opportunistic delivery only** — Single-packet messages up to ~295 bytes content. Link-based delivery (for larger messages) is not yet implemented.
+- **Opportunistic LXMF only** — Single-packet messages up to ~295 bytes content. Link-based LXMF delivery (for larger messages) requires Resource transfer, which is not yet implemented.
+- **Small pages only** — NomadNet page responses must fit in a single link packet (~350 bytes). Resource transfer for larger pages is not yet implemented.
+- **Server-side links only** — Can accept incoming links (for page serving), but cannot initiate outbound links.
 - **No propagation nodes** — Cannot store-and-forward messages for offline peers.
-- **No transport nodes** — Cannot relay packets between interfaces (single-interface only).
 - **Pure Python crypto** — ~4 second message round-trip on ESP32. `@micropython.viper` could significantly speed this up.
 
 ## What's Next
@@ -336,8 +444,8 @@ The driver source code appears correct (it uses `n_read=1` to consume the SX1262
 Potential areas for expansion:
 
 - **Viper-accelerated crypto** — `@micropython.viper` native compilation for field arithmetic could bring X25519 from ~1.4s to ~0.2s
-- **Link-based delivery** — Support for messages larger than a single packet
-- **Multi-interface routing** — Bridge WiFi <-> LoRa for mesh relay
+- **Resource transfer** — Multi-packet streaming over Links for large pages and link-based LXMF delivery
+- **Client-side links** — Initiate outbound links for direct LXMF delivery
 - **More hardware control** — Expand NeoPixel example to sensors, relays, displays
 - **Propagation node** — Store-and-forward for offline peers
 

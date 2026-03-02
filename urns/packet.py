@@ -272,6 +272,17 @@ class ProofDestination:
         return plaintext
 
 
+class LinkDestination:
+    """Pseudo-destination for packets addressed to a link_id."""
+    def __init__(self, link_id):
+        self.hash = link_id
+        self.link_id = link_id
+        self.type = const.DEST_LINK
+
+    def encrypt(self, plaintext):
+        return plaintext
+
+
 class PacketReceipt:
     FAILED    = 0x00
     SENT      = 0x01
