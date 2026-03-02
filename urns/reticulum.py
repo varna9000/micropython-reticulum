@@ -122,15 +122,20 @@ class Reticulum:
     # Map interface type names to their module files.
     # Add new interfaces here: "TypeName": "module_name"
     _INTERFACE_MAP = {
-        "UDPInterface":    "udp",
-        "SerialInterface": "serial",
-        "E220Interface":   "e220",
-        "LoRaInterface":   "lora",
+        "UDPInterface":       "udp",
+        "SerialInterface":    "serial",
+        "E220Interface":      "e220",
+        "LoRaInterface":      "lora",
+        "TCPClientInterface": "tcp",
     }
 
     def setup_interfaces(self):
         """Initialize network interfaces from config. Call after WiFi is connected.
         Only the modules for configured interfaces are imported."""
+        Transport.transport_enabled = self.config.get("enable_transport", False)
+        if Transport.transport_enabled:
+            log("Transport mode enabled", LOG_NOTICE)
+
         for iface_config in self.config.get("interfaces", []):
             if not iface_config.get("enabled", True):
                 continue

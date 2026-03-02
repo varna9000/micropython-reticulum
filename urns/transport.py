@@ -1,5 +1,5 @@
 # µReticulum Transport
-# Simplified for leaf-node mode (no forwarding)
+# Supports optional transport mode (blind flood forwarding between interfaces)
 # Uses uasyncio instead of threading
 
 import os
@@ -30,6 +30,8 @@ class Transport:
     destination_table = {}
     blackholed_identities = []
 
+    transport_enabled = False
+
     _jobs_running = False
     _last_job = 0
 
@@ -37,8 +39,12 @@ class Transport:
     def start(owner):
         Transport.owner = owner
         Transport.identity = owner.identity
+        Transport.transport_enabled = owner.config.get("enable_transport", False)
         Transport._jobs_running = True
-        log("Transport engine started", LOG_VERBOSE)
+        if Transport.transport_enabled:
+            log("Transport engine started — TRANSPORT MODE", LOG_NOTICE)
+        else:
+            log("Transport engine started", LOG_VERBOSE)
 
     @staticmethod
     def stop():
@@ -126,6 +132,28 @@ class Transport:
         Transport.packet_hashlist.append(packet_hash)
 
     @staticmethod
+    def _forward(raw, receiving_interface):
+        """Forward raw packet to all interfaces except the one it arrived on"""
+        hops = raw[1]
+        if hops >= const.TRANSPORT_HOPLIMIT:
+            log("Forward: hop limit reached (" + str(hops) + "), dropping", LOG_DEBUG)
+            return
+
+        fwd = bytearray(raw)
+        fwd[1] = hops + 1
+
+        for interface in Transport.interfaces:
+            if interface is receiving_interface:
+                continue
+            if not interface.online:
+                continue
+            try:
+                interface.process_outgoing(fwd)
+                log("Forward: " + str(len(fwd)) + "B " + receiving_interface.name + " -> " + interface.name + " hops=" + str(fwd[1]), LOG_DEBUG)
+            except Exception as e:
+                log("Forward error on " + interface.name + ": " + str(e), LOG_ERROR)
+
+    @staticmethod
     def inbound(raw, interface=None):
         """Process an incoming raw packet from an interface"""
         from .packet import Packet
@@ -166,18 +194,21 @@ class Transport:
             Transport._cache_packet_hash(packet)
 
             # Route the packet
+            local = False
             if packet.packet_type == const.PKT_ANNOUNCE:
                 log("Inbound: processing announce", LOG_DEBUG)
                 Transport._handle_announce(packet)
-
             elif packet.packet_type == const.PKT_LINKREQUEST:
-                Transport._handle_linkrequest(packet)
-
+                local = Transport._handle_linkrequest(packet)
             elif packet.packet_type == const.PKT_DATA:
-                Transport._handle_data(packet)
-
+                local = Transport._handle_data(packet)
             elif packet.packet_type == const.PKT_PROOF:
-                Transport._handle_proof(packet)
+                local = Transport._handle_proof(packet)
+
+            # Forward: announces always, other types only if not consumed locally
+            if Transport.transport_enabled and interface is not None:
+                if packet.packet_type == const.PKT_ANNOUNCE or not local:
+                    Transport._forward(raw, interface)
 
         except Exception as e:
             log("Error processing inbound packet: " + str(e), LOG_ERROR)
@@ -211,7 +242,8 @@ class Transport:
         for dest in Transport.destinations:
             if dest.hash == packet.destination_hash:
                 dest.receive(packet)
-                return
+                return True
+        return False
 
     @staticmethod
     def _handle_data(packet):
@@ -219,12 +251,13 @@ class Transport:
         for dest in Transport.destinations:
             if dest.hash == packet.destination_hash:
                 dest.receive(packet)
-                return
+                return True
         # Check active links
         for link in Transport.active_links:
             if link.link_id == packet.destination_hash:
                 link.receive(packet)
-                return
+                return True
+        return False
 
     @staticmethod
     def _handle_proof(packet):
@@ -233,12 +266,13 @@ class Transport:
             for link in Transport.pending_links:
                 if link.link_id == packet.destination_hash:
                     link.validate_proof(packet)
-                    return
+                    return True
         else:
             # Regular proof - check receipts
             for receipt in Transport.receipts:
                 if receipt.validate_proof_packet(packet):
-                    return
+                    return True
+        return False
 
     @staticmethod
     def hops_to(destination_hash):
