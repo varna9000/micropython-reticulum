@@ -2,25 +2,23 @@
 # Direct SPI control via micropython-lib lora-sx126x driver.
 # Install: mpremote mip install lora-sx126x
 #
-# Fragmentation: SX1262 max packet = 255 bytes, Reticulum MTU = 500.
-# 1-byte header per LoRa frame: bits 7-6 = type, bits 5-0 = seq (0-63).
+# RNode-compatible framing: 1-byte header per LoRa frame.
+# Upper nibble = random sequence, bit 0 = FLAG_SPLIT.
+# Packets > 254 bytes are split across exactly 2 frames (max 508B).
+# Compatible with RNode firmware and reference Reticulum.
 
+import os
 import gc
 import time
 from . import Interface
 from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
 
-# Fragment types (upper 2 bits)
-_SINGLE = const(0x00)
-_FIRST  = const(0x40)
-_MIDDLE = const(0x80)
-_LAST   = const(0xC0)
+# RNode header constants (matches RNode_Firmware Framing.h)
+_FLAG_SPLIT = const(0x01)
+_SEQ_MASK   = const(0xF0)
 
-_TYPE_MASK = const(0xC0)
-_SEQ_MASK  = const(0x3F)
-
-# Max payload per LoRa frame (255 - 1 byte header)
-_FRAG_PAYLOAD = const(254)
+# Max payload per LoRa frame (255 - 1 byte RNode header)
+_FRAME_PAYLOAD = const(254)
 
 # Reassembly timeout (seconds)
 _REASM_TIMEOUT = const(15)
@@ -60,15 +58,7 @@ class LoRaInterface(Interface):
 
         self._modem = None
 
-        # Fragmentation: disabled by default for RNode interop.
-        # RNode sends raw Reticulum packets with no fragment header.
-        # Enable only for SX1262-to-SX1262 links needing MTU > 255.
-        self._fragment_en = config.get("fragment", False)
-
-        # Fragment TX state
-        self._seq_counter = 0
-
-        # Reassembly RX state
+        # Split-packet reassembly state
         self._reasm_buf = None
         self._reasm_seq = None
         self._reasm_time = 0
@@ -119,101 +109,36 @@ class LoRaInterface(Interface):
         self._modem.rx_crc_error = True  # Surface CRC-failed packets for diagnostics
         self._modem.start_recv(continuous=True)
 
-    def _next_seq(self):
-        seq = self._seq_counter & _SEQ_MASK
-        self._seq_counter = (self._seq_counter + 1) & _SEQ_MASK
-        return seq
-
-    def _fragment(self, data):
-        """Split data into LoRa-sized frames with 1-byte fragment header."""
-        if len(data) <= _FRAG_PAYLOAD:
-            seq = self._next_seq()
-            return [bytes([_SINGLE | seq]) + data]
-
-        seq = self._next_seq()
-        frames = []
-        offset = 0
-
-        # First fragment
-        frames.append(bytes([_FIRST | seq]) + data[offset:offset + _FRAG_PAYLOAD])
-        offset += _FRAG_PAYLOAD
-
-        # Middle fragments (not needed at MTU=500, but correct for any size)
-        while offset + _FRAG_PAYLOAD < len(data):
-            frames.append(bytes([_MIDDLE | seq]) + data[offset:offset + _FRAG_PAYLOAD])
-            offset += _FRAG_PAYLOAD
-
-        # Last fragment
-        frames.append(bytes([_LAST | seq]) + data[offset:])
-        return frames
-
-    def _reassemble(self, raw):
-        """Process a received LoRa frame. Returns complete packet or None."""
-        if len(raw) < 2:
-            return None
-
-        hdr = raw[0]
-        ftype = hdr & _TYPE_MASK
-        seq = hdr & _SEQ_MASK
-        payload = raw[1:]
-
-        if ftype == _SINGLE:
-            return payload
-
-        now = time.time()
-
-        if ftype == _FIRST:
-            self._reasm_buf = bytearray(payload)
-            self._reasm_seq = seq
-            self._reasm_time = now
-            return None
-
-        # MIDDLE or LAST — must match current reassembly
-        if self._reasm_buf is None or self._reasm_seq != seq:
-            self._reasm_buf = None
-            return None
-
-        if now - self._reasm_time > _REASM_TIMEOUT:
-            log("LoRa reassembly timeout", LOG_DEBUG)
-            self._reasm_buf = None
-            return None
-
-        self._reasm_buf.extend(payload)
-
-        if ftype == _LAST:
-            result = bytes(self._reasm_buf)
-            self._reasm_buf = None
-            self._reasm_seq = None
-            return result
-
-        # MIDDLE — keep accumulating
-        return None
-
     def process_outgoing(self, data):
         if not self.online or not self._modem:
             return False
 
         try:
-            # Prepend dummy byte to compensate for SX1262 FIFO
-            # write-offset artifact (symmetric with RX strip).
-            data = b'\x00' + data
+            if len(data) > 2 * _FRAME_PAYLOAD:
+                log("LoRa drop: " + str(len(data)) + "B exceeds " + str(2 * _FRAME_PAYLOAD), LOG_DEBUG)
+                return False
 
-            if self._fragment_en:
-                frames = self._fragment(data)
-                for frame in frames:
-                    self._modem.send(frame)
-                log("LoRa sent " + str(len(data) - 1) + "B in "
-                    + str(len(frames)) + " frame(s)", LOG_DEBUG)
+            # RNode-compatible header: random seq in upper nibble.
+            # The SX1262 driver sends all bytes faithfully — no FIFO
+            # offset bug.  The old b'\x00' dummy byte was actually
+            # being sent over the air as a valid RNode header (seq=0,
+            # no split).  Now we send a proper header instead.
+            header = os.urandom(1)[0] & _SEQ_MASK
+
+            if len(data) > _FRAME_PAYLOAD:
+                # Split into 2 frames (RNode protocol)
+                header |= _FLAG_SPLIT
+                hdr = bytes([header])
+                self._modem.send(hdr + data[:_FRAME_PAYLOAD])
+                self._modem.send(hdr + data[_FRAME_PAYLOAD:])
+                log("LoRa TX " + str(len(data)) + "B split seq=" + hex(header >> 4), LOG_DEBUG)
             else:
-                if len(data) > 256:
-                    log("LoRa drop: " + str(len(data) - 1) + "B exceeds 255 (fragment=False)", LOG_ERROR)
-                    return False
-                self._modem.send(data)
-                log("LoRa sent " + str(len(data) - 1) + "B raw", LOG_DEBUG)
-                log("LoRa TX raw[0:20]=" + data[1:21].hex(), LOG_DEBUG)
+                # Single frame
+                self._modem.send(bytes([header]) + data)
+                log("LoRa TX " + str(len(data)) + "B", LOG_DEBUG)
 
             self._modem.start_recv(continuous=True)
-            self.txb += len(data) - 1
+            self.txb += len(data)
             self.tx += 1
             self._last_activity = time.time()
             return True
@@ -228,8 +153,7 @@ class LoRaInterface(Interface):
     async def poll_loop(self):
         import uasyncio as asyncio
 
-        log("LoRa poll loop started for " + self.name
-            + " fragment=" + str(self._fragment_en), LOG_NOTICE)
+        log("LoRa poll loop started for " + self.name, LOG_NOTICE)
 
         _last_gc = time.time()
         _last_diag = time.time()
@@ -255,11 +179,10 @@ class LoRaInterface(Interface):
                     _rx_pkt_count = 0
                     _last_diag = now
 
-                # Stale reassembly cleanup (only when fragmentation enabled)
-                if (self._fragment_en
-                        and self._reasm_buf is not None
+                # Stale reassembly cleanup
+                if (self._reasm_buf is not None
                         and now - self._reasm_time > _REASM_TIMEOUT):
-                    log("LoRa discarding stale fragment", LOG_DEBUG)
+                    log("LoRa discarding stale split fragment", LOG_DEBUG)
                     self._reasm_buf = None
                     self._reasm_seq = None
 
@@ -282,27 +205,47 @@ class LoRaInterface(Interface):
                     log("LoRa RX raw " + str(len(raw)) + "B"
                         + " RSSI=" + str(getattr(rx, "rssi", "?"))
                         + " SNR=" + str(getattr(rx, "snr", "?")), LOG_DEBUG)
-                    log("LoRa RX hex[0:20]=" + raw[:20].hex(), LOG_DEBUG)
 
                     if hasattr(rx, "valid_crc") and not rx.valid_crc:
                         log("LoRa CRC fail, discarding", LOG_DEBUG)
                         await asyncio.sleep(0.05)
                         continue
 
-                    # The lora-sx126x driver prepends one spurious byte
-                    # when reading from the SX1262 FIFO (buffer-offset
-                    # artifact).  Byte 0 varies across receptions of the
-                    # same packet while bytes 1+ are the real payload.
-                    if len(raw) > 1:
-                        raw = raw[1:]
-                    else:
+                    # raw[0] is the RNode header byte.  The lora-sx126x
+                    # driver returns the exact bytes received over the air
+                    # — there is no FIFO offset bug.  (The old raw[1:]
+                    # "spurious byte strip" was actually stripping the
+                    # RNode header, which happened to work for non-split
+                    # packets.)
+                    if len(raw) < 2:
                         await asyncio.sleep(0.05)
                         continue
 
-                    if self._fragment_en:
-                        pkt = self._reassemble(raw)
+                    header = raw[0]
+                    payload = raw[1:]
+
+                    if header & _FLAG_SPLIT:
+                        # Split packet — reassemble 2 frames
+                        seq = header & _SEQ_MASK
+                        if self._reasm_buf is None or self._reasm_seq != seq:
+                            # First fragment (or new seq replaces stale one)
+                            if self._reasm_buf is not None:
+                                log("LoRa split seq mismatch, restarting", LOG_DEBUG)
+                            self._reasm_buf = bytearray(payload)
+                            self._reasm_seq = seq
+                            self._reasm_time = time.time()
+                            log("LoRa split frame 1: " + str(len(payload)) + "B seq=" + hex(seq >> 4), LOG_DEBUG)
+                            pkt = None
+                        else:
+                            # Second fragment — matching sequence
+                            self._reasm_buf.extend(payload)
+                            pkt = bytes(self._reasm_buf)
+                            self._reasm_buf = None
+                            self._reasm_seq = None
+                            log("LoRa split frame 2: " + str(len(payload)) + "B -> " + str(len(pkt)) + "B total", LOG_DEBUG)
                     else:
-                        pkt = raw
+                        # Non-split packet
+                        pkt = payload
 
                     if pkt is not None:
                         _rx_pkt_count += 1

@@ -14,10 +14,14 @@ from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
 import gc
 gc.collect()
 
-from machine import Pin
+from machine import Pin, SoftI2C
 import neopixel
+import sensors.bme280 as bme280
 
-led = neopixel.NeoPixel(Pin(21),1)
+i2c = SoftI2C(scl=Pin(6), sda=Pin(5),freq=100000)
+bme = bme280.BME280(i2c=i2c)
+
+#led = neopixel.NeoPixel(Pin(21),1)
 colors={"green":(255,0,0),
         "red":(0,255,0),
         "blue":(0,0,255),
@@ -99,8 +103,13 @@ def setup_node(rns, node_name):
         content = message.content_as_string() or "(binary)"
 
         if content.lower() in colors.keys():
-            led[0]=colors[content.lower()]
-            led.write()
+            #led[0]=colors[content.lower()]
+            #led.write()
+            pass
+
+        if "sensor" in content.lower():
+            t, p, h = bme.values
+            content = "Temperature: {}, Pressure: {}, Humidity: {}".format(t, p, h)
             
         if DEBUG >= 1:
             print()
@@ -114,6 +123,7 @@ def setup_node(rns, node_name):
             print("=" * 40)
 
         # Queue async echo reply (non-blocking)
+        #asyncio.create_task(send_echo_reply(router, message.source_hash, content))
         asyncio.create_task(send_echo_reply(router, message.source_hash, content))
         gc.collect()
 

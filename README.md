@@ -37,8 +37,8 @@ Requires MicroPython 1.22+. Should also work on other ESP32-S3 boards and Raspbe
 - **NomadNet Page Serving** — Serve micron-format pages to NomadNet clients over Reticulum Links. Full ECDH link handshake with request/response RPC for small pages (< ~350 bytes).
 - **Transport Mode** — Blind flood forwarding between interfaces. Bridge WiFi and LoRa so packets from one interface are relayed to all others.
 - **UDP Interface** — WiFi networking with auto-detected subnet broadcast. Non-blocking async I/O with ESP32 socket recovery.
-- **TCP Client Interface** — HDLC-framed TCP connection to remote RNS transport servers. Enables long-range connectivity beyond the local LAN.
-- **SX1262 SPI LoRa Interface** — Native SPI control of SX1262 LoRa radios (e.g. Seeed XIAO ESP32S3 + Wio-SX1262). Interoperates with RNode (SX1276/SX1278) and reference Reticulum over LoRa — bidirectional LXMF messaging, announces, and delivery proofs all work. Built-in fragmentation for Reticulum's 500-byte MTU over 255-byte LoRa packets. RSSI/SNR reporting.
+- **TCP Client Interface** — HDLC-framed TCP connection to remote RNS transport servers. Automatic transport path routing: learns relay paths from HDR_2 announces and wraps outbound DATA packets for correct delivery through the transport server. Enables long-range connectivity beyond the local LAN.
+- **SX1262 SPI LoRa Interface** — Native SPI control of SX1262 LoRa radios (e.g. Seeed XIAO ESP32S3 + Wio-SX1262). Implements RNode-compatible split-packet framing: packets up to 500 bytes are transparently split across two 255-byte LoRa frames, matching the exact protocol used by RNode firmware. Full interop with RNode (SX1276/SX1278) — bidirectional LXMF messaging, announces, and delivery proofs all work. RSSI/SNR reporting.
 - **Serial Interface** — HDLC-framed UART for RNode, LoRa radios, packet radio TNCs, or ESP32-to-ESP32 links.
 - **Persistent Identity** — Keys and known destinations survive reboots. JSON configuration.
 
@@ -96,7 +96,7 @@ ureticulum/
 │   │   ├── udp.py           # WiFi UDP with broadcast discovery
 │   │   ├── tcp.py           # HDLC-framed TCP client (for RNS transport servers)
 │   │   ├── serial.py        # HDLC-framed UART (RNode, LoRa, ESP-to-ESP)
-│   │   └── lora.py          # SX1262 SPI LoRa with fragmentation
+│   │   └── lora.py          # SX1262 SPI LoRa with RNode-compatible split framing
 │   └── crypto/
 │       ├── x25519.py        # X25519 ECDH key exchange
 │       ├── ed25519.py       # Ed25519 signing/verification
@@ -295,7 +295,7 @@ mpremote mip install lora-sx126x
 - `dio2_rf_sw`: `true` — SX1262 internally drives DIO2 as RF switch (default, correct for Wio-SX1262)
 - `dio3_tcxo_millivolts`: `1800` for Wio-SX1262 TCXO (default). Set `null` to disable for modules with a crystal oscillator instead of TCXO.
 
-**Fragmentation:** The SX1262 has a 255-byte packet limit while Reticulum's MTU is 500 bytes. The interface automatically fragments and reassembles packets — no configuration needed.
+**Split-packet framing:** The SX1262 has a 255-byte packet limit while Reticulum's MTU is 500 bytes. The interface uses RNode-compatible split-packet framing: a 1-byte header is prepended to every LoRa frame (random 4-bit sequence in the upper nibble, FLAG_SPLIT in bit 0). Packets up to 254 bytes are sent as a single frame; larger packets are split across exactly two frames with matching sequence numbers — the same protocol used by RNode firmware. No configuration needed.
 
 ### TCP Client Interface
 
@@ -406,8 +406,8 @@ Tested and confirmed working with:
 - **NomadNet** — Peer discovery, LXMF messaging, page serving over Links
 - **Reference Reticulum** (Python) — Wire-compatible packets, announces, encryption, link handshake
 - **Reference LXMF** — Cross-validated message packing/unpacking, signature verification
-- **RNode** (SX1276/SX1278) — Bidirectional LoRa: announces, encrypted LXMF messages, delivery proofs. Tested with Heltec Wireless Stick Lite V1 running RNode firmware on 868 MHz
-- **RNS Transport Servers** — TCP client connectivity to remote transport hubs
+- **RNode** (SX1276/SX1278) — Bidirectional LoRa: announces, encrypted LXMF messages, delivery proofs. Full split-packet support for the complete Reticulum 500-byte MTU. Tested with Heltec Wireless Stick Lite V1 running RNode firmware on 868 MHz
+- **RNS Transport Servers** — TCP client connectivity to remote transport hubs. Automatic path learning from announces: outbound DATA packets are wrapped as HDR_2 TRANSPORT for correct relay routing
 
 ## ESP32 Socket Workarounds
 
@@ -420,15 +420,33 @@ The UDP interface includes several workarounds for ESP32 MicroPython lwIP quirks
 - **WiFi power management disabled** — `wlan.config(pm=0)` is required to receive broadcast UDP packets.
 - **AP_IF deactivated** — dual-interface mode routes broadcast packets to AP instead of STA, preventing UDP broadcast reception.
 
-## SX1262 LoRa Workarounds
+## SX1262 LoRa — RNode Split-Packet Protocol
 
-The LoRa interface includes workarounds for a FIFO buffer offset issue in the `lora-sx126x` driver on ESP32-S3 + Wio-SX1262 hardware:
+The LoRa interface implements the same split-packet framing as [RNode firmware](https://github.com/markqvist/RNode_Firmware), enabling transparent interop with RNode devices and support for Reticulum's full 500-byte MTU over LoRa's 255-byte frame limit.
 
-- **RX byte stripping** — The SX1262 receive path prepends one spurious byte (a FIFO status/offset artifact) before the actual LoRa payload. This byte varies between receptions of the same packet while bytes 1+ remain stable. The interface strips this leading byte before passing data to the Reticulum stack.
-- **TX byte prepending** — Symmetrically, the transmit path loses the first byte of data written to the FIFO. A dummy `0x00` byte is prepended before sending so the actual packet data starts at the correct offset.
-- **IFAC filtering** — Packets with bit 7 set in the flags byte (IFAC-tagged) are dropped on receipt, since µReticulum does not implement Interface Access Codes. This matches reference Reticulum behavior for non-IFAC interfaces.
+### How it works
 
-The driver source code appears correct (it uses `n_read=1` to consume the SX1262 NOP byte), so this is likely a platform-specific SPI timing issue on ESP32-S3 rather than a driver bug.
+Every LoRa frame carries a **1-byte RNode header**:
+
+| Bits | Field | Description |
+|------|-------|-------------|
+| 7–4 | Sequence | Random 4-bit value for matching split halves |
+| 0 | FLAG_SPLIT | Set when packet is split across 2 frames |
+
+- **Single frame** (data ≤ 254 bytes): `[header] [data]` — max 255 bytes
+- **Split packet** (data 255–508 bytes): Two frames with the same header byte (same sequence + FLAG_SPLIT), sent back-to-back:
+  - Frame 1: `[header] [first 254 bytes]` = 255 bytes
+  - Frame 2: `[header] [remaining bytes]`
+
+The receiver matches split frames by sequence number and reassembles them into a complete Reticulum packet. Stale fragments are discarded after 15 seconds.
+
+### Note on the `lora-sx126x` driver
+
+The `lora-sx126x` MicroPython driver (`mpremote mip install lora-sx126x`) sends and receives bytes faithfully — the RNode header byte is the first byte returned by `poll_recv()` on RX and the first byte written by `send()` on TX. No FIFO offset workarounds are needed.
+
+### IFAC filtering
+
+Packets with bit 7 set in the Reticulum flags byte (IFAC-tagged) are dropped on receipt, since µReticulum does not implement Interface Access Codes. This matches reference Reticulum behavior for non-IFAC interfaces.
 
 ## Limitations
 

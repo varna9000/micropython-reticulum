@@ -35,6 +35,8 @@ class Link:
     KEEPALIVE_INTERVAL  = 360   # seconds
     STALE_GRACE         = 720   # seconds
     ESTABLISHMENT_TIMEOUT = 25  # seconds (extra margin for slow ECDH on ESP32)
+    CREATION_COOLDOWN   = 15    # min seconds between link creations (ESP32: ECDH ~5s)
+    _last_creation      = 0
 
     def __init__(self, destination, packet):
         from .identity import Identity
@@ -75,6 +77,30 @@ class Link:
 
         log("Link request on " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8], LOG_VERBOSE)
 
+        # --- Check capacity and rate limit BEFORE expensive crypto ---
+        # ECDH + signing takes ~5s on ESP32, blocking the entire event loop.
+        # Reject early to avoid starving poll loops, announces, and replies.
+        from .transport import Transport
+        if len(Transport.active_links) >= const.MAX_ACTIVE_LINKS:
+            evicted = False
+            for i, l in enumerate(Transport.active_links):
+                if l.status == Link.CLOSED:
+                    Transport.active_links.pop(i)
+                    evicted = True
+                    break
+            if not evicted:
+                log("Active links table full, rejecting link", LOG_ERROR)
+                self.status = Link.CLOSED
+                return
+
+        now = time.time()
+        if now - Link._last_creation < Link.CREATION_COOLDOWN:
+            log("Link request rate limited (" + str(int(Link.CREATION_COOLDOWN - (now - Link._last_creation))) + "s remaining)", LOG_DEBUG)
+            self.status = Link.CLOSED
+            return
+
+        Link._last_creation = now
+
         # Generate ephemeral X25519 keypair for ECDH
         import gc; gc.collect()
         ephemeral_prv = X25519PrivateKey.generate()
@@ -96,18 +122,6 @@ class Link:
         gc.collect()
 
         # Register with Transport
-        from .transport import Transport
-        if len(Transport.active_links) >= const.MAX_ACTIVE_LINKS:
-            evicted = False
-            for i, l in enumerate(Transport.active_links):
-                if l.status == Link.CLOSED:
-                    Transport.active_links.pop(i)
-                    evicted = True
-                    break
-            if not evicted:
-                log("Active links table full, rejecting link", LOG_ERROR)
-                self.status = Link.CLOSED
-                return
         Transport.active_links.append(self)
 
         # Send link proof (packet 2 of handshake)

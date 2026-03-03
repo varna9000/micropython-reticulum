@@ -28,6 +28,7 @@ class Transport:
     receipts = []
     announce_table = {}
     destination_table = {}
+    path_table = {}          # dest_hash -> transport_id (from HDR_2 announces)
     blackholed_identities = []
 
     transport_enabled = False
@@ -163,7 +164,7 @@ class Transport:
             if len(raw) < 2:
                 return
 
-            log("Inbound: " + str(len(raw)) + " bytes, flags=0x" + ("%02x" % raw[0]), LOG_DEBUG)
+            log("Inbound: " + str(len(raw)) + " bytes, flags=0x" + ("%02x" % raw[0]), LOG_EXTREME)
 
             # Drop IFAC-tagged packets (bit 7 set). µReticulum does not
             # implement IFAC, so these cannot be decoded. Per reference RNS,
@@ -221,6 +222,17 @@ class Transport:
         gc.collect()
         if valid:
             log("Valid announce from " + packet.destination_hash.hex(), LOG_NOTICE)
+
+            # Record transport path from HDR_2 announces so outbound
+            # DATA packets can be routed via the transport node.
+            if packet.header_type == const.HDR_2 and packet.transport_id:
+                if len(Transport.path_table) < const.MAX_PATH_TABLE or packet.destination_hash in Transport.path_table:
+                    Transport.path_table[packet.destination_hash] = packet.transport_id
+                    log("Path: " + packet.destination_hash.hex()[:8] + " via transport " + packet.transport_id.hex()[:8], LOG_VERBOSE)
+            elif packet.header_type == const.HDR_1:
+                # Direct announce — remove transport path if any
+                Transport.path_table.pop(packet.destination_hash, None)
+
             app_data = Identity.recall_app_data(packet.destination_hash)
             if app_data:
                 log("Announce app_data: " + str(app_data), LOG_VERBOSE)
@@ -247,9 +259,9 @@ class Transport:
 
     @staticmethod
     def _handle_data(packet):
-        import gc; gc.collect()
         for dest in Transport.destinations:
             if dest.hash == packet.destination_hash:
+                import gc; gc.collect()
                 dest.receive(packet)
                 return True
         # Check active links
