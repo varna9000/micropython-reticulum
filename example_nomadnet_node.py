@@ -16,6 +16,11 @@ Usage (MicroPython on ESP32/Pico W):
 """
 
 from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
+from machine import SoftI2C, Pin
+import sensors.bme280 as bme280
+
+i2c = SoftI2C(scl=Pin(6), sda=Pin(5),freq=100000)
+bme = bme280.BME280(i2c=i2c)
 
 import gc
 import time
@@ -113,6 +118,7 @@ def load_pages(dest, pages_dir="pages"):
                 except:
                     page = page.replace(b"{mem_free}", b"?")
                 page = page.replace(b"{uptime}", fmt_uptime(time.time() - _boot_time).encode("utf-8"))
+                page = page.replace(b"{sensor}", "Temperature: {}, Pressure: {}, Humidity: {}".format(*bme.values).encode("utf-8"))
                 return page
             return handler
 
@@ -133,7 +139,7 @@ def load_pages(dest, pages_dir="pages"):
 def main():
     import uasyncio as asyncio
 
-    ip = connect_wifi(WIFI_SSID, WIFI_PASS)
+    #ip = connect_wifi(WIFI_SSID, WIFI_PASS)
     gc.collect()
 
     from urns import Reticulum, Destination
