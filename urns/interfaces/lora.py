@@ -30,6 +30,11 @@ class LoRaInterface(Interface):
         name = config.get("name", "LoRa SX1262")
         super().__init__(name)
 
+        # External SPI + bus arbitration (for shared SPI, e.g. T-Deck)
+        self._external_spi = config.get("spi", None)
+        self._spi_acquire = config.get("spi_acquire", None)
+        self._spi_release = config.get("spi_release", None)
+
         # SPI bus and pin numbers
         self._spi_bus = config.get("spi_bus", 1)
         self._sck_pin = config.get("sck_pin", 7)
@@ -45,6 +50,7 @@ class LoRaInterface(Interface):
         # DIO2/DIO3 options
         self._dio2_rf_sw = config.get("dio2_rf_sw", True)
         self._dio3_tcxo_mv = config.get("dio3_tcxo_millivolts", 1800)
+        self._use_dcdc = config.get("use_dcdc", False)
 
         # Radio parameters
         self._freq_khz = config.get("freq_khz", 868000)
@@ -77,13 +83,16 @@ class LoRaInterface(Interface):
         from machine import SPI, Pin
         from lora import SX1262
 
-        spi = SPI(
-            self._spi_bus,
-            baudrate=2_000_000,
-            sck=Pin(self._sck_pin),
-            mosi=Pin(self._mosi_pin),
-            miso=Pin(self._miso_pin),
-        )
+        if self._external_spi:
+            spi = self._external_spi
+        else:
+            spi = SPI(
+                self._spi_bus,
+                baudrate=2_000_000,
+                sck=Pin(self._sck_pin),
+                mosi=Pin(self._mosi_pin),
+                miso=Pin(self._miso_pin),
+            )
 
         kwargs = {
             "spi": spi,
@@ -103,16 +112,40 @@ class LoRaInterface(Interface):
                 "syncword": self._syncword,
             },
         }
-        kwargs["dio3_tcxo_millivolts"] = self._dio3_tcxo_mv
+        if self._dio3_tcxo_mv is not None:
+            kwargs["dio3_tcxo_millivolts"] = self._dio3_tcxo_mv
 
         self._modem = SX1262(**kwargs)
+
+        # Set DC-DC regulator mode (opcode 0x96, value 0x01).
+        # The lora-sx126x driver defaults to LDO which is insufficient
+        # for TX on many boards (e.g. T-Deck SX1262).
+        if self._use_dcdc:
+            import time
+            self._modem._cmd("BB", 0x96, 0x01)
+            time.sleep_ms(5)
+            self._modem.calibrate()
+            self._modem.calibrate_image()
+            time.sleep_ms(10)
+            # Reconfigure after regulator/calibration change
+            self._modem.configure(kwargs["lora_cfg"])
+
         self._modem.rx_crc_error = True  # Surface CRC-failed packets for diagnostics
         self._modem.start_recv(continuous=True)
+
+    def _acquire(self):
+        if self._spi_acquire:
+            self._spi_acquire()
+
+    def _release(self):
+        if self._spi_release:
+            self._spi_release()
 
     def process_outgoing(self, data):
         if not self.online or not self._modem:
             return False
 
+        self._acquire()
         try:
             if len(data) > 2 * _FRAME_PAYLOAD:
                 log("LoRa drop: " + str(len(data)) + "B exceeds " + str(2 * _FRAME_PAYLOAD), LOG_DEBUG)
@@ -149,6 +182,8 @@ class LoRaInterface(Interface):
             except:
                 pass
             return False
+        finally:
+            self._release()
 
     async def poll_loop(self):
         import uasyncio as asyncio
@@ -186,11 +221,15 @@ class LoRaInterface(Interface):
                     self._reasm_buf = None
                     self._reasm_seq = None
 
+                self._acquire()
                 rx = self._modem.poll_recv()
+                self._release()
 
                 if rx is False:
                     log("LoRa modem stopped receiving, restarting", LOG_ERROR)
+                    self._acquire()
                     self._modem.start_recv(continuous=True)
+                    self._release()
 
                 elif rx is True:
                     _rx_true_count += 1

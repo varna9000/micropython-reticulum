@@ -90,6 +90,8 @@ MAX_PATH_TABLE        = const(32)
 MAX_ACTIVE_LINKS      = const(4)
 MAX_ANNOUNCE_QUEUE    = const(16)
 MAX_RECEIPTS          = const(32)
+MAX_INCOMING_RESOURCES = const(1)
+MAX_OUTGOING_RESOURCES = const(2)
 TRANSPORT_HOPLIMIT    = const(128)
 
 # Timing

@@ -6,7 +6,8 @@ Compatible with MeshChat, Sideband, NomadNet over UDP on the same LAN.
 Usage (MicroPython on ESP32/Pico W):
   1. Edit config.py — set WiFi credentials, node name, and interfaces
   2. Copy the urns/ folder, config.py, and this file to the device
-  3. Run with: import example_node
+  3. Uncomment peripherals you have connected below
+  4. Run with: import example_node
 """
 
 from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
@@ -14,18 +15,31 @@ from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
 import gc
 gc.collect()
 
+# ---- Peripherals ----
+# Uncomment the ones you have connected. Shared I2C bus for I2C devices.
 from machine import Pin, SoftI2C
-import neopixel
-import sensors.bme280 as bme280
+i2c = SoftI2C(scl=Pin(6), sda=Pin(5), freq=100000)
 
-i2c = SoftI2C(scl=Pin(6), sda=Pin(5),freq=100000)
-bme = bme280.BME280(i2c=i2c)
+import peripherals.bme280_sensor as bme_sensor
+bme_sensor.init(i2c)
 
-#led = neopixel.NeoPixel(Pin(21),1)
-colors={"green":(255,0,0),
-        "red":(0,255,0),
-        "blue":(0,0,255),
-        "off":(0,0,0)}
+# import peripherals.neopixel_led as neopixel_led
+# neopixel_led.init(pin=21)
+
+# import peripherals.gpio_control as gpio
+# gpio.init({"lamp": (2, "OUT")})
+
+# import peripherals.adc_reader as adc_reader
+# adc_reader.init({"battery": 1})
+
+# List all active peripherals here (must match uncommented imports above)
+active_peripherals = [bme_sensor]
+
+gc.collect()
+
+# ---- Echo reply ----
+ECHO_REPLY = True
+
 
 async def send_echo_reply(router, source_hash, content):
     """Send echo reply as async task (crypto takes ~7s, must not block poll loop)."""
@@ -102,15 +116,13 @@ def setup_node(rns, node_name):
         sender = message.source_hash.hex()[:8]
         content = message.content_as_string() or "(binary)"
 
-        if content.lower() in colors.keys():
-            #led[0]=colors[content.lower()]
-            #led.write()
-            pass
+        # Run content through active peripherals
+        for p in active_peripherals:
+            result = p.process(content)
+            if result:
+                content = result
+                break
 
-        if "sensor" in content.lower():
-            t, p, h = bme.values
-            content = "Temperature: {}, Pressure: {}, Humidity: {}".format(t, p, h)
-            
         if DEBUG >= 1:
             print()
             print("=" * 40)
@@ -123,8 +135,8 @@ def setup_node(rns, node_name):
             print("=" * 40)
 
         # Queue async echo reply (non-blocking)
-        #asyncio.create_task(send_echo_reply(router, message.source_hash, content))
-        asyncio.create_task(send_echo_reply(router, message.source_hash, content))
+        if ECHO_REPLY:
+            asyncio.create_task(send_echo_reply(router, message.source_hash, content))
         gc.collect()
 
     router.register_delivery_callback(on_message)
@@ -139,11 +151,22 @@ def setup_node(rns, node_name):
     return dest, router
 
 
+def needs_wifi(config):
+    """Check if any UDP or TCP interface is enabled in config."""
+    for iface in config.get("interfaces", []):
+        if iface.get("enabled", False) and iface.get("type", "") in (
+            "UDPInterface", "TCPClientInterface",
+        ):
+            return True
+    return False
+
+
 def main():
     """Run on MicroPython (ESP32, Pico W, etc.)"""
     import uasyncio as asyncio
 
-    ip = connect_wifi(WIFI_SSID, WIFI_PASS)
+    if needs_wifi(CONFIG):
+        ip = connect_wifi(WIFI_SSID, WIFI_PASS)
     gc.collect()
 
     from urns import Reticulum
@@ -206,4 +229,3 @@ def main():
 
 
 main()
-

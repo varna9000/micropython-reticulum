@@ -1,6 +1,6 @@
 # µReticulum Link
-# Server-side stateful encrypted link (Reticulum Link protocol)
-# Supports the 3-packet ECDH handshake + request/response RPC
+# Stateful encrypted link (Reticulum Link protocol)
+# Server-side (Link) and client-side (OutgoingLink) ECDH handshake + RPC
 
 import struct
 import time
@@ -53,9 +53,13 @@ class Link:
         has_signalling = len(packet.data) > ECPUBSIZE
         if has_signalling:
             raw_sig_bytes = packet.data[ECPUBSIZE:ECPUBSIZE + LINK_MTU_SIZE]
-            link_mtu, link_mode = _parse_signalling(raw_sig_bytes)
-            self._signalling_bytes = _signalling_bytes(link_mtu, link_mode)
+            peer_mtu, link_mode = _parse_signalling(raw_sig_bytes)
+            # Negotiate: min of peer's proposed MTU and our interface capability
+            our_mtu = getattr(packet.receiving_interface, 'HW_MTU', const.MTU) if hasattr(packet, 'receiving_interface') else const.MTU
+            self.mtu = min(peer_mtu, our_mtu) if peer_mtu > 0 else our_mtu
+            self._signalling_bytes = _signalling_bytes(self.mtu, link_mode)
         else:
+            self.mtu = const.MTU
             self._signalling_bytes = b""
 
         # Compute link_id: strip signalling bytes from hashable part
@@ -74,8 +78,13 @@ class Link:
         self.last_activity = time.time()
         self.last_proof_time = time.time()
         self._callbacks_fired = False
+        self.incoming_resources = []
+        self.outgoing_resources = []
+        self.resource_concluded_callback = None
+        self.packet_callback = None
+        self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
 
-        log("Link request on " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8], LOG_VERBOSE)
+        log("Link request on " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8] + " mtu=" + str(self.mtu), LOG_VERBOSE)
 
         # --- Check capacity and rate limit BEFORE expensive crypto ---
         # ECDH + signing takes ~5s on ESP32, blocking the entire event loop.
@@ -161,6 +170,13 @@ class Link:
 
     def receive(self, packet):
         """Handle incoming data packet on this link."""
+        # Raw resource parts — NOT Token-encrypted
+        if packet.context == const.CTX_RESOURCE:
+            self.last_activity = time.time()
+            for r in self.incoming_resources:
+                r.receive_part(packet.data)
+            return
+
         try:
             plaintext = self._token.decrypt(packet.data)
         except Exception as e:
@@ -168,11 +184,22 @@ class Link:
             return
 
         self.last_activity = time.time()
+        log("Link " + self.link_id.hex()[:8] + " ctx=0x" + ("%02x" % packet.context) + " " + str(len(plaintext)) + "B", LOG_DEBUG)
 
         if packet.context == const.CTX_LRRTT:
             self._handle_rtt(plaintext)
         elif packet.context == const.CTX_REQUEST:
             self._handle_request(plaintext, packet)
+        elif packet.context == const.CTX_RESOURCE_ADV:
+            self._handle_resource_adv(plaintext)
+        elif packet.context == const.CTX_RESOURCE_REQ:
+            self._handle_resource_req(plaintext)
+        elif packet.context == const.CTX_RESOURCE_HMU:
+            log("Link " + self.link_id.hex()[:8] + " hashmap update (not supported)", LOG_DEBUG)
+        elif packet.context == const.CTX_RESOURCE_ICL:
+            self._handle_resource_cancel(plaintext)
+        elif packet.context == const.CTX_RESOURCE_RCL:
+            self._handle_resource_cancel(plaintext)
         elif packet.context == const.CTX_KEEPALIVE:
             log("Link " + self.link_id.hex()[:8] + " keepalive", LOG_DEBUG)
         elif packet.context == const.CTX_LINKCLOSE:
@@ -180,6 +207,15 @@ class Link:
             self.status = Link.CLOSED
         elif packet.context == const.CTX_LINKIDENTIFY:
             log("Link " + self.link_id.hex()[:8] + " identify (not implemented)", LOG_DEBUG)
+        elif packet.context == const.CTX_NONE:
+            if self.packet_callback:
+                try:
+                    self.packet_callback(plaintext, packet)
+                except Exception as e:
+                    log("Link " + self.link_id.hex()[:8] + " packet callback error: " + str(e), LOG_ERROR)
+            else:
+                log("Link " + self.link_id.hex()[:8] + " data packet, no callback", LOG_DEBUG)
+            self.prove_packet(packet)
         else:
             log("Link " + self.link_id.hex()[:8] + " unhandled context=0x" + ("%02x" % packet.context), LOG_DEBUG)
 
@@ -259,11 +295,77 @@ class Link:
         # Max plaintext for a single link data packet:
         # MTU(500) - HDR_1(19) - IV(16) - max_PKCS7(16) - HMAC(32) = 417
         if len(response_packed) > 417:
-            log("Link " + self.link_id.hex()[:8] + " response too large (" + str(len(response_packed)) + "B), needs Resource (not implemented)", LOG_ERROR)
+            from .resource import Resource
+            log("Link " + self.link_id.hex()[:8] + " response " + str(len(response_packed)) + "B, using Resource", LOG_VERBOSE)
+            Resource(self, response_packed, is_response=True, request_id=request_id)
             return
 
         self.send(response_packed, const.CTX_RESPONSE)
         log("Link " + self.link_id.hex()[:8] + " response sent (" + str(len(response_packed)) + "B)", LOG_DEBUG)
+
+    def _handle_resource_adv(self, plaintext):
+        """Handle incoming resource advertisement (receiver mode)."""
+        from .resource import Resource, MAX_RESOURCE_SIZE
+        if len(self.incoming_resources) >= const.MAX_INCOMING_RESOURCES:
+            log("Link " + self.link_id.hex()[:8] + " too many incoming resources", LOG_DEBUG)
+            return
+        Resource.accept(plaintext, self)
+
+    def _handle_resource_req(self, plaintext):
+        """Handle resource part request (sender mode)."""
+        for r in self.outgoing_resources:
+            r.handle_request(plaintext)
+
+    def _handle_resource_prf(self, proof_data):
+        """Handle resource proof (sender mode). Called from transport."""
+        for r in list(self.outgoing_resources):
+            if r.validate_proof(proof_data):
+                return
+
+    def _handle_resource_cancel(self, plaintext):
+        """Handle resource cancel from remote side."""
+        # plaintext = resource hash
+        for r in list(self.incoming_resources):
+            if r.hash == plaintext:
+                r.cancel()
+                return
+        for r in list(self.outgoing_resources):
+            if r.hash == plaintext:
+                r.cancel()
+                return
+
+    def register_incoming_resource(self, resource):
+        self.incoming_resources.append(resource)
+
+    def register_outgoing_resource(self, resource):
+        self.outgoing_resources.append(resource)
+
+    def resource_concluded(self, resource):
+        """Called when a resource transfer completes or fails."""
+        if resource in self.incoming_resources:
+            self.incoming_resources.remove(resource)
+        if resource in self.outgoing_resources:
+            self.outgoing_resources.remove(resource)
+        if self.resource_concluded_callback:
+            try:
+                self.resource_concluded_callback(resource)
+            except Exception as e:
+                log("Resource concluded callback error: " + str(e), LOG_ERROR)
+
+    def prove_packet(self, packet):
+        """Send explicit proof for a packet received on this link."""
+        signature = self.destination.identity.sign(packet.packet_hash)
+        proof_data = packet.packet_hash + signature
+        from .packet import Packet, LinkDestination
+        proof = Packet(
+            LinkDestination(self.link_id), proof_data,
+            const.PKT_PROOF, create_receipt=False,
+        )
+        proof.send()
+        log("Link " + self.link_id.hex()[:8] + " proof sent for " + packet.packet_hash.hex()[:8], LOG_DEBUG)
+
+    def set_packet_callback(self, callback):
+        self.packet_callback = callback
 
     def send(self, data, context=const.CTX_NONE):
         """Send encrypted data on this link."""
@@ -277,6 +379,7 @@ class Link:
             context=context,
             create_receipt=False,
         )
+        packet.MTU = self.mtu
         packet.send()
 
     def check_keepalive(self):
@@ -307,3 +410,276 @@ class Link:
     def __repr__(self):
         states = {0: "PENDING", 1: "ACTIVE", 2: "CLOSED"}
         return "<Link:" + self.link_id.hex()[:8] + " " + states.get(self.status, "?") + ">"
+
+
+class OutgoingLink:
+    """Client-side link — initiates ECDH handshake to a remote destination."""
+
+    PENDING = 0x00
+    ACTIVE  = 0x01
+    CLOSED  = 0x02
+    ESTABLISHMENT_TIMEOUT = 30  # seconds (ECDH verify ~7s on ESP32 + network RTT)
+
+    def __init__(self, destination, established_callback=None, closed_callback=None):
+        from .identity import Identity
+        from .crypto import X25519PrivateKey
+        import gc, os
+
+        self.destination = destination
+        self.status = OutgoingLink.PENDING
+        self.established_callback = established_callback
+        self.closed_callback = closed_callback
+        self._token = None
+        self.activated_at = None
+        self.last_activity = time.time()
+        self.request_time = time.time()
+        self.type = const.DEST_LINK
+        self.incoming_resources = []
+        self.outgoing_resources = []
+        self.resource_concluded_callback = None
+        self.packet_callback = None
+
+        # Generate ephemeral X25519 keypair for ECDH
+        gc.collect()
+        self._prv = X25519PrivateKey.generate()
+        gc.collect()
+        self._pub_bytes = self._prv.public_key().public_bytes()
+
+        # Random bytes for Ed25519 "public key" slot — only used in link_id hash.
+        # Server doesn't verify client's Ed25519. Saves ~2s vs real keygen.
+        self._sig_pub_bytes = os.urandom(32)
+
+        # Signalling bytes (our MTU, AES-256-CBC)
+        self.mtu = const.MTU
+        self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
+        sig_bytes = _signalling_bytes(const.MTU, MODE_AES256_CBC)
+
+        # Build and send link request
+        request_data = self._pub_bytes + self._sig_pub_bytes + sig_bytes
+
+        from .packet import Packet
+        request_packet = Packet(
+            destination, request_data,
+            const.PKT_LINKREQUEST,
+        )
+        request_packet.pack()
+
+        # Compute link_id (hash of request excluding signalling bytes)
+        hashable_part = request_packet.get_hashable_part()
+        diff = len(request_data) - ECPUBSIZE
+        hashable_part = hashable_part[:-diff]
+        self.link_id = Identity.full_hash(hashable_part)[:const.TRUNCATED_HASHLENGTH // 8]
+        self.hash = self.link_id
+
+        # Register as pending
+        from .transport import Transport
+        Transport.pending_links.append(self)
+
+        request_packet.send()
+        log("OutLink request to " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8], LOG_VERBOSE)
+
+    def validate_proof(self, packet):
+        """Validate server's link proof, complete ECDH handshake, send RTT."""
+        from .crypto import X25519PublicKey, Token, hkdf
+        from .identity import Identity
+        import gc
+
+        proof_data = packet.data
+        sig_len = 64
+        key_len = 32
+
+        if len(proof_data) < sig_len + key_len:
+            log("OutLink proof too short: " + str(len(proof_data)), LOG_ERROR)
+            self._close()
+            return
+
+        signature = proof_data[:sig_len]
+        peer_ecdh_pub_bytes = proof_data[sig_len:sig_len + key_len]
+
+        # Parse signalling from proof if present — negotiate link MTU
+        if len(proof_data) > sig_len + key_len:
+            signalling_bytes = proof_data[sig_len + key_len:]
+            peer_mtu, _ = _parse_signalling(signalling_bytes)
+            if peer_mtu > 0:
+                self.mtu = min(self.mtu, peer_mtu)
+                self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
+        else:
+            signalling_bytes = b""
+
+        # Verify server's signature: sign(link_id + server_ecdh_pub + server_ed25519_pub + signalling)
+        peer_sig_pub_bytes = self.destination.identity.sig_pub_bytes
+        signed_data = self.link_id + peer_ecdh_pub_bytes + peer_sig_pub_bytes + signalling_bytes
+
+        gc.collect()
+        if not self.destination.identity.validate(signature, signed_data):
+            log("OutLink proof signature invalid", LOG_ERROR)
+            self._close()
+            return
+        gc.collect()
+
+        # ECDH key exchange
+        peer_pub = X25519PublicKey.from_public_bytes(peer_ecdh_pub_bytes)
+        shared_key = self._prv.exchange(peer_pub)
+        gc.collect()
+
+        # Derive link encryption key
+        derived_key = hkdf(length=64, derive_from=shared_key, salt=self.link_id)
+        self._token = Token(derived_key)
+        gc.collect()
+
+        # Clean up key material
+        del self._prv, shared_key, derived_key, peer_pub
+        gc.collect()
+
+        # Send RTT to complete handshake (server marks link ACTIVE on receiving this)
+        from . import umsgpack
+        rtt = time.time() - self.request_time
+        rtt_data = umsgpack.packb(rtt)
+        self.send(rtt_data, const.CTX_LRRTT)
+
+        # Mark active
+        self.status = OutgoingLink.ACTIVE
+        self.activated_at = time.time()
+        self.last_activity = time.time()
+
+        # Move from pending to active
+        from .transport import Transport
+        if self in Transport.pending_links:
+            Transport.pending_links.remove(self)
+        Transport.active_links.append(self)
+
+        log("OutLink " + self.link_id.hex()[:8] + " ACTIVE (rtt=" + str(int(rtt * 1000)) + "ms)", LOG_NOTICE)
+
+        if self.established_callback:
+            try:
+                self.established_callback(self)
+            except Exception as e:
+                log("OutLink established callback error: " + str(e), LOG_ERROR)
+
+    def send(self, data, context=const.CTX_NONE):
+        """Send encrypted data on this link."""
+        ciphertext = self._token.encrypt(data)
+        from .packet import Packet, LinkDestination
+        packet = Packet(
+            LinkDestination(self.link_id), ciphertext,
+            const.PKT_DATA, context=context, create_receipt=False,
+        )
+        packet.send()
+
+    def receive(self, packet):
+        """Handle incoming data on this link."""
+        if packet.context == const.CTX_RESOURCE:
+            self.last_activity = time.time()
+            for r in self.incoming_resources:
+                r.receive_part(packet.data)
+            return
+
+        try:
+            plaintext = self._token.decrypt(packet.data)
+        except Exception as e:
+            log("OutLink " + self.link_id.hex()[:8] + " decrypt failed: " + str(e), LOG_DEBUG)
+            return
+
+        self.last_activity = time.time()
+
+        if packet.context == const.CTX_RESOURCE_ADV:
+            self._handle_resource_adv(plaintext)
+        elif packet.context == const.CTX_RESOURCE_REQ:
+            self._handle_resource_req(plaintext)
+        elif packet.context == const.CTX_RESOURCE_ICL or packet.context == const.CTX_RESOURCE_RCL:
+            self._handle_resource_cancel(plaintext)
+        elif packet.context == const.CTX_LINKCLOSE:
+            log("OutLink " + self.link_id.hex()[:8] + " close received", LOG_VERBOSE)
+            self._close()
+        elif packet.context == const.CTX_NONE:
+            if self.packet_callback:
+                try:
+                    self.packet_callback(plaintext, packet)
+                except Exception as e:
+                    log("OutLink packet callback error: " + str(e), LOG_ERROR)
+        else:
+            log("OutLink " + self.link_id.hex()[:8] + " ctx=0x" + ("%02x" % packet.context), LOG_DEBUG)
+
+    def _handle_resource_adv(self, plaintext):
+        from .resource import Resource, MAX_RESOURCE_SIZE
+        if len(self.incoming_resources) >= const.MAX_INCOMING_RESOURCES:
+            return
+        Resource.accept(plaintext, self)
+
+    def _handle_resource_req(self, plaintext):
+        for r in self.outgoing_resources:
+            r.handle_request(plaintext)
+
+    def _handle_resource_prf(self, proof_data):
+        for r in list(self.outgoing_resources):
+            if r.validate_proof(proof_data):
+                return
+
+    def _handle_resource_cancel(self, plaintext):
+        for r in list(self.incoming_resources):
+            if r.hash == plaintext:
+                r.cancel()
+                return
+        for r in list(self.outgoing_resources):
+            if r.hash == plaintext:
+                r.cancel()
+                return
+
+    def register_incoming_resource(self, resource):
+        self.incoming_resources.append(resource)
+
+    def register_outgoing_resource(self, resource):
+        self.outgoing_resources.append(resource)
+
+    def resource_concluded(self, resource):
+        if resource in self.incoming_resources:
+            self.incoming_resources.remove(resource)
+        if resource in self.outgoing_resources:
+            self.outgoing_resources.remove(resource)
+        if self.resource_concluded_callback:
+            try:
+                self.resource_concluded_callback(resource)
+            except Exception as e:
+                log("Resource concluded callback error: " + str(e), LOG_ERROR)
+
+    def check_keepalive(self):
+        """Check link staleness (called by transport job_loop)."""
+        if self.status == OutgoingLink.PENDING:
+            if time.time() - self.request_time > OutgoingLink.ESTABLISHMENT_TIMEOUT:
+                log("OutLink " + self.link_id.hex()[:8] + " establishment timeout", LOG_VERBOSE)
+                self._close()
+            return
+        if self.status != OutgoingLink.ACTIVE:
+            return
+        if time.time() - self.last_activity > 720:  # STALE_GRACE
+            log("OutLink " + self.link_id.hex()[:8] + " stale, closing", LOG_VERBOSE)
+            self._close()
+
+    def check_timeout(self):
+        if self.status == OutgoingLink.PENDING:
+            if time.time() - self.request_time > OutgoingLink.ESTABLISHMENT_TIMEOUT:
+                log("OutLink " + self.link_id.hex()[:8] + " establishment timeout", LOG_VERBOSE)
+                self._close()
+
+    def teardown(self):
+        """Gracefully close this link (sends close notification)."""
+        if self.status == OutgoingLink.ACTIVE:
+            try:
+                self.send(self.link_id, const.CTX_LINKCLOSE)
+            except:
+                pass
+        self._close()
+
+    def _close(self):
+        if self.status != OutgoingLink.CLOSED:
+            self.status = OutgoingLink.CLOSED
+            log("OutLink " + self.link_id.hex()[:8] + " closed", LOG_VERBOSE)
+            if self.closed_callback:
+                try:
+                    self.closed_callback(self)
+                except:
+                    pass
+
+    def __repr__(self):
+        states = {0: "PENDING", 1: "ACTIVE", 2: "CLOSED"}
+        return "<OutLink:" + self.link_id.hex()[:8] + " " + states.get(self.status, "?") + ">"

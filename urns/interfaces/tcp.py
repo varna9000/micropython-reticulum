@@ -28,7 +28,7 @@ def hdlc_escape(data):
 
 
 class TCPClientInterface(Interface):
-    HW_MTU = 564
+    HW_MTU = 16384
     CONNECT_TIMEOUT = 5
     RECONNECT_WAIT = 5
     MAX_RECONNECTS = 0       # 0 = unlimited
@@ -109,11 +109,12 @@ class TCPClientInterface(Interface):
             return False
 
         try:
-            # Wrap HDR_1 DATA packets as HDR_2 TRANSPORT when the
-            # destination has a known transport path.  Only TCP needs
+            # Wrap HDR_1 packets as HDR_2 TRANSPORT when the destination
+            # hash is in path_table (known via announce). Only TCP needs
             # this — broadcast interfaces (UDP, LoRa) send HDR_1 directly.
-            # Check: bit 6 = 0 (HDR_1) and bits 0-1 = 0 (PKT_DATA)
-            if len(data) >= 19 and (data[0] & 0x43) == 0x00:
+            # Link-addressed packets (link_id as dest) are NOT wrapped —
+            # the transport server routes these via its link_table.
+            if len(data) >= 19 and (data[0] & 0x40) == 0x00 and (data[0] & 0x03) != 0x01:
                 from ..transport import Transport
                 transport_id = Transport.path_table.get(data[2:18])
                 if transport_id:
@@ -189,7 +190,7 @@ class TCPClientInterface(Interface):
                 # process_outgoing() restores it after sendall(), but
                 # guard here too in case of any edge cases.
                 self._socket.settimeout(0)
-                data = self._socket.recv(512)
+                data = self._socket.recv(4096)
                 if data:
                     for b in data:
                         self._process_byte(b)
