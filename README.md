@@ -27,6 +27,8 @@ Also tested on [Seeed XIAO ESP32S3](https://wiki.seeedstudio.com/xiao_esp32s3_ge
 
 Requires MicroPython 1.22+. Should also work on other ESP32-S3 boards and Raspberry Pi Pico W.
 
+For the **LilyGO T-Deck** (ESP32-S3 + SX1262 + display + keyboard) with a GUI messenger, see [reticulum-tdeck](https://github.com/varna9000/reticulum-tdeck).
+
 ## What Works
 
 - **LXMF Messaging** — Send and receive encrypted messages with MeshChat/Sideband, verify Ed25519 signatures, send delivery proofs (receipts). Messages show as "delivered" in MeshChat. Includes an echo bot example that auto-replies to incoming messages.
@@ -45,10 +47,14 @@ Requires MicroPython 1.22+. Should also work on other ESP32-S3 boards and Raspbe
 - **Serial Interface** — HDLC-framed UART for RNode, LoRa radios, packet radio TNCs, or ESP32-to-ESP32 links.
 - **Persistent Identity** — Keys and known destinations survive reboots. JSON configuration.
 
-## Quick Start
+## Installation
 
-1. Flash MicroPython to your ESP32-S3-Zero
-2. Copy the `urns/` folder and `example_node.py` to the device
+1. Flash MicroPython 1.22+ to your ESP32-S3
+2. Upload the **contents** of the `firmware/` folder to the **root** of the microcontroller's filesystem using [Thonny](https://thonny.org/) or `mpremote`:
+   ```bash
+   # Using mpremote (upload everything inside firmware/ to device root)
+   mpremote cp -r firmware/ :
+   ```
 3. Edit WiFi credentials in `example_node.py`:
    ```python
    WIFI_SSID = "YourNetwork"
@@ -78,51 +84,60 @@ Commands are case-insensitive. Any other message is echoed back as a reply. This
 ## Project Structure
 
 ```
-ureticulum/
-├── example_node.py          # LXMF messaging node with NeoPixel control
-├── example_nomadnet_node.py # NomadNet page-serving node
-├── config.py                # Node configuration (WiFi, interfaces)
-├── urns/
-│   ├── __init__.py          # Package entry point
-│   ├── const.py             # Protocol constants (matching reference RNS)
-│   ├── reticulum.py         # Core initialization, config, async event loop
-│   ├── identity.py          # Identity management, key generation, announce validation
-│   ├── destination.py       # Destination addressing, encryption, announce sending
-│   ├── packet.py            # Packet framing, proof generation, receipts
-│   ├── transport.py         # Packet routing, announce handling, interface management
-│   ├── link.py              # Server-side Reticulum Links (ECDH handshake, request/response)
-│   ├── resource.py          # Resource transfer protocol (segmented data over Links)
-│   ├── bz2dec.py            # Pure Python bz2 decompressor (for Resource payloads)
-│   ├── lxmf.py              # LXMF message format, LXMessage, LXMRouter
-│   ├── umsgpack.py          # Minimal MessagePack (subset needed for LXMF)
-│   ├── log.py               # Logging with configurable verbosity
-│   ├── interfaces/
-│   │   ├── __init__.py      # Base Interface class
-│   │   ├── udp.py           # WiFi UDP with broadcast discovery
-│   │   ├── tcp.py           # HDLC-framed TCP client (for RNS transport servers)
-│   │   ├── serial.py        # HDLC-framed UART (RNode, LoRa, ESP-to-ESP)
-│   │   └── lora.py          # SX1262 SPI LoRa with RNode-compatible split framing
-│   └── crypto/
-│       ├── x25519.py        # X25519 ECDH key exchange
-│       ├── ed25519.py       # Ed25519 signing/verification
-│       ├── aes.py           # AES-128/256-CBC encryption (via ucryptolib)
-│       ├── hkdf.py          # HKDF key derivation
-│       ├── hmac.py          # HMAC-SHA256
-│       ├── hashes.py        # SHA-256 (via uhashlib), SHA-512 (pure Python)
-│       ├── sha512.py        # SHA-512 (pure Python for Ed25519)
-│       ├── pkcs7.py         # PKCS7 padding
-│       ├── token.py         # Fernet-style token encryption
-│       └── pure25519/       # Curve25519 field arithmetic
-│           ├── _ed25519.py
-│           ├── basic.py
-│           ├── ed25519_oop.py
-│           └── eddsa.py
-├── peripherals/
-│   ├── __init__.py          # Peripheral contract documentation
-│   ├── bme280_sensor.py     # BME280 temperature/pressure/humidity (I2C)
-│   ├── neopixel_led.py      # WS2812 NeoPixel RGB LED control
-│   ├── gpio_control.py      # GPIO pin on/off and state query
-│   └── adc_reader.py        # ADC analog voltage reader
+uP-reticulum/
+├── README.md
+├── ureticulum-crypto-optimization-report.md
+├── images/                      # README assets
+├── ebtye-e220-900/              # E220 hardware datasheet
+│
+└── firmware/                    # ← Upload contents to microcontroller root
+    ├── example_node.py          # LXMF messaging node with NeoPixel control
+    ├── example_nomadnet_node.py # NomadNet page-serving node
+    ├── config.py                # Node configuration (WiFi, interfaces)
+    ├── pages/                   # NomadNet micron-format pages
+    ├── files/                   # Downloadable files served over Links
+    ├── sensors/                 # Sensor drivers (e.g. bme280)
+    ├── peripherals/
+    │   ├── __init__.py          # Peripheral contract documentation
+    │   ├── bme280_sensor.py     # BME280 temperature/pressure/humidity (I2C)
+    │   ├── neopixel_led.py      # WS2812 NeoPixel RGB LED control
+    │   ├── gpio_control.py      # GPIO pin on/off and state query
+    │   └── adc_reader.py        # ADC analog voltage reader
+    └── urns/
+        ├── __init__.py          # Package entry point
+        ├── const.py             # Protocol constants (matching reference RNS)
+        ├── reticulum.py         # Core initialization, config, async event loop
+        ├── identity.py          # Identity management, key generation, announce validation
+        ├── destination.py       # Destination addressing, encryption, announce sending
+        ├── packet.py            # Packet framing, proof generation, receipts
+        ├── transport.py         # Packet routing, announce handling, interface management
+        ├── link.py              # Server-side Reticulum Links (ECDH handshake, request/response)
+        ├── resource.py          # Resource transfer protocol (segmented data over Links)
+        ├── bz2dec.py            # Pure Python bz2 decompressor (for Resource payloads)
+        ├── lxmf.py              # LXMF message format, LXMessage, LXMRouter
+        ├── umsgpack.py          # Minimal MessagePack (subset needed for LXMF)
+        ├── log.py               # Logging with configurable verbosity
+        ├── interfaces/
+        │   ├── __init__.py      # Base Interface class
+        │   ├── udp.py           # WiFi UDP with broadcast discovery
+        │   ├── tcp.py           # HDLC-framed TCP client (for RNS transport servers)
+        │   ├── serial.py        # HDLC-framed UART (RNode, LoRa, ESP-to-ESP)
+        │   └── lora.py          # SX1262 SPI LoRa with RNode-compatible split framing
+        └── crypto/
+            ├── x25519.py        # X25519 ECDH key exchange
+            ├── ed25519.py       # Ed25519 signing/verification
+            ├── aes.py           # AES-128/256-CBC encryption (via ucryptolib)
+            ├── hkdf.py          # HKDF key derivation
+            ├── hmac.py          # HMAC-SHA256
+            ├── hashes.py        # SHA-256 (via uhashlib), SHA-512 (pure Python)
+            ├── sha512.py        # SHA-512 (pure Python for Ed25519)
+            ├── pkcs7.py         # PKCS7 padding
+            ├── token.py         # Fernet-style token encryption
+            └── pure25519/       # Curve25519 field arithmetic
+                ├── _ed25519.py
+                ├── basic.py
+                ├── ed25519_oop.py
+                └── eddsa.py
 ```
 
 ## How It Works
@@ -338,7 +353,7 @@ Enable transport mode to relay packets between interfaces. This turns your ESP32
 
 Transport uses blind flood forwarding: packets received on one interface are re-sent on all others (with hop count incremented). No path computation or routing tables — simple and RAM-friendly.
 
-See `config.py` for all config variants (UDP, LoRa, TCP, dual WiFi+LoRa). Uncomment the interfaces you need.
+See `firmware/config.py` for all config variants (UDP, LoRa, TCP, dual WiFi+LoRa). Uncomment the interfaces you need.
 
 ## NomadNet Page Serving
 
@@ -347,7 +362,7 @@ See `config.py` for all config variants (UDP, LoRa, TCP, dual WiFi+LoRa). Uncomm
 ### Running the NomadNet Node
 
 1. Edit `config.py` with your WiFi credentials and interfaces
-2. Copy `urns/`, `config.py`, `pages/`, and `example_nomadnet_node.py` to the device
+2. Upload the contents of `firmware/` to the device root (see [Installation](#installation))
 3. Run:
    ```python
    import example_nomadnet_node
@@ -357,9 +372,9 @@ The node announces as `nomadnetwork.node` and serves pages from the `pages/` dir
 
 ### Page Files
 
-Pages are `.mu` files in the `pages/` directory using NomadNet's [micron markup format](https://github.com/markqvist/NomadNet). Each file is automatically registered as a request handler at `/page/<filename>`.
+Pages are `.mu` files in the `firmware/pages/` directory using NomadNet's [micron markup format](https://github.com/markqvist/NomadNet). Each file is automatically registered as a request handler at `/page/<filename>`.
 
-Example `pages/index.mu`:
+Example `firmware/pages/index.mu`:
 ```
 >Welcome to {node_name}
 
@@ -379,7 +394,7 @@ Supported template variables (substituted at serve time):
 | `{uptime}` | Time since boot | `2h 15m 30s` |
 | `{sensor}` | First active peripheral's sensor reading | `Temperature: 24.44C, Pressure: 995.45hPa, Humidity: 100.00%` |
 
-To add more pages, just drop `.mu` files into `pages/` — they are picked up automatically on boot. For example, `pages/about.mu` would be served at `/page/about.mu`.
+To add more pages, just drop `.mu` files into `firmware/pages/` — they are picked up automatically on boot. For example, `firmware/pages/about.mu` would be served at `/page/about.mu`.
 
 ### Page and File Size Limits
 
@@ -425,7 +440,7 @@ The `peripherals/` module provides modular hardware drivers with a uniform inter
 
 ### Wiring
 
-Peripherals are initialized in `example_nomadnet_node.py` (or `example_node.py`). Uncomment the ones you have connected:
+Peripherals are initialized in `firmware/example_nomadnet_node.py` (or `firmware/example_node.py`). Uncomment the ones you have connected:
 
 ```python
 from machine import Pin, SoftI2C
