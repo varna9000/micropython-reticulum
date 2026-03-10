@@ -1,6 +1,6 @@
 >Welcome to {node_name}
 
-This node is running `µReticulum` on an ESP32.
+This node is running Micropython Reticulum on an ESP32.
 
 >> Status
   Free memory: {mem_free}
@@ -8,3 +8,6 @@ This node is running `µReticulum` on an ESP32.
 
 >> Sensor data
   {sensor}
+
+>> Downloads
+  [Hear our message to you`:/file/msg.mp3]

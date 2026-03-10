@@ -145,13 +145,13 @@ class Packet:
                     if self.packet_type == const.PKT_ANNOUNCE:
                         self.ciphertext = self.data
                 else:
-                    raise IOError("Header type 2 requires transport ID")
+                    raise OSError("Header type 2 requires transport ID")
 
         self.header += bytes([self.context])
         self.raw = self.header + self.ciphertext
 
         if len(self.raw) > self.MTU:
-            raise IOError("Packet size " + str(len(self.raw)) + " exceeds MTU " + str(self.MTU))
+            raise OSError("Packet size " + str(len(self.raw)) + " exceeds MTU " + str(self.MTU))
 
         self.packed = True
         self.update_hash()
@@ -200,7 +200,7 @@ class Packet:
                 self.receipt = None
                 return False
         else:
-            raise IOError("Packet already sent")
+            raise OSError("Packet already sent")
 
     def resend(self):
         if self.sent:
@@ -213,7 +213,7 @@ class Packet:
                 self.receipt = None
                 return False
         else:
-            raise IOError("Packet not yet sent")
+            raise OSError("Packet not yet sent")
 
     def update_hash(self):
         self.packet_hash = self.get_hash()

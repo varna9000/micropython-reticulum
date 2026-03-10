@@ -8,24 +8,43 @@ Supported template variables in .mu files:
   {node_name}  — node display name from config
   {mem_free}   — free heap memory in bytes
   {uptime}     — system uptime in seconds (epoch)
+  {sensor}     — output from bme280 sensor (if active)
 
 Usage (MicroPython on ESP32/Pico W):
   1. Edit config.py — set WiFi credentials and interfaces
   2. Copy the urns/ folder, config.py, pages/, and this file to the device
-  3. Run with: import example_nomadnet_node
+  3. Uncomment peripherals you have connected below
+  4. Run with: import example_nomadnet_node
 """
 
 from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
-from machine import SoftI2C, Pin
-import sensors.bme280 as bme280
-
-i2c = SoftI2C(scl=Pin(6), sda=Pin(5),freq=100000)
-bme = bme280.BME280(i2c=i2c)
 
 import gc
 import time
 gc.collect()
 _boot_time = time.time()
+
+# ---- Peripherals ----
+# Uncomment the ones you have connected. Shared I2C bus for I2C devices.
+from machine import Pin, SoftI2C
+i2c = SoftI2C(scl=Pin(6), sda=Pin(5), freq=100000)
+
+import peripherals.bme280_sensor as bme_sensor
+bme_sensor.init(i2c)
+
+# import peripherals.neopixel_led as neopixel_led
+# neopixel_led.init(pin=21)
+
+# import peripherals.gpio_control as gpio
+# gpio.init({"lamp": (2, "OUT")})
+
+# import peripherals.adc_reader as adc_reader
+# adc_reader.init({"battery": 1})
+
+# List all active peripherals here (must match uncommented imports above)
+active_peripherals = [bme_sensor]
+
+gc.collect()
 
 
 def connect_wifi(ssid, password, timeout=15):
@@ -67,8 +86,8 @@ def load_pages(dest, pages_dir="pages"):
     """Load .mu pages from a directory and register them as request handlers.
 
     Each .mu file becomes a NomadNet page at /page/<filename>.
-    Template variables {node_name}, {mem_free}, {uptime} are substituted
-    at serve time.
+    Template variables {node_name}, {mem_free}, {uptime}, {sensor} are
+    substituted at serve time.
     """
     import os
 
@@ -118,7 +137,14 @@ def load_pages(dest, pages_dir="pages"):
                 except:
                     page = page.replace(b"{mem_free}", b"?")
                 page = page.replace(b"{uptime}", fmt_uptime(time.time() - _boot_time).encode("utf-8"))
-                page = page.replace(b"{sensor}", "Temperature: {}, Pressure: {}, Humidity: {}".format(*bme.values).encode("utf-8"))
+                # Sensor data from peripherals
+                sensor_text = b"no sensor"
+                for p in active_peripherals:
+                    result = p.process("sensor")
+                    if result:
+                        sensor_text = result.encode("utf-8")
+                        break
+                page = page.replace(b"{sensor}", sensor_text)
                 return page
             return handler
 
@@ -136,10 +162,66 @@ def load_pages(dest, pages_dir="pages"):
     return count
 
 
+def load_files(dest, files_dir="files"):
+    """Load files from a directory and register them as download handlers.
+
+    Each file becomes downloadable at /file/<filename> via NomadNet link syntax:
+      [Download text`:/file/<filename>]
+    Large files (>417B) are automatically served via Resource transfer.
+    """
+    import os
+
+    try:
+        flist = os.listdir(files_dir)
+    except OSError:
+        if DEBUG >= 1:
+            print("Files directory not found:", files_dir)
+        return 0
+
+    count = 0
+    for fname in flist:
+        filepath = files_dir + "/" + fname
+        file_path = "/file/" + fname
+
+        def make_handler(fpath, name):
+            def handler(path, data, request_id, link_id, remote_identity, requested_at):
+                try:
+                    with open(fpath, "rb") as f:
+                        file_data = f.read()
+                except OSError:
+                    return None
+                return [name, file_data]
+            return handler
+
+        dest.register_request_handler(
+            file_path,
+            response_generator=make_handler(filepath, fname),
+            allow=dest.ALLOW_ALL,
+        )
+        count += 1
+        if DEBUG >= 2:
+            print("Registered file:", file_path)
+
+    if DEBUG >= 1:
+        print("Registered", count, "file(s) from", files_dir + "/")
+    return count
+
+
+def needs_wifi(config):
+    """Check if any UDP or TCP interface is enabled in config."""
+    for iface in config.get("interfaces", []):
+        if iface.get("enabled", False) and iface.get("type", "") in (
+            "UDPInterface", "TCPClientInterface",
+        ):
+            return True
+    return False
+
+
 def main():
     import uasyncio as asyncio
 
-    #ip = connect_wifi(WIFI_SSID, WIFI_PASS)
+    if needs_wifi(CONFIG):
+        connect_wifi(WIFI_SSID, WIFI_PASS)
     gc.collect()
 
     from urns import Reticulum, Destination
@@ -158,8 +240,9 @@ def main():
     dest.set_default_app_data(NODE_NAME.encode("utf-8"))
     dest.accepts_links(True)
 
-    # Load pages from pages/ directory
+    # Load pages and downloadable files
     load_pages(dest)
+    load_files(dest)
 
     def on_link(link):
         if DEBUG >= 1:

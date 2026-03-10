@@ -186,7 +186,7 @@ class LXMessage:
 
         if self.desired_method == LXMessage.OPPORTUNISTIC:
             if content_size > self.ENCRYPTED_PACKET_MAX_CONTENT:
-                log("Message too large for opportunistic delivery", LOG_ERROR)
+                log("Message too large for opportunistic, using DIRECT", LOG_DEBUG)
                 self.desired_method = LXMessage.DIRECT
 
         self.method = self.desired_method
@@ -213,8 +213,11 @@ class LXMessage:
                 except Exception as e:
                     log("Delivery callback error: " + str(e), LOG_ERROR)
 
+        elif self.method == LXMessage.DIRECT:
+            # DIRECT delivery handled by LXMRouter._send_direct()
+            pass
         else:
-            log("Only opportunistic delivery is currently supported", LOG_ERROR)
+            log("Unsupported delivery method: " + str(self.method), LOG_ERROR)
             self.state = LXMessage.FAILED
 
     @staticmethod
@@ -351,6 +354,9 @@ class LXMRouter:
         # Set the packet callback for incoming opportunistic messages
         self.delivery_destination.set_packet_callback(self._delivery_packet)
 
+        # Set link established callback for incoming link-based delivery (Resources)
+        self.delivery_destination.set_link_established_callback(self._on_link_established)
+
         # Set announce handler so Transport forwards peer announces to us
         self.delivery_destination._announce_handler = self._announce_handler
 
@@ -387,8 +393,9 @@ class LXMRouter:
     def send_message(self, destination_hash, content, title="",
                      fields=None, desired_method=None):
         """Send an LXMF message to a destination hash.
-        
+
         Returns the LXMessage, or None if path/identity not known.
+        Automatically uses DIRECT delivery for messages too large for opportunistic.
         """
         # Look up destination identity
         dest_identity = Identity.recall(destination_hash)
@@ -411,8 +418,146 @@ class LXMRouter:
             desired_method=desired_method or LXMessage.OPPORTUNISTIC,
         )
 
-        msg.send()
+        msg.pack()
+
+        if msg.method == LXMessage.OPPORTUNISTIC:
+            msg.send()
+        elif msg.method == LXMessage.DIRECT:
+            self._send_direct(msg, dest)
+
         return msg
+
+    def _send_direct(self, message, destination):
+        """Send LXMF message via DIRECT link delivery (link + Resource)."""
+        from .link import OutgoingLink
+        from . import const
+
+        def on_established(link):
+            packed = message.packed
+            # Single link packet capacity: ~415B after Token encryption
+            if len(packed) <= 415:
+                link.send(packed, const.CTX_NONE)
+                message.state = LXMessage.SENT
+                log("LXMF DIRECT sent as packet: " + str(len(packed)) + "B", LOG_VERBOSE)
+                link.teardown()
+            else:
+                from .resource import Resource
+                link.resource_concluded_callback = lambda r: self._direct_resource_concluded(r, message, link)
+                Resource(link, packed, is_response=False)
+                log("LXMF DIRECT sending as resource: " + str(len(packed)) + "B", LOG_VERBOSE)
+
+        def on_closed(link):
+            if message.state < LXMessage.SENT:
+                message.state = LXMessage.FAILED
+                log("LXMF DIRECT link closed before delivery", LOG_ERROR)
+
+        OutgoingLink(destination, established_callback=on_established, closed_callback=on_closed)
+        log("LXMF DIRECT delivery initiated to " + message.destination_hash.hex()[:8], LOG_NOTICE)
+
+    def _direct_resource_concluded(self, resource, message, link):
+        """Called when outgoing DIRECT Resource transfer completes."""
+        from .resource import COMPLETE
+        if resource.status == COMPLETE:
+            message.state = LXMessage.DELIVERED
+            log("LXMF DIRECT delivered: " + message.destination_hash.hex()[:8], LOG_NOTICE)
+        else:
+            message.state = LXMessage.FAILED
+            log("LXMF DIRECT resource failed", LOG_ERROR)
+        link.teardown()
+
+    def _on_link_established(self, link):
+        """Called when a link is established to our delivery destination."""
+        link.set_packet_callback(self._link_packet_received)
+        link.resource_concluded_callback = self._handle_resource_concluded
+        log("LXMF link established: " + link.link_id.hex()[:8], LOG_DEBUG)
+
+    def _link_packet_received(self, plaintext, packet):
+        """Handle single-packet LXMF message received on a link (CTX_NONE)."""
+        try:
+            # DIRECT delivery sends full packed: dest_hash + source_hash + sig + payload
+            # (unlike OPPORTUNISTIC which strips dest_hash)
+            lxmf_data = plaintext
+            log("LXMF link packet: " + str(len(lxmf_data)) + "B", LOG_DEBUG)
+
+            message = LXMessage.unpack_from_bytes(lxmf_data)
+            message.transport_encrypted = True
+            message.transport_encryption = "Curve25519"
+
+            if message.signature_validated:
+                log("LXMF link message from " + message.source_hash.hex()[:8] +
+                    ": " + (message.content_as_string() or "(binary)"), LOG_NOTICE)
+            else:
+                reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
+                log("LXMF unverified link message (" + reason + ") from " +
+                    message.source_hash.hex()[:8], LOG_NOTICE)
+
+            # Dedup check
+            if message.hash in self.delivered_ids:
+                log("LXMF duplicate ignored: " + message.hash.hex()[:8], LOG_DEBUG)
+                return
+
+            self.delivered_ids[message.hash] = time.time()
+            self._clean_delivered_ids()
+
+            if self._delivery_callback:
+                try:
+                    self._delivery_callback(message)
+                except Exception as e:
+                    log("LXMF delivery callback error: " + str(e), LOG_ERROR)
+
+        except Exception as e:
+            log("LXMF link packet error: " + str(e), LOG_ERROR)
+
+    def _handle_resource_concluded(self, resource):
+        """Called when a Resource transfer completes on a link."""
+        from .resource import COMPLETE
+        if resource.status != COMPLETE:
+            log("LXMF resource not complete, ignoring", LOG_DEBUG)
+            return
+
+        try:
+            data = resource.data
+            if data is None or len(data) < 2 * LXMessage.DESTINATION_LENGTH + LXMessage.SIGNATURE_LENGTH:
+                log("LXMF resource data too short", LOG_DEBUG)
+                return
+
+            # Check if this is a response (request_id set) — not LXMF delivery
+            if resource.request_id is not None:
+                log("LXMF resource is a response, not a delivery", LOG_DEBUG)
+                return
+
+            # DIRECT delivery sends full packed: dest_hash + source_hash + sig + payload
+            lxmf_data = data
+            log("LXMF resource unpacking: " + str(len(lxmf_data)) + "B", LOG_DEBUG)
+
+            message = LXMessage.unpack_from_bytes(lxmf_data)
+            message.transport_encrypted = True
+            message.transport_encryption = "Curve25519"
+
+            if message.signature_validated:
+                log("LXMF resource message from " + message.source_hash.hex()[:8] +
+                    ": " + (message.content_as_string() or "(binary)"), LOG_NOTICE)
+            else:
+                reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
+                log("LXMF unverified resource message (" + reason + ") from " +
+                    message.source_hash.hex()[:8], LOG_NOTICE)
+
+            # Dedup check
+            if message.hash in self.delivered_ids:
+                log("LXMF duplicate ignored: " + message.hash.hex()[:8], LOG_DEBUG)
+                return
+
+            self.delivered_ids[message.hash] = time.time()
+            self._clean_delivered_ids()
+
+            if self._delivery_callback:
+                try:
+                    self._delivery_callback(message)
+                except Exception as e:
+                    log("LXMF delivery callback error: " + str(e), LOG_ERROR)
+
+        except Exception as e:
+            log("LXMF resource delivery error: " + str(e), LOG_ERROR)
 
     def _delivery_packet(self, data, packet):
         """Handle incoming opportunistic LXMF packet"""

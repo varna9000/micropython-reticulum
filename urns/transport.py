@@ -279,6 +279,12 @@ class Transport:
                 if link.link_id == packet.destination_hash:
                     link.validate_proof(packet)
                     return True
+        elif packet.context == const.CTX_RESOURCE_PRF:
+            # Resource proof — route to the link
+            for link in Transport.active_links:
+                if link.link_id == packet.destination_hash:
+                    link._handle_resource_prf(packet.data)
+                    return True
         else:
             # Regular proof - check receipts
             for receipt in Transport.receipts:
@@ -315,7 +321,7 @@ class Transport:
                 for link in Transport.pending_links:
                     if hasattr(link, 'check_timeout'):
                         link.check_timeout()
-                        if link.status == 0:  # CLOSED
+                        if link.status == 0x02:  # CLOSED
                             expired_links.append(link)
                 for l in expired_links:
                     if l in Transport.pending_links:

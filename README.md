@@ -34,7 +34,10 @@ Requires MicroPython 1.22+. Should also work on other ESP32-S3 boards and Raspbe
 - **Announce & Discovery** — ESP32 announces itself with an LXMF-compatible display name. Appears in MeshChat's network visualizer. Receives and parses announces from other peers.
 - **Full Crypto Stack** — X25519 key exchange, Ed25519 signatures, AES-128-CBC encryption, HKDF, HMAC-SHA256 — all in pure Python, no C extensions.
 - **Wire Protocol** — Byte-identical packet format to reference Reticulum. Validated bidirectionally against the reference implementation.
-- **NomadNet Page Serving** — Serve micron-format pages to NomadNet clients over Reticulum Links. Full ECDH link handshake with request/response RPC for small pages (< ~350 bytes).
+- **NomadNet Page Serving** — Serve micron-format pages to NomadNet clients over Reticulum Links. Full ECDH link handshake with request/response RPC. Pages and files of any size (up to 16KB) are automatically served via Resource transfer when they exceed a single packet.
+- **File Serving** — Serve downloadable files from a `files/` directory. Files are registered as `/file/<filename>` handlers and linked from micron pages with `` [label`:/file/name] `` syntax. Large files are transferred via the Resource protocol.
+- **Resource Transfer** — Wire-compatible segmented data transfer over Links for payloads exceeding a single packet (~417 bytes). Supports bz2 decompression, hash verification, and proof exchange. Confirmed working with MeshChat and NomadNet for both incoming and outgoing transfers.
+- **Link MTU Negotiation** — Links negotiate MTU via signalling bytes in the handshake, matching reference Reticulum. Over TCP, Resource transfers use the full negotiated MTU (up to 16KB parts) instead of the base 500-byte MTU.
 - **Transport Mode** — Blind flood forwarding between interfaces. Bridge WiFi and LoRa so packets from one interface are relayed to all others.
 - **UDP Interface** — WiFi networking with auto-detected subnet broadcast. Non-blocking async I/O with ESP32 socket recovery.
 - **TCP Client Interface** — HDLC-framed TCP connection to remote RNS transport servers. Automatic transport path routing: learns relay paths from HDR_2 announces and wraps outbound DATA packets for correct delivery through the transport server. Enables long-range connectivity beyond the local LAN.
@@ -88,6 +91,8 @@ ureticulum/
 │   ├── packet.py            # Packet framing, proof generation, receipts
 │   ├── transport.py         # Packet routing, announce handling, interface management
 │   ├── link.py              # Server-side Reticulum Links (ECDH handshake, request/response)
+│   ├── resource.py          # Resource transfer protocol (segmented data over Links)
+│   ├── bz2dec.py            # Pure Python bz2 decompressor (for Resource payloads)
 │   ├── lxmf.py              # LXMF message format, LXMessage, LXMRouter
 │   ├── umsgpack.py          # Minimal MessagePack (subset needed for LXMF)
 │   ├── log.py               # Logging with configurable verbosity
@@ -112,6 +117,12 @@ ureticulum/
 │           ├── basic.py
 │           ├── ed25519_oop.py
 │           └── eddsa.py
+├── peripherals/
+│   ├── __init__.py          # Peripheral contract documentation
+│   ├── bme280_sensor.py     # BME280 temperature/pressure/humidity (I2C)
+│   ├── neopixel_led.py      # WS2812 NeoPixel RGB LED control
+│   ├── gpio_control.py      # GPIO pin on/off and state query
+│   └── adc_reader.py        # ADC analog voltage reader
 ```
 
 ## How It Works
@@ -366,14 +377,13 @@ Supported template variables (substituted at serve time):
 | `{node_name}` | Node display name from config | `ESP32s3` |
 | `{mem_free}` | Free heap memory (human-readable) | `7.6 MB` |
 | `{uptime}` | Time since boot | `2h 15m 30s` |
+| `{sensor}` | First active peripheral's sensor reading | `Temperature: 24.44C, Pressure: 995.45hPa, Humidity: 100.00%` |
 
 To add more pages, just drop `.mu` files into `pages/` — they are picked up automatically on boot. For example, `pages/about.mu` would be served at `/page/about.mu`.
 
-### Page Size Limits
+### Page and File Size Limits
 
-Pages are served as single encrypted link packets. After encryption overhead (AES-256-CBC IV, PKCS7 padding, HMAC-SHA256) and Reticulum packet headers, the maximum page content is **~350 bytes**. This is sufficient for status pages and short informational content.
-
-Pages exceeding this limit will be rejected with a log error. Serving larger pages would require Reticulum's Resource transfer protocol, which is not yet implemented.
+Pages under ~417 bytes are served as single encrypted link packets. Larger pages and files (up to 16KB) are automatically served via the Resource transfer protocol — the same mechanism used by reference Reticulum. The 16KB limit (`MAX_RESOURCE_SIZE`) is a RAM-safety cap for ESP32.
 
 ### Link Handshake
 
@@ -396,6 +406,47 @@ NomadNet Client                     ESP32 (µReticulum)
 ```
 
 Each link consumes ~350 bytes of RAM. Up to 4 concurrent links are supported (`MAX_ACTIVE_LINKS=4`). Idle links are automatically cleaned up after 12 minutes.
+
+## Peripherals
+
+The `peripherals/` module provides modular hardware drivers with a uniform interface. Each peripheral follows the same contract:
+
+- `init(...)` — set up hardware (pins, bus, etc.)
+- `process(content)` — handle an LXMF message or page template query; return a response string or `None`
+
+### Available Peripherals
+
+| Module | Hardware | Commands / Usage |
+|--------|----------|-----------------|
+| `bme280_sensor` | BME280 I2C sensor | Returns temperature, pressure, humidity when message contains "sensor" |
+| `neopixel_led` | WS2812 NeoPixel LED | `red`, `green`, `blue`, `off` — sets LED color |
+| `gpio_control` | Any GPIO pin | `<name> on`, `<name> off`, `<name>?` — control or query pin state |
+| `adc_reader` | ADC analog input | `<name>` — returns voltage and raw ADC value |
+
+### Wiring
+
+Peripherals are initialized in `example_nomadnet_node.py` (or `example_node.py`). Uncomment the ones you have connected:
+
+```python
+from machine import Pin, SoftI2C
+i2c = SoftI2C(scl=Pin(6), sda=Pin(5), freq=100000)
+
+import peripherals.bme280_sensor as bme_sensor
+bme_sensor.init(i2c)
+
+# import peripherals.neopixel_led as neopixel_led
+# neopixel_led.init(pin=21)
+
+# import peripherals.gpio_control as gpio
+# gpio.init({"lamp": (2, "OUT")})
+
+# import peripherals.adc_reader as adc_reader
+# adc_reader.init({"battery": 1})
+
+active_peripherals = [bme_sensor]
+```
+
+Active peripherals are queried for the `{sensor}` template variable in NomadNet pages, and can respond to LXMF message commands.
 
 ## Compatibility
 
@@ -451,8 +502,7 @@ Packets with bit 7 set in the Reticulum flags byte (IFAC-tagged) are dropped on 
 ## Limitations
 
 - **MicroPython only** — no CPython/desktop support. Uses `uhashlib`, `ucryptolib`, `uasyncio`, `micropython.const` directly.
-- **Opportunistic LXMF only** — Single-packet messages up to ~295 bytes content. Link-based LXMF delivery (for larger messages) requires Resource transfer, which is not yet implemented.
-- **Small pages only** — NomadNet page responses must fit in a single link packet (~350 bytes). Resource transfer for larger pages is not yet implemented.
+- **Opportunistic LXMF only** — Single-packet messages up to ~295 bytes content for opportunistic delivery. Link-based LXMF delivery is supported for receiving larger messages (up to 16KB) via Resource transfer.
 - **Server-side links only** — Can accept incoming links (for page serving), but cannot initiate outbound links.
 - **No propagation nodes** — Cannot store-and-forward messages for offline peers.
 - **Pure Python crypto** — ~4 second message round-trip on ESP32. `@micropython.viper` could significantly speed this up.
@@ -462,9 +512,7 @@ Packets with bit 7 set in the Reticulum flags byte (IFAC-tagged) are dropped on 
 Potential areas for expansion:
 
 - **Viper-accelerated crypto** — `@micropython.viper` native compilation for field arithmetic could bring X25519 from ~1.4s to ~0.2s
-- **Resource transfer** — Multi-packet streaming over Links for large pages and link-based LXMF delivery
-- **Client-side links** — Initiate outbound links for direct LXMF delivery
-- **More hardware control** — Expand NeoPixel example to sensors, relays, displays
+- **Client-side link LXMF delivery** — Initiate outbound links for direct LXMF delivery to peers
 - **Propagation node** — Store-and-forward for offline peers
 
 ## License
