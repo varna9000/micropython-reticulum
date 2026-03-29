@@ -96,10 +96,11 @@ uP-reticulum/
     ├── config.py                # Node configuration (WiFi, interfaces)
     ├── pages/                   # NomadNet micron-format pages
     ├── files/                   # Downloadable files served over Links
-    ├── sensors/                 # Sensor drivers (e.g. bme280)
+    ├── sensors/                 # Sensor drivers (bme280, sds011)
     ├── peripherals/
     │   ├── __init__.py          # Peripheral contract documentation
     │   ├── bme280_sensor.py     # BME280 temperature/pressure/humidity (I2C)
+    │   ├── sds011_sensor.py    # SDS011 particulate matter PM2.5/PM10 (UART)
     │   ├── neopixel_led.py      # WS2812 NeoPixel RGB LED control
     │   ├── gpio_control.py      # GPIO pin on/off and state query
     │   └── adc_reader.py        # ADC analog voltage reader
@@ -392,7 +393,7 @@ Supported template variables (substituted at serve time):
 | `{node_name}` | Node display name from config | `ESP32s3` |
 | `{mem_free}` | Free heap memory (human-readable) | `7.6 MB` |
 | `{uptime}` | Time since boot | `2h 15m 30s` |
-| `{sensor}` | First active peripheral's sensor reading | `Temperature: 24.44C, Pressure: 995.45hPa, Humidity: 100.00%` |
+| `{sensor}` | All active peripherals' sensor readings | `Temperature: 24.44C, Pressure: 995.45hPa, Humidity: 100.00%` |
 
 To add more pages, just drop `.mu` files into `firmware/pages/` — they are picked up automatically on boot. For example, `firmware/pages/about.mu` would be served at `/page/about.mu`.
 
@@ -434,6 +435,7 @@ The `peripherals/` module provides modular hardware drivers with a uniform inter
 | Module | Hardware | Commands / Usage |
 |--------|----------|-----------------|
 | `bme280_sensor` | BME280 I2C sensor | Returns temperature, pressure, humidity when message contains "sensor" |
+| `sds011_sensor` | SDS011 PM2.5/PM10 UART sensor | Returns particulate matter readings when message contains "sensor" |
 | `neopixel_led` | WS2812 NeoPixel LED | `red`, `green`, `blue`, `off` — sets LED color |
 | `gpio_control` | Any GPIO pin | `<name> on`, `<name> off`, `<name>?` — control or query pin state |
 | `adc_reader` | ADC analog input | `<name>` — returns voltage and raw ADC value |
@@ -458,10 +460,25 @@ bme_sensor.init(i2c)
 # import peripherals.adc_reader as adc_reader
 # adc_reader.init({"battery": 1})
 
+# import peripherals.sds011_sensor as sds011_sensor
+# sds011_sensor.init(uart_id=1, tx_pin=43, rx_pin=44)
+
 active_peripherals = [bme_sensor]
 ```
 
-Active peripherals are queried for the `{sensor}` template variable in NomadNet pages, and can respond to LXMF message commands.
+The SDS011 also requires `sds011_sensor.start()` inside the async event loop (see `run_with_announce()` in the example files). This starts a background task that wakes the sensor, reads PM2.5/PM10, and sleeps it again every 5 minutes — the fan only runs briefly during measurement.
+
+**SDS011 wiring (XIAO ESP32-S3):**
+| SDS011 Pin | Connect to |
+|------------|------------|
+| TX | GPIO44 (rx_pin) |
+| RX | GPIO43 (tx_pin) |
+| VCC (5V) | VUSB |
+| GND | GND |
+
+The SDS011 needs 5V power (VUSB, only available when USB-powered). Its UART TX is 3.3V-safe — no level shifter needed. Pins are configurable; the defaults (43/44) are free on XIAO ESP32-S3 when LoRa uses SPI.
+
+Active peripherals are queried for the `{sensor}` template variable in NomadNet pages, and can respond to LXMF message commands. When multiple peripherals are active, all sensor readings are shown.
 
 ## Compatibility
 

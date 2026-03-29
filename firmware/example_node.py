@@ -32,6 +32,9 @@ bme_sensor.init(i2c)
 # import peripherals.adc_reader as adc_reader
 # adc_reader.init({"battery": 1})
 
+# import peripherals.sds011_sensor as sds011_sensor
+# sds011_sensor.init(uart_id=1, tx_pin=43, rx_pin=44)
+
 # List all active peripherals here (must match uncommented imports above)
 active_peripherals = [bme_sensor]
 
@@ -117,11 +120,13 @@ def setup_node(rns, node_name):
         content = message.content_as_string() or "(binary)"
 
         # Run content through active peripherals
+        results = []
         for p in active_peripherals:
             result = p.process(content)
             if result:
-                content = result
-                break
+                results.append(result)
+        if results:
+            content = "\n".join(results)
 
         if DEBUG >= 1:
             print()
@@ -218,6 +223,8 @@ def main():
     async def run_with_reannounce():
         asyncio.create_task(initial_announce())
         asyncio.create_task(reannounce_loop())
+        # Start SDS011 periodic measurement if active
+        # if sds011_sensor.sensor: sds011_sensor.start()
         await _original_run()
 
     try:

@@ -46,6 +46,8 @@ class TCPClientInterface(Interface):
         self._in_frame = False
         self._escape = False
         self._buffer = bytearray()
+        self._recv_buf = bytearray(512)
+        self._recv_mv = memoryview(self._recv_buf)
         self._reconnect_count = 0
         self._last_reconnect = 0
 
@@ -190,11 +192,11 @@ class TCPClientInterface(Interface):
                 # process_outgoing() restores it after sendall(), but
                 # guard here too in case of any edge cases.
                 self._socket.settimeout(0)
-                data = self._socket.recv(4096)
-                if data:
-                    for b in data:
-                        self._process_byte(b)
-                else:
+                n = self._socket.readinto(self._recv_buf)
+                if n and n > 0:
+                    for i in range(n):
+                        self._process_byte(self._recv_mv[i])
+                elif n == 0:
                     # Empty recv = connection closed
                     log("TCP connection closed by remote", LOG_NOTICE)
                     self.online = False

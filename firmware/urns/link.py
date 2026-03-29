@@ -295,6 +295,8 @@ class Link:
         # Max plaintext for a single link data packet:
         # MTU(500) - HDR_1(19) - IV(16) - max_PKCS7(16) - HMAC(32) = 417
         if len(response_packed) > 417:
+            import gc
+            gc.collect()
             from .resource import Resource
             log("Link " + self.link_id.hex()[:8] + " response " + str(len(response_packed)) + "B, using Resource", LOG_VERBOSE)
             Resource(self, response_packed, is_response=True, request_id=request_id)

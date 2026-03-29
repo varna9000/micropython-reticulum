@@ -18,7 +18,7 @@ DEBUG = 2
 # Multiple interfaces can be active at the same time (e.g. WiFi + LoRa).
 CONFIG = {
     "loglevel": 3,
-    "enable_transport": True,
+    "enable_transport": False,
     "interfaces": [
 
         # ---- WiFi UDP ----
@@ -34,48 +34,46 @@ CONFIG = {
          #     "forward_port": 4242,
          # },
 
-        # ---- E220 LoRa (EByte E220-900T) ----
-        # Transparent serial LoRa. Both nodes must share channel and air_rate.
+        # ---- E32 LoRa (EByte E32-900T20) ----
+        # Transparent serial LoRa with hex register config.
+        # Both nodes must share channel and air_rate.
         #
-        # Wiring (ESP32-S3 example):
-        #   E220 M0  -> GPIO4  (mode select)
-        #   E220 M1  -> GPIO5  (mode select)
-        #   E220 RXD -> GPIO17 (ESP32 TX)
-        #   E220 TXD -> GPIO16 (ESP32 RX)
-        #   E220 AUX -> GPIO6  (busy signal)
-        #   E220 VCC -> 3.3V (22dBm) or 5V (30dBm)
-        #   E220 GND -> GND
+        # Wiring (RP2040 Zero example):
+        #   E32 M0  -> GPIO8  (mode select)
+        #   E32 M1  -> GPIO7  (mode select)
+        #   E32 TXD -> GPIO5  (MCU RX)
+        #   E32 RXD -> GPIO4  (MCU TX)
+        #   E32 AUX -> GPIO3  (busy signal)
+        #   E32 VCC -> 3.3V
+        #   E32 GND -> GND
         #
-        # auto_configure: sends AT commands at boot to set channel/rate/power.
-        #   Set to False if pre-configured via USB-UART adapter.
+        # auto_configure: writes 6-byte hex register at boot to set
+        #   channel/rate/power. Set False if pre-configured via USB adapter.
         #
-        # air_rate: 0-2 = 2.4kbps (max range ~5km LOS)
-        #           3 = 4.8k, 4 = 9.6k, 5 = 19.2k, 6 = 38.4k, 7 = 62.5k
+        # air_rate: 0 = 300bps, 1 = 1200, 2 = 2400 (default, max range)
+        #           3 = 4800, 4 = 9600, 5-7 = 19200
         #
-        # tx_power: 0 = max, 1 = -4dB, 2 = -8dB, 3 = -12dB
+        # tx_power: 0 = 20dBm, 1 = 17dBm, 2 = 14dBm, 3 = 10dBm
         #
-        # channel: freq = 850.125 + channel * 1MHz
-        #   18 = 868.125 MHz (EU ISM), 72 = 922.125 MHz (US ISM)
+        # channel: freq = 862 + channel * 1MHz (E32-900T)
+        #   6 = 868 MHz (EU ISM), 60 = 922 MHz (US ISM)
         #
-        # lbt: listen-before-talk, required in EU 868MHz.
-        #
-        # {
-        #     "type": "E220Interface",
-        #     "name": "LoRa E220",
-        #     "enabled": True,
-        #     "uart_id": 2,
-        #     "tx_pin": 17,
-        #     "rx_pin": 16,
-        #     "speed": 9600,
-        #     "m0_pin": 4,
-        #     "m1_pin": 5,
-        #     "aux_pin": 6,
-        #     "auto_configure": True,
-        #     "channel": 18,
-        #     "air_rate": 2,
-        #     "tx_power": 0,
-        #     "lbt": True,
-        # },
+         {
+             "type": "E32Interface",
+             "name": "LoRa E32",
+             "enabled": True,
+             "uart_id": 1,
+             "tx_pin": 4,
+             "rx_pin": 5,
+             "speed": 9600,
+             "m0_pin": 8,
+             "m1_pin": 7,
+             "aux_pin": 3,
+             "auto_configure": False,
+             "channel": 6,
+             "air_rate": 2,
+             "tx_power": 0,
+         },
 
         # ---- SX1262 SPI LoRa (e.g. Seeed XIAO ESP32S3 + Wio-SX1262) ----
         # Native SPI LoRa using micropython-lib lora-sx126x driver.
@@ -120,13 +118,13 @@ CONFIG = {
         # ---- TCP Client ----
         # Connects to a remote RNS TCP server (TCPServerInterface).
         # Uses HDLC framing, wire-compatible with reference Reticulum.
-        {
-            "type": "TCPClientInterface",
-            "name": "VarnaTransport",
-            "enabled": True,
-            "target_host": "rn.varnatransport.com",
-            "target_port": 4243,
-        },
+        #{
+        #    "type": "TCPClientInterface",
+        #    "name": "VarnaTransport",
+        #    "enabled": True,
+        #    "target_host": "rn.varnatransport.com",
+        #    "target_port": 4243,
+        #},
 
         # ---- Serial (for RNode / wired link) ----
         # {

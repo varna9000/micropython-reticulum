@@ -8,7 +8,7 @@ Supported template variables in .mu files:
   {node_name}  — node display name from config
   {mem_free}   — free heap memory in bytes
   {uptime}     — system uptime in seconds (epoch)
-  {sensor}     — output from bme280 sensor (if active)
+  {sensor}     — output from all active peripherals
 
 Usage (MicroPython on ESP32/Pico W):
   1. Edit config.py — set WiFi credentials and interfaces
@@ -40,6 +40,9 @@ bme_sensor.init(i2c)
 
 # import peripherals.adc_reader as adc_reader
 # adc_reader.init({"battery": 1})
+
+# import peripherals.sds011_sensor as sds011_sensor
+# sds011_sensor.init(uart_id=1, tx_pin=43, rx_pin=44)  # also add sds011_sensor to active_peripherals
 
 # List all active peripherals here (must match uncommented imports above)
 active_peripherals = [bme_sensor]
@@ -137,14 +140,14 @@ def load_pages(dest, pages_dir="pages"):
                 except:
                     page = page.replace(b"{mem_free}", b"?")
                 page = page.replace(b"{uptime}", fmt_uptime(time.time() - _boot_time).encode("utf-8"))
-                # Sensor data from peripherals
-                sensor_text = b"no sensor"
+                # Sensor data from all active peripherals
+                results = []
                 for p in active_peripherals:
                     result = p.process("sensor")
                     if result:
-                        sensor_text = result.encode("utf-8")
-                        break
-                page = page.replace(b"{sensor}", sensor_text)
+                        results.append(result)
+                sensor_text = "\n  ".join(results) if results else "no sensor"
+                page = page.replace(b"{sensor}", sensor_text.encode("utf-8"))
                 return page
             return handler
 
@@ -185,6 +188,7 @@ def load_files(dest, files_dir="files"):
 
         def make_handler(fpath, name):
             def handler(path, data, request_id, link_id, remote_identity, requested_at):
+                gc.collect()
                 try:
                     with open(fpath, "rb") as f:
                         file_data = f.read()
@@ -260,7 +264,7 @@ def main():
         print("Running... (Ctrl+C to stop)")
 
     async def initial_announce():
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(3)
         try:
             dest.announce()
             if DEBUG >= 1:
@@ -287,6 +291,8 @@ def main():
     async def run_with_announce():
         asyncio.create_task(initial_announce())
         asyncio.create_task(reannounce_loop())
+        # Start SDS011 periodic measurement if active
+        # if sds011_sensor.sensor: sds011_sensor.start()
         await _original_run()
 
     try:
