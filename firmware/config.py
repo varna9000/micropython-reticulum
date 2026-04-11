@@ -139,3 +139,7 @@ CONFIG = {
 
     ],
 }
+
+# ---- Sensor Network config ----
+# LXMF Destination address for data to be sent to
+SENSOR_HUB = ""
