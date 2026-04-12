@@ -2,7 +2,7 @@
 # Wire-compatible with reference LXMF for MeshChat/Sideband interop
 # Supports opportunistic (single-packet) and direct (link) message delivery
 
-import time
+import time, sys
 from . import umsgpack
 from .identity import Identity
 from .destination import Destination
@@ -149,7 +149,14 @@ class LXMessage:
             raise ValueError("Message already packed")
 
         if self.timestamp is None:
-            self.timestamp = time.time()
+            platform = sys.platform
+            # https://docs.micropython.org/en/latest/library/time.html
+            if platform == "esp32":
+                # Micropython on ESP32 uses epoch time of 2000-01-01 so for Unix time need to add 946,684,800 seconds
+                self.timestamp = 946684800 + time.time()
+            elif platform == "rp2":
+                # Micropython on rp2 uses standard unix epoch 1970-01-01
+                self.timestamp = time.time()
 
         payload = [self.timestamp, self.title, self.content, self.fields]
 
