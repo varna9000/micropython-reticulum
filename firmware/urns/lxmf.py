@@ -157,6 +157,8 @@ class LXMessage:
             elif platform == "rp2":
                 # Micropython on rp2 uses standard unix epoch 1970-01-01
                 self.timestamp = time.time()
+            else:
+                self.timestamp = time.time()
 
         payload = [self.timestamp, self.title, self.content, self.fields]
 
