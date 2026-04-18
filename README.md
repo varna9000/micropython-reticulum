@@ -88,7 +88,6 @@ uP-reticulum/
 ├── README.md
 ├── ureticulum-crypto-optimization-report.md
 ├── images/                      # README assets
-├── ebtye-e220-900/              # E220 hardware datasheet
 │
 └── firmware/                    # ← Upload contents to microcontroller root
     ├── example_node.py          # LXMF messaging node with NeoPixel control
@@ -123,6 +122,7 @@ uP-reticulum/
         │   ├── udp.py           # WiFi UDP with broadcast discovery
         │   ├── tcp.py           # HDLC-framed TCP client (for RNS transport servers)
         │   ├── serial.py        # HDLC-framed UART (RNode, LoRa, ESP-to-ESP)
+        │   ├── e32.py           # EByte E32-900T LoRa (transparent serial, hex register config)
         │   └── lora.py          # SX1262 SPI LoRa with RNode-compatible split framing
         └── crypto/
             ├── x25519.py        # X25519 ECDH key exchange
@@ -253,29 +253,52 @@ Setting `forward_ip` to `null` enables auto-detection of the subnet broadcast ad
 }
 ```
 
-### E220 LoRa Interface (EByte E220-900T)
+### E32 LoRa Interface (EByte E32-900T20D)
 
-Transparent LoRa radio with AUX flow control, AT auto-configuration, and chunked writes for packets exceeding the 400-byte hardware buffer.
+Transparent LoRa radio with HDLC-framed UART, AUX flow control, and hex register auto-configuration. Uses the same serial framing as the Serial Interface but adds E32-specific mode control (M0/M1 pins) and chunked writes for the 512-byte hardware buffer.
 
 ```json
 {
-  "type": "E220Interface",
-  "name": "LoRa E220",
+  "type": "E32Interface",
+  "name": "LoRa E32",
   "enabled": true,
-  "uart_id": 2,
-  "tx_pin": 17,
-  "rx_pin": 16,
+  "uart_id": 1,
+  "tx_pin": 4,
+  "rx_pin": 5,
   "speed": 9600,
-  "m0_pin": 4,
-  "m1_pin": 5,
+  "m0_pin": 15,
+  "m1_pin": 2,
   "aux_pin": 6,
-  "auto_configure": true,
-  "channel": 18,
+  "auto_configure": false,
+  "timeout": 3000,
+  "channel": 6,
   "air_rate": 2,
-  "tx_power": 0,
-  "lbt": true
+  "tx_power": 3
 }
 ```
+
+**Parameters:**
+- `channel`: freq = 862 + channel MHz. Channel 6 = 868 MHz (EU ISM), 60 = 922 MHz (US ISM)
+- `air_rate`: 0 = 300bps, 1 = 1200, 2 = 2400 (default, best range/speed tradeoff), 3 = 4800, 4 = 9600, 5 = 19200
+- `tx_power`: 0 = 20dBm, 1 = 17dBm, 2 = 14dBm, 3 = 10dBm
+- `auto_configure`: set `true` to write channel/rate/power to the module's flash at boot. Set `false` if pre-configured via USB adapter.
+- `timeout`: HDLC frame timeout in ms. Must be >2x the air transmission time for a full packet. At 2400bps, a 182-byte announce takes ~760ms, so 3000ms is safe.
+
+**Wiring (Waveshare RP2040-Zero):**
+
+| E32 Pin | Function | RP2040 GPIO | Notes |
+|---------|----------|-------------|-------|
+| RXD | Module receives | GPIO 4 (UART1 TX) | |
+| TXD | Module sends | GPIO 5 (UART1 RX) | |
+| M0 | Mode select | GPIO 15 | Needs 12mA drive (set automatically) |
+| M1 | Mode select | GPIO 2 | Needs 12mA drive (set automatically) |
+| AUX | Busy signal | GPIO 6 | Input with pull-up |
+| VCC | Power | 5V | See power note below |
+| GND | Ground | GND | |
+
+**RP2040 pin constraints:** On RP2040, UART1 alternate function pins (GPIO 3, 6, 7, 8) must not be used for M0/M1 — UART1 initialization claims these pins for CTS/RTS/TX, causing bus contention that can permanently damage the GPIO output drivers. The E32's internal pull-ups on M0/M1 also require 12mA GPIO drive strength (vs the 4mA default) to reliably pull LOW for mode switching. The E32 interface driver sets this automatically.
+
+**Power:** The E32-900T20D draws ~120mA at 20dBm TX. On RP2040-Zero, this current spike crashes the MCU even when powered from the 5V USB rail. Use `tx_power: 3` (10dBm, ~40mA) unless the E32 has a dedicated power supply with decoupling capacitors. The E32 accepts 2.3-5.5V on VCC — connect to the 5V pin rather than 3.3V to reduce voltage drop.
 
 ### SX1262 SPI LoRa Interface (e.g. Seeed XIAO ESP32S3 + Wio-SX1262)
 

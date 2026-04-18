@@ -66,13 +66,14 @@ CONFIG = {
              "tx_pin": 4,
              "rx_pin": 5,
              "speed": 9600,
-             "m0_pin": 8,
-             "m1_pin": 7,
-             "aux_pin": 3,
+             "m0_pin": 15,
+             "m1_pin": 2,
+             "aux_pin": 6,
              "auto_configure": False,
+             "timeout": 3000,
              "channel": 6,
              "air_rate": 2,
-             "tx_power": 0,
+             "tx_power": 3,
          },
 
         # ---- SX1262 SPI LoRa (e.g. Seeed XIAO ESP32S3 + Wio-SX1262) ----

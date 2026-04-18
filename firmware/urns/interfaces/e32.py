@@ -74,12 +74,18 @@ class E32Interface(SerialInterface):
             , LOG_NOTICE)
 
     def _setup_pins(self):
+        import machine
         from machine import Pin
 
         if self._m0_pin_num is not None:
             self._m0 = Pin(self._m0_pin_num, Pin.OUT)
+            # 12mA drive to overcome E32 internal pull-ups
+            addr = 0x4001C000 + (self._m0_pin_num + 1) * 4
+            machine.mem32[addr] = (machine.mem32[addr] & ~(0x3 << 4)) | (0x3 << 4)
         if self._m1_pin_num is not None:
             self._m1 = Pin(self._m1_pin_num, Pin.OUT)
+            addr = 0x4001C000 + (self._m1_pin_num + 1) * 4
+            machine.mem32[addr] = (machine.mem32[addr] & ~(0x3 << 4)) | (0x3 << 4)
         if self._aux_pin_num is not None:
             self._aux = Pin(self._aux_pin_num, Pin.IN, Pin.PULL_UP)
 
@@ -197,6 +203,9 @@ class E32Interface(SerialInterface):
             else:
                 self._wait_aux_ready(2000)
                 self._uart.write(frame)
+
+            # Wait for E32 to finish transmitting
+            self._wait_aux_ready(3000)
 
             self.txb += len(data)
             self.tx += 1

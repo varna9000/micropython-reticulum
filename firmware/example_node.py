@@ -44,6 +44,70 @@ gc.collect()
 ECHO_REPLY = True
 
 
+def _peer_name(router, dest_hash):
+    """Get display name for a destination hash, or short hex."""
+    peer = router.peers.get(dest_hash)
+    if peer and peer.get("name"):
+        return peer["name"]
+    return dest_hash.hex()[:8]
+
+
+async def _send_msg(router, dest_hash, body):
+    """Send LXMF message as async task (crypto is slow)."""
+    import uasyncio as asyncio
+    await asyncio.sleep(0)
+    try:
+        msg = router.send_message(dest_hash, body)
+        if msg:
+            print("[Sent] -> " + dest_hash.hex()[:8])
+        else:
+            print("[Error] Unknown identity: " + dest_hash.hex()[:8])
+    except Exception as e:
+        print("[Error] Send failed: " + str(e))
+    gc.collect()
+
+
+async def serial_input_loop(router):
+    """Poll stdin for /msg <hash> <body> commands."""
+    import sys
+    import select
+    import uasyncio as asyncio
+    from urns.identity import Identity
+
+    poller = select.poll()
+    poller.register(sys.stdin, select.POLLIN)
+    buf = ""
+
+    while True:
+        if poller.poll(0):
+            ch = sys.stdin.read(1)
+            if ch in ("\n", "\r"):
+                line = buf.strip()
+                buf = ""
+                if line.startswith("/msg "):
+                    parts = line[5:].split(" ", 1)
+                    if len(parts) < 2 or len(parts[0]) < 8:
+                        print("Usage: /msg <hex_hash> <message>")
+                        continue
+                    prefix = parts[0].lower()
+                    body = parts[1]
+                    # Find destination by hash prefix
+                    match = None
+                    for dh in Identity.known_destinations:
+                        if dh.hex().startswith(prefix):
+                            match = dh
+                            break
+                    if match:
+                        asyncio.create_task(_send_msg(router, match, body))
+                    else:
+                        print("[Error] No known destination: " + prefix)
+                elif line:
+                    print("Unknown command. Use: /msg <hash> <message>")
+            else:
+                buf += ch
+        await asyncio.sleep(0.05)
+
+
 async def send_echo_reply(router, source_hash, content):
     """Send echo reply as async task (crypto takes ~7s, must not block poll loop)."""
     import uasyncio as asyncio
@@ -129,15 +193,9 @@ def setup_node(rns, node_name):
             content = "\n".join(results)
 
         if DEBUG >= 1:
+            name = _peer_name(router, message.source_hash)
             print()
-            print("=" * 40)
-            print("LXMF Message [" + verified + "]")
-            print("  From: " + sender)
-            title = message.title_as_string()
-            if title:
-                print("  Title: " + title)
-            print("  Content: " + content)
-            print("=" * 40)
+            print("<" + name + "/" + sender + "> " + content)
 
         # Queue async echo reply (non-blocking)
         if ECHO_REPLY:
@@ -223,6 +281,7 @@ def main():
     async def run_with_reannounce():
         asyncio.create_task(initial_announce())
         asyncio.create_task(reannounce_loop())
+        asyncio.create_task(serial_input_loop(router))
         # Start SDS011 periodic measurement if active
         # if sds011_sensor.sensor: sds011_sensor.start()
         await _original_run()

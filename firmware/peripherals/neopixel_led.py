@@ -1,19 +1,22 @@
 """NeoPixel RGB LED control."""
 
 led = None
-colors = {
-    "green": (255, 0, 0),
-    "red": (0, 255, 0),
-    "blue": (0, 0, 255),
-    "off": (0, 0, 0),
-}
+colors = {}
 
 
-def init(pin, num_leds=1):
-    global led
+def init(pin, num_leds=1, order="RGB"):
+    global led, colors
     from machine import Pin
     import neopixel
     led = neopixel.NeoPixel(Pin(pin), num_leds)
+
+    r, g, b = order.index("R"), order.index("G"), order.index("B")
+    colors = {
+        "red": tuple(255 if i == r else 0 for i in range(3)),
+        "green": tuple(255 if i == g else 0 for i in range(3)),
+        "blue": tuple(255 if i == b else 0 for i in range(3)),
+        "off": (0, 0, 0),
+    }
 
 
 def process(content):

@@ -124,7 +124,6 @@ class Reticulum:
     _INTERFACE_MAP = {
         "UDPInterface":       "udp",
         "SerialInterface":    "serial",
-        "E220Interface":      "e220",
         "E32Interface":       "e32",
         "LoRaInterface":      "lora",
         "TCPClientInterface": "tcp",
