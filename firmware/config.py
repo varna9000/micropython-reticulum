@@ -58,23 +58,23 @@ CONFIG = {
         # channel: freq = 862 + channel * 1MHz (E32-900T)
         #   6 = 868 MHz (EU ISM), 60 = 922 MHz (US ISM)
         #
-         {
-             "type": "E32Interface",
-             "name": "LoRa E32",
-             "enabled": True,
-             "uart_id": 1,
-             "tx_pin": 4,
-             "rx_pin": 5,
-             "speed": 9600,
-             "m0_pin": 15,
-             "m1_pin": 2,
-             "aux_pin": 6,
-             "auto_configure": False,
-             "timeout": 3000,
-             "channel": 6,
-             "air_rate": 2,
-             "tx_power": 3,
-         },
+         # {
+         #     "type": "E32Interface",
+         #     "name": "LoRa E32",
+         #     "enabled": True,
+         #     "uart_id": 1,
+         #     "tx_pin": 4,
+         #     "rx_pin": 5,
+         #     "speed": 9600,
+         #     "m0_pin": 15,
+         #     "m1_pin": 2,
+         #     "aux_pin": 6,
+         #     "auto_configure": False,
+         #     "timeout": 3000,
+         #     "channel": 6,
+         #     "air_rate": 2,
+         #     "tx_power": 3,
+         # },
 
         # ---- SX1262 SPI LoRa (e.g. Seeed XIAO ESP32S3 + Wio-SX1262) ----
         # Native SPI LoRa using micropython-lib lora-sx126x driver.
@@ -119,13 +119,13 @@ CONFIG = {
         # ---- TCP Client ----
         # Connects to a remote RNS TCP server (TCPServerInterface).
         # Uses HDLC framing, wire-compatible with reference Reticulum.
-        #{
-        #    "type": "TCPClientInterface",
-        #    "name": "VarnaTransport",
-        #    "enabled": True,
-        #    "target_host": "rn.varnatransport.com",
-        #    "target_port": 4243,
-        #},
+        {
+           "type": "TCPClientInterface",
+           "name": "VarnaTransport",
+           "enabled": True,
+           "target_host": "rn.varnatransport.com",
+           "target_port": 4243,
+        },
 
         # ---- Serial (for RNode / wired link) ----
         # {

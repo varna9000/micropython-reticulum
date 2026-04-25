@@ -73,6 +73,7 @@ class Link:
         self.hash = self.link_id
         self.type = const.DEST_LINK
         self.destination = destination
+        self.attached_interface = getattr(packet, 'receiving_interface', None)
         self.status = Link.PENDING
         self.activated_at = None
         self.last_activity = time.time()
@@ -84,7 +85,10 @@ class Link:
         self.packet_callback = None
         self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
 
-        log("Link request on " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8] + " mtu=" + str(self.mtu), LOG_VERBOSE)
+        log("Link request on " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8] + " mtu=" + str(self.mtu)
+            + " hashable=" + str(len(hashable_part)) + "B pkt_data=" + str(len(packet.data)) + "B"
+            + " signalling=" + self._signalling_bytes.hex()
+            + " raw[0]=0x" + ("%02x" % packet.raw[0]), LOG_VERBOSE)
 
         # --- Check capacity and rate limit BEFORE expensive crypto ---
         # ECDH + signing takes ~5s on ESP32, blocking the entire event loop.
@@ -112,6 +116,7 @@ class Link:
 
         # Generate ephemeral X25519 keypair for ECDH
         import gc; gc.collect()
+        import time as _t; _t0 = _t.ticks_ms()
         ephemeral_prv = X25519PrivateKey.generate()
         gc.collect()
         self._ephemeral_pub_bytes = ephemeral_prv.public_key().public_bytes()
@@ -125,6 +130,8 @@ class Link:
         derived_key = hkdf(length=64, derive_from=shared_key, salt=self.link_id)
         self._token = Token(derived_key)
         gc.collect()
+
+        log("ECDH completed in " + str(_t.ticks_diff(_t.ticks_ms(), _t0)) + "ms", LOG_DEBUG)
 
         # Clean up ECDH key material
         del ephemeral_prv, shared_key, derived_key, peer_pub
@@ -160,7 +167,9 @@ class Link:
             self, proof_data,
             const.PKT_PROOF,
             context=const.CTX_LRPROOF,
+            context_flag=const.FLAG_UNSET,
             create_receipt=False,
+            attached_interface=self.attached_interface,
         )
         proof_packet.send()
 

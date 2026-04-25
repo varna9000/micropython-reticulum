@@ -95,6 +95,8 @@ class Transport:
 
             for interface in Transport.interfaces:
                 if interface.online:
+                    if packet.attached_interface is not None and interface is not packet.attached_interface:
+                        continue
                     try:
                         result = interface.process_outgoing(raw)
                         if result or result is None:
@@ -149,10 +151,64 @@ class Transport:
             if not interface.online:
                 continue
             try:
-                interface.process_outgoing(fwd)
+                interface.process_outgoing(bytes(fwd))
                 log("Forward: " + str(len(fwd)) + "B " + receiving_interface.name + " -> " + interface.name + " hops=" + str(fwd[1]), LOG_DEBUG)
             except Exception as e:
                 log("Forward error on " + interface.name + ": " + str(e), LOG_ERROR)
+
+    @staticmethod
+    def _ifac_validate(raw, interface):
+        """Validate and strip IFAC from inbound packet. Returns raw or None."""
+        has_ifac_flag = raw[0] & 0x80
+
+        if interface is not None and interface.ifac_signing_key is not None:
+            # IFAC enabled: flag MUST be set
+            if not has_ifac_flag:
+                log("Inbound: IFAC required but flag not set, dropping", LOG_DEBUG)
+                return None
+
+            isz = interface.ifac_size
+            if len(raw) <= 2 + isz:
+                log("Inbound: packet too short for IFAC, dropping", LOG_DEBUG)
+                return None
+
+            import gc
+            from .crypto.hkdf import hkdf
+
+            # Extract IFAC (not masked on wire)
+            ifac = raw[2:2 + isz]
+
+            # Generate mask
+            mask = hkdf(length=len(raw), derive_from=ifac,
+                         salt=interface.ifac_key)
+
+            # Unmask (skip IFAC byte positions)
+            unmasked = bytearray(len(raw))
+            unmasked[0] = raw[0] ^ mask[0]
+            unmasked[1] = raw[1] ^ mask[1]
+            unmasked[2:2 + isz] = ifac  # IFAC not masked
+            for i in range(2 + isz, len(raw)):
+                unmasked[i] = raw[i] ^ mask[i]
+
+            # Reconstruct original packet (strip IFAC, clear flag)
+            new_raw = bytes([unmasked[0] & 0x7F, unmasked[1]]) + bytes(unmasked[2 + isz:])
+
+            # Verify signature
+            expected_ifac = interface.ifac_signing_key.sign(new_raw)[-isz:]
+            gc.collect()
+
+            if ifac == expected_ifac:
+                log("IFAC verified " + str(len(new_raw)) + "B on " + interface.name, LOG_DEBUG)
+                return new_raw
+            else:
+                log("Inbound: IFAC verification failed, dropping", LOG_DEBUG)
+                return None
+        else:
+            # No IFAC on this interface: drop packets with IFAC flag
+            if has_ifac_flag:
+                log("Inbound: IFAC flag set but not configured, dropping", LOG_DEBUG)
+                return None
+            return raw
 
     @staticmethod
     def inbound(raw, interface=None):
@@ -166,11 +222,9 @@ class Transport:
 
             log("Inbound: " + str(len(raw)) + " bytes, flags=0x" + ("%02x" % raw[0]), LOG_EXTREME)
 
-            # Drop IFAC-tagged packets (bit 7 set). µReticulum does not
-            # implement IFAC, so these cannot be decoded. Per reference RNS,
-            # interfaces without IFAC must drop IFAC-flagged packets.
-            if raw[0] & 0x80:
-                log("Inbound: IFAC flag set, dropping (IFAC not supported)", LOG_DEBUG)
+            # IFAC validation
+            raw = Transport._ifac_validate(raw, interface)
+            if raw is None:
                 return
 
             packet = Packet(destination=None, data=raw)
@@ -181,6 +235,8 @@ class Transport:
             log("Inbound: type=" + str(packet.packet_type) + " dest=" + packet.destination_hash.hex(), LOG_DEBUG)
 
             packet.receiving_interface = interface
+            packet.hops += 1
+
             if hasattr(interface, 'rssi'):
                 packet.rssi = interface.rssi
             if hasattr(interface, 'snr'):

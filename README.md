@@ -34,7 +34,9 @@ For the **LilyGO T-Deck** (ESP32-S3 + SX1262 + display + keyboard) with a GUI me
 - **LXMF Messaging** — Send and receive encrypted messages with MeshChat/Sideband, verify Ed25519 signatures, send delivery proofs (receipts). Messages show as "delivered" in MeshChat. Includes an echo bot example that auto-replies to incoming messages.
 - **NeoPixel Control via LXMF** — Send color commands (`red`, `green`, `blue`, `off`) from MeshChat to control the onboard LED. Demonstrates using Reticulum as a hardware control channel.
 - **Announce & Discovery** — ESP32 announces itself with an LXMF-compatible display name. Appears in MeshChat's network visualizer. Receives and parses announces from other peers.
-- **Full Crypto Stack** — X25519 key exchange, Ed25519 signatures, AES-128-CBC encryption, HKDF, HMAC-SHA256 — all in pure Python, no C extensions.
+- **Full Crypto Stack** — X25519 key exchange, Ed25519 signatures, AES-128-CBC encryption, HKDF, HMAC-SHA256. Pure Python with optional native C acceleration (160x faster — see [Native Crypto Module](#native-crypto-module)).
+- **IFAC Support** — Interface Access Codes for authenticated packet exchange, wire-compatible with reference Reticulum. Configurable per-interface via `networkname` and `passphrase`.
+- **Camera Module** — OV2640 camera support on ESP32-S3-CAM boards. Captures JPEG images and sends them as LXMF image attachments. See `example_camera_node.py`.
 - **Wire Protocol** — Byte-identical packet format to reference Reticulum. Validated bidirectionally against the reference implementation.
 - **NomadNet Page Serving** — Serve micron-format pages to NomadNet clients over Reticulum Links. Full ECDH link handshake with request/response RPC. Pages and files of any size (up to 16KB) are automatically served via Resource transfer when they exceed a single packet.
 - **File Serving** — Serve downloadable files from a `files/` directory. Files are registered as `/file/<filename>` handlers and linked from micron pages with `` [label`:/file/name] `` syntax. Large files are transferred via the Resource protocol.
@@ -86,8 +88,11 @@ Commands are case-insensitive. Any other message is echoed back as a reply. This
 ```
 uP-reticulum/
 ├── README.md
-├── ureticulum-crypto-optimization-report.md
 ├── images/                      # README assets
+├── tools/                       # Build tools, hardware docs, support files
+│   ├── natmod/                  # Native C crypto module (Monocypher build)
+│   ├── camera/                  # Camera board pinout, test scripts
+│   └── ebyte/                   # E32/E220 datasheets
 │
 └── firmware/                    # ← Upload contents to microcontroller root
     ├── example_node.py          # LXMF messaging node with NeoPixel control
@@ -193,18 +198,27 @@ b'\x92\xc4\x07ESP32s3\xc0'
 
 ## Performance on ESP32-S3
 
+### With Native Crypto Module (recommended)
+
+| Operation | Time |
+|-----------|------|
+| Ed25519 sign | **12ms** |
+| Ed25519 verify | **18ms** |
+| X25519 key exchange | **13ms** |
+| Receive + decrypt message | **~50ms** |
+| **Total message round-trip** | **<200ms** |
+| IFAC sign/verify per packet | **~15ms** |
+
+### Pure Python Fallback
+
 | Operation | Time |
 |-----------|------|
 | Receive + decrypt message | ~2s |
 | Verify Ed25519 signature | ~2s |
 | Sign + send proof | <1s |
 | **Total message round-trip** | **~4s** |
-| Announce validation | ~6s |
-| Free RAM after boot | ~63 KB |
-| IDF heap after init | ~34 KB |
-| IDF heap during runtime | ~3 KB free (stable) |
 
-The bottleneck is pure-Python Curve25519 arithmetic. For a mesh messaging node on a $4 microcontroller, this is functional for real-world use.
+The native C module (Monocypher-based) provides a **160x speedup** over pure-Python Curve25519 arithmetic. See [Native Crypto Module](#native-crypto-module) for setup.
 
 ### Memory Management
 
@@ -360,6 +374,24 @@ Connects to a remote RNS TCP server (e.g. a transport node). Uses HDLC framing, 
   "target_port": 4243
 }
 ```
+
+### IFAC (Interface Access Codes)
+
+Add `networkname` and/or `passphrase` to any interface to enable IFAC authentication. Both sides must use identical values. Wire-compatible with reference Reticulum.
+
+```json
+{
+  "type": "TCPClientInterface",
+  "name": "Authenticated TCP",
+  "enabled": true,
+  "target_host": "rn.example.com",
+  "target_port": 4243,
+  "networkname": "my_network",
+  "passphrase": "my_secret_passphrase"
+}
+```
+
+The optional `ifac_size` parameter (default 16 bytes) controls the IFAC tag length. Must match the server configuration.
 
 ### Transport Mode
 
@@ -552,23 +584,94 @@ The `lora-sx126x` MicroPython driver (`mpremote mip install lora-sx126x`) sends 
 
 ### IFAC filtering
 
-Packets with bit 7 set in the Reticulum flags byte (IFAC-tagged) are dropped on receipt, since µReticulum does not implement Interface Access Codes. This matches reference Reticulum behavior for non-IFAC interfaces.
+Packets with bit 7 set in the Reticulum flags byte (IFAC-tagged) are validated if IFAC is configured on the receiving interface, or dropped if IFAC is not configured. This matches reference Reticulum behavior.
+
+## Native Crypto Module
+
+The optional native C module provides **160x faster** Ed25519 and X25519 operations by wrapping [Monocypher](https://monocypher.org/) compiled to native machine code. It's distributed as a `.mpy` file that you upload alongside your Python code — no firmware recompilation needed.
+
+### Setup
+
+1. Copy the `.mpy` file for your architecture to the device:
+   ```bash
+   # ESP32 / ESP32-S3 (Xtensa)
+   mpremote cp firmware/urns/crypto/ed25519_fast_xtensawin.mpy :urns/crypto/ed25519_fast_xtensawin.mpy
+
+   # RP2040 (ARM Cortex-M0+)
+   mpremote cp firmware/urns/crypto/ed25519_fast_armv6m.mpy :urns/crypto/ed25519_fast_armv6m.mpy
+   ```
+
+2. That's it. The crypto wrapper auto-detects the platform and loads the native module. If the `.mpy` file is missing or incompatible, it falls back to the pure Python implementation transparently.
+
+### Performance comparison
+
+| Operation | Pure Python | Native C | Speedup |
+|-----------|-------------|----------|---------|
+| Ed25519 sign | 2,000ms | 12ms | **166x** |
+| Ed25519 verify | 2,000ms | 18ms | **111x** |
+| X25519 exchange | 1,400ms | 13ms | **107x** |
+
+### Compatibility
+
+The `.mpy` files are version 6 (MicroPython 1.19+) and architecture-specific. Pre-built modules are provided for:
+
+| File | Architecture | Devices |
+|------|-------------|---------|
+| `ed25519_fast_xtensawin.mpy` | Xtensa (windowed) | ESP32, ESP32-S2, ESP32-S3 |
+| `ed25519_fast_armv6m.mpy` | ARM Cortex-M0+ | RP2040 (Pico W) |
+
+If a future MicroPython version changes the `.mpy` format, see [BUILDING_NATIVE_CRYPTO.md](tools/natmod/BUILDING_NATIVE_CRYPTO.md) for cross-compilation instructions.
+
+## Camera Module
+
+![camera demo](images/image2-cam.png "Camera Module Demo")
+
+ESP32-S3-CAM boards with OV2640 cameras can capture JPEG images and send them over LXMF as inline image attachments.
+
+**Prerequisite:** Standard MicroPython does not include camera support. You need a custom firmware build with the camera driver compiled in. Download a pre-built firmware from the [micropython-camera-API releases](https://github.com/cnadler86/micropython-camera-API/releases) page (choose the `.bin` for your board), or build from the [micropython-camera-API](https://github.com/cnadler86/micropython-camera-API) source. Flash it the same way as regular MicroPython:
+
+```bash
+esptool.py --chip esp32s3 erase_flash
+esptool.py --chip esp32s3 write_flash -z 0 firmware_camera_esp32s3.bin
+```
+
+### Camera Node Example
+
+`example_camera_node.py` responds to the "image" keyword with a camera photo:
+
+```python
+import example_camera_node
+```
+
+Send "image" from MeshChat/Sideband and receive a JPEG photo back. The image is captured at CIF resolution (400x296) and delivered via LXMF Link-based Resource transfer.
+
+### Standalone Camera Capture
+
+```python
+from peripherals.camera import capture
+
+# Save to flash
+capture(resolution="cif", quality=30)
+
+# In-memory only (for LXMF transmission)
+img_bytes = capture(path=None, resolution="qvga", quality=15)
+```
+
+Available resolutions: `qqvga` (160x120), `qvga` (320x240), `cif` (400x296), `hvga` (480x320), `vga` (640x480), and more.
 
 ## Limitations
 
 - **MicroPython only** — no CPython/desktop support. Uses `uhashlib`, `ucryptolib`, `uasyncio`, `micropython.const` directly.
-- **Opportunistic LXMF only** — Single-packet messages up to ~295 bytes content for opportunistic delivery. Link-based LXMF delivery is supported for receiving larger messages (up to 16KB) via Resource transfer.
-- **Server-side links only** — Can accept incoming links (for page serving), but cannot initiate outbound links.
+- **Opportunistic LXMF only** — Single-packet messages up to ~295 bytes content for opportunistic delivery. Link-based LXMF delivery is supported for larger messages (up to 16KB) via Resource transfer.
 - **No propagation nodes** — Cannot store-and-forward messages for offline peers.
-- **Pure Python crypto** — ~4 second message round-trip on ESP32. `@micropython.viper` could significantly speed this up.
+- **Pure Python crypto fallback** — ~4 second message round-trip without the native C module. With native module: <200ms.
 
 ## What's Next
 
 Potential areas for expansion:
 
-- **Viper-accelerated crypto** — `@micropython.viper` native compilation for field arithmetic could bring X25519 from ~1.4s to ~0.2s
-- **Client-side link LXMF delivery** — Initiate outbound links for direct LXMF delivery to peers
 - **Propagation node** — Store-and-forward for offline peers
+- **More sensor integrations** — Additional peripheral drivers
 
 ## License
 

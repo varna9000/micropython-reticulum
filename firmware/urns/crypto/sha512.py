@@ -4,6 +4,11 @@
 
 import struct
 
+try:
+    from micropython import native
+except ImportError:
+    native = lambda f: f
+
 def new(m=None):
     return sha512(m)
 
@@ -53,6 +58,7 @@ class sha512:
     def _rotr(self, x, y):
         return ((x >> y) | (x << (64 - y))) & 0xFFFFFFFFFFFFFFFF
 
+    @native
     def _sha512_process(self, chunk):
         w = _shared_w
         w[0:16] = struct.unpack('!16Q', chunk)

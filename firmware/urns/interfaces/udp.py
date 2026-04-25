@@ -121,6 +121,7 @@ class UDPInterface(Interface):
 
         sent = False
         try:
+            data = self.ifac_sign(data)
             self._socket.sendto(data, self._forward_addr)
             # Re-assert non-blocking after sendto — lwIP bug:
             # sendto corrupts the socket's non-blocking state

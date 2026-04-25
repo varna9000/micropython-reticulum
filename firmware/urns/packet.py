@@ -61,7 +61,7 @@ class Packet:
         if header_type is None:
             header_type = const.HDR_1
         if context_flag is None:
-            context_flag = const.FLAG_UNSET
+            context_flag = const.FLAG_SET if context and context != const.CTX_NONE else const.FLAG_UNSET
 
         if destination is not None:
             self.header_type = header_type

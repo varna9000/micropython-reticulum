@@ -148,6 +148,7 @@ class Reticulum:
                 mod = __import__("urns.interfaces." + modname, None, None, (itype,))
                 cls = getattr(mod, itype)
                 iface = cls(iface_config)
+                iface.setup_ifac(iface_config)
                 self.interfaces.append(iface)
                 Transport.register_interface(iface)
             except Exception as e:

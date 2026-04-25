@@ -123,6 +123,9 @@ class TCPClientInterface(Interface):
                     # Set HDR_2 (bit 6) + TRANSPORT (bit 4), keep other bits
                     data = bytes([data[0] | 0x50]) + data[1:2] + transport_id + data[2:]
 
+            # Apply IFAC after transport wrapping, before framing
+            data = self.ifac_sign(data)
+
             frame = bytes([FLAG]) + hdlc_escape(data) + bytes([FLAG])
             # Switch to blocking mode with timeout for reliable sendall().
             # MicroPython ESP32 lwIP: sendall() on non-blocking sockets

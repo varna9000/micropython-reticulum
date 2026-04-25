@@ -4,6 +4,12 @@
 # Adapted for MicroPython timing
 
 import os
+import sys
+
+try:
+    from micropython import native
+except ImportError:
+    native = lambda f: f
 
 P = 2**255 - 19
 _A = 486662
@@ -39,6 +45,7 @@ def _const_time_swap(a, b, swap):
     return temp[index:index + 2]
 
 
+@native
 def _raw_curve25519(base, n):
     """RFC 7748 Montgomery ladder with combined double-and-add.
 
@@ -123,21 +130,27 @@ def curve25519_base(secret_raw):
     return _pack_number(_raw_curve25519(9, secret))
 
 
+# Native module set by crypto/__init__.py after ed25519 loads it
+_native = None
+
+
 class X25519PublicKey:
-    def __init__(self, x):
+    def __init__(self, x, raw=None):
         self.x = x
+        self._raw = raw if raw else (x if isinstance(x, bytes) else _pack_number(x))
 
     @classmethod
     def from_public_bytes(cls, data):
-        return cls(_unpack_number(data))
+        return cls(_unpack_number(data), bytes(data))
 
     def public_bytes(self):
-        return _pack_number(self.x)
+        return self._raw
 
 
 class X25519PrivateKey:
-    def __init__(self, a):
+    def __init__(self, a, raw=None):
         self.a = a
+        self._raw = raw if raw else (a if isinstance(a, bytes) else _pack_number(a))
 
     @classmethod
     def generate(cls):
@@ -145,16 +158,22 @@ class X25519PrivateKey:
 
     @classmethod
     def from_private_bytes(cls, data):
-        return cls(_fix_secret(_unpack_number(data)))
+        return cls(_fix_secret(_unpack_number(data)), bytes(data))
 
     def private_bytes(self):
         return _pack_number(self.a)
 
     def public_key(self):
-        return X25519PublicKey.from_public_bytes(_pack_number(_raw_curve25519(9, self.a)))
+        if _native:
+            return X25519PublicKey.from_public_bytes(
+                _native.x25519_publickey(self._raw))
+        return X25519PublicKey.from_public_bytes(
+            _pack_number(_raw_curve25519(9, self.a)))
 
     def exchange(self, peer_public_key):
         if isinstance(peer_public_key, bytes):
             peer_public_key = X25519PublicKey.from_public_bytes(peer_public_key)
 
+        if _native:
+            return _native.x25519(self._raw, peer_public_key._raw)
         return _pack_number(_raw_curve25519(peer_public_key.x, self.a))
