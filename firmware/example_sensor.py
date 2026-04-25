@@ -24,6 +24,7 @@ Process
 
 from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG, SENSOR_HUB
 
+import machine, time
 import gc
 gc.collect()
 
@@ -224,9 +225,15 @@ def main():
     rns.setup_interfaces()
     gc.collect()
 
+    # Calling machine.RTC() should set system time from RTC
+    # RTC can be set with mpremote rtc --set
+    rtc = machine.RTC()
+    gc.collect()
+
     if DEBUG >= 1:
         print("LXMF address:", dest.hexhash)
         print("Free memory:", gc.mem_free(), "bytes")
+        print("RTC Time:", rtc.datetime())
         print("Running... (Ctrl+C to stop)")
 
     # Deferred initial announce — runs AFTER poll loop starts
