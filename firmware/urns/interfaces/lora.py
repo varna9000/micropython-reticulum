@@ -151,6 +151,8 @@ class LoRaInterface(Interface):
                 log("LoRa drop: " + str(len(data)) + "B exceeds " + str(2 * _FRAME_PAYLOAD), LOG_DEBUG)
                 return False
 
+            data = self.ifac_sign(data)
+
             # RNode-compatible header: random seq in upper nibble.
             # The SX1262 driver sends all bytes faithfully — no FIFO
             # offset bug.  The old b'\x00' dummy byte was actually

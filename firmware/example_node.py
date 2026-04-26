@@ -17,11 +17,13 @@ gc.collect()
 
 # ---- Peripherals ----
 # Uncomment the ones you have connected. Shared I2C bus for I2C devices.
-from machine import Pin, SoftI2C
-i2c = SoftI2C(scl=Pin(6), sda=Pin(5), freq=100000)
+# IMPORTANT: I2C pins must NOT overlap with interface pins (E32 uses
+# UART1 TX=4, RX=5, AUX=6, M0=15, M1=2). Pick free GPIOs for I2C.
+# from machine import Pin, SoftI2C
+# i2c = SoftI2C(scl=Pin(21), sda=Pin(20), freq=100000)
 
-import peripherals.bme280_sensor as bme_sensor
-bme_sensor.init(i2c)
+# import peripherals.bme280_sensor as bme_sensor
+# bme_sensor.init(i2c)
 
 # import peripherals.neopixel_led as neopixel_led
 # neopixel_led.init(pin=21)
@@ -36,7 +38,7 @@ bme_sensor.init(i2c)
 # sds011_sensor.init(uart_id=1, tx_pin=43, rx_pin=44)
 
 # List all active peripherals here (must match uncommented imports above)
-active_peripherals = [bme_sensor]
+active_peripherals = []
 
 gc.collect()
 

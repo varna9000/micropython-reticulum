@@ -72,6 +72,8 @@ class SerialInterface(Interface):
 
         kwargs["txbuf"] = 1024
         kwargs["rxbuf"] = 1024
+        kwargs["timeout"] = 0
+        kwargs["timeout_char"] = 2
 
         if self.databits != 8:
             kwargs["bits"] = self.databits
@@ -92,6 +94,7 @@ class SerialInterface(Interface):
             return False
 
         try:
+            data = self.ifac_sign(data)
             frame = bytes([FLAG]) + hdlc_escape(data) + bytes([FLAG])
             self._uart.write(frame)
             self.txb += len(data)

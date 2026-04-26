@@ -190,6 +190,7 @@ class E32Interface(SerialInterface):
             return False
 
         try:
+            data = self.ifac_sign(data)
             frame = bytes([FLAG]) + hdlc_escape(data) + bytes([FLAG])
 
             if len(frame) > _E32_BUF:
