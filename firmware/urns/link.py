@@ -82,7 +82,9 @@ class Link:
         self.incoming_resources = []
         self.outgoing_resources = []
         self.resource_concluded_callback = None
+        self.remote_identified_callback = None
         self.packet_callback = None
+        self.remote_identity = None
         self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
 
         log("Link request on " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8] + " mtu=" + str(self.mtu)
@@ -215,7 +217,7 @@ class Link:
             log("Link " + self.link_id.hex()[:8] + " close received", LOG_VERBOSE)
             self.status = Link.CLOSED
         elif packet.context == const.CTX_LINKIDENTIFY:
-            log("Link " + self.link_id.hex()[:8] + " identify (not implemented)", LOG_DEBUG)
+            self._handle_identify(plaintext)
         elif packet.context == const.CTX_NONE:
             if self.packet_callback:
                 try:
@@ -241,6 +243,40 @@ class Link:
                     self.destination.link_established_callback(self)
                 except Exception as e:
                     log("Link established callback error: " + str(e), LOG_ERROR)
+
+    def _handle_identify(self, plaintext):
+        """Handle incoming link identification from the initiator."""
+        from .identity import Identity
+        keysize = Identity.KEYSIZE // 8    # 64 bytes (enc_pub + sig_pub)
+        sigsize = Identity.SIGLENGTH // 8  # 64 bytes
+
+        if len(plaintext) != keysize + sigsize:
+            log("Link " + self.link_id.hex()[:8] + " identify: wrong length " + str(len(plaintext)), LOG_DEBUG)
+            return
+
+        public_key = plaintext[:keysize]
+        signature = plaintext[keysize:keysize + sigsize]
+        signed_data = self.link_id + public_key
+
+        identity = Identity(create_keys=False)
+        identity.load_public_key(public_key)
+
+        if identity.validate(signature, signed_data):
+            self.remote_identity = identity
+            log("Link " + self.link_id.hex()[:8] + " identified as " + identity.hexhash[:8], LOG_VERBOSE)
+            if self.remote_identified_callback:
+                try:
+                    self.remote_identified_callback(self, identity)
+                except Exception as e:
+                    log("Link " + self.link_id.hex()[:8] + " identify callback error: " + str(e), LOG_ERROR)
+        else:
+            log("Link " + self.link_id.hex()[:8] + " identify: invalid signature", LOG_DEBUG)
+
+    def set_remote_identified_callback(self, callback):
+        self.remote_identified_callback = callback
+
+    def get_remote_identity(self):
+        return self.remote_identity
 
     def _handle_request(self, plaintext, packet):
         """Handle incoming request on established link."""
@@ -448,7 +484,9 @@ class OutgoingLink:
         self.incoming_resources = []
         self.outgoing_resources = []
         self.resource_concluded_callback = None
+        self.remote_identified_callback = None
         self.packet_callback = None
+        self.remote_identity = None
 
         # Generate ephemeral X25519 keypair for ECDH
         gc.collect()

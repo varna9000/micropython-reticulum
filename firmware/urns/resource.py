@@ -66,6 +66,20 @@ class Resource:
         self.hash = Identity.full_hash(data + self.random_hash)
         self.expected_proof = Identity.full_hash(data + self.hash)
 
+        # Try bz2 compression (requires native C module)
+        self.compressed = False
+        try:
+            from .bz2dec import compress as bz2_compress
+            compressed = bz2_compress(data)
+            if compressed and len(compressed) < len(data):
+                data = compressed
+                self.compressed = True
+                log("Resource compressed " + self.hash.hex()[:8] + ": " + str(self.total_data_size) + "B -> " + str(len(data)) + "B", LOG_DEBUG)
+            if compressed:
+                del compressed
+        except Exception:
+            pass
+
         # Encrypt: random_hash + data with link token
         gc.collect()
         plaintext = self.random_hash + data
@@ -92,6 +106,8 @@ class Resource:
 
         # Build flags
         self.flags = FLAG_ENCRYPTED
+        if self.compressed:
+            self.flags |= FLAG_COMPRESSED
         if is_response:
             self.flags |= FLAG_IS_RESPONSE
 

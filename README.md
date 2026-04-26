@@ -40,7 +40,7 @@ For the **LilyGO T-Deck** (ESP32-S3 + SX1262 + display + keyboard) with a GUI me
 - **Wire Protocol** — Byte-identical packet format to reference Reticulum. Validated bidirectionally against the reference implementation.
 - **NomadNet Page Serving** — Serve micron-format pages to NomadNet clients over Reticulum Links. Full ECDH link handshake with request/response RPC. Pages and files of any size (up to 16KB) are automatically served via Resource transfer when they exceed a single packet.
 - **File Serving** — Serve downloadable files from a `files/` directory. Files are registered as `/file/<filename>` handlers and linked from micron pages with `` [label`:/file/name] `` syntax. Large files are transferred via the Resource protocol.
-- **Resource Transfer** — Wire-compatible segmented data transfer over Links for payloads exceeding a single packet (~417 bytes). Supports bz2 decompression, hash verification, and proof exchange. Confirmed working with MeshChat and NomadNet for both incoming and outgoing transfers.
+- **Resource Transfer** — Wire-compatible segmented data transfer over Links for payloads exceeding a single packet (~417 bytes). Supports bz2 decompression (with optional native C acceleration — see [Native BZ2 Module](#native-bz2-module)), hash verification, and proof exchange. Confirmed working with MeshChat and NomadNet for both incoming and outgoing transfers.
 - **Link MTU Negotiation** — Links negotiate MTU via signalling bytes in the handshake, matching reference Reticulum. Over TCP, Resource transfers use the full negotiated MTU (up to 16KB parts) instead of the base 500-byte MTU.
 - **Transport Mode** — Blind flood forwarding between interfaces. Bridge WiFi and LoRa so packets from one interface are relayed to all others.
 - **UDP Interface** — WiFi networking with auto-detected subnet broadcast. Non-blocking async I/O with ESP32 socket recovery.
@@ -90,7 +90,7 @@ uP-reticulum/
 ├── README.md
 ├── images/                      # README assets
 ├── tools/                       # Build tools, hardware docs, support files
-│   ├── natmod/                  # Native C crypto module (Monocypher build)
+│   ├── natmod/                  # Native C modules (ed25519_fast, bz2_fast)
 │   ├── camera/                  # Camera board pinout, test scripts
 │   └── ebyte/                   # E32/E220 datasheets
 │
@@ -98,6 +98,11 @@ uP-reticulum/
     ├── example_node.py          # LXMF messaging node with NeoPixel control
     ├── example_nomadnet_node.py # NomadNet page-serving node
     ├── config.py                # Node configuration (WiFi, interfaces)
+    ├── lib/                     # Native C modules (.mpy) — auto-loaded by MicroPython
+    │   ├── ed25519_fast_xtensawin.mpy  # Ed25519/X25519 for ESP32
+    │   ├── ed25519_fast_armv6m.mpy     # Ed25519/X25519 for RP2040
+    │   ├── bz2_fast_xtensawin.mpy      # BZ2 decompressor for ESP32
+    │   └── bz2_fast_armv6m.mpy         # BZ2 decompressor for RP2040
     ├── pages/                   # NomadNet micron-format pages
     ├── files/                   # Downloadable files served over Links
     ├── sensors/                 # Sensor drivers (bme280, sds011)
@@ -118,7 +123,7 @@ uP-reticulum/
         ├── transport.py         # Packet routing, announce handling, interface management
         ├── link.py              # Server-side Reticulum Links (ECDH handshake, request/response)
         ├── resource.py          # Resource transfer protocol (segmented data over Links)
-        ├── bz2dec.py            # Pure Python bz2 decompressor (for Resource payloads)
+        ├── bz2dec.py            # BZ2 decompressor (native C via lib/ or pure Python fallback)
         ├── lxmf.py              # LXMF message format, LXMessage, LXMRouter
         ├── umsgpack.py          # Minimal MessagePack (subset needed for LXMF)
         ├── log.py               # Logging with configurable verbosity
@@ -595,10 +600,10 @@ The optional native C module provides **160x faster** Ed25519 and X25519 operati
 1. Copy the `.mpy` file for your architecture to the device:
    ```bash
    # ESP32 / ESP32-S3 (Xtensa)
-   mpremote cp firmware/urns/crypto/ed25519_fast_xtensawin.mpy :urns/crypto/ed25519_fast_xtensawin.mpy
+   mpremote cp firmware/lib/ed25519_fast_xtensawin.mpy :lib/ed25519_fast_xtensawin.mpy
 
    # RP2040 (ARM Cortex-M0+)
-   mpremote cp firmware/urns/crypto/ed25519_fast_armv6m.mpy :urns/crypto/ed25519_fast_armv6m.mpy
+   mpremote cp firmware/lib/ed25519_fast_armv6m.mpy :lib/ed25519_fast_armv6m.mpy
    ```
 
 2. That's it. The crypto wrapper auto-detects the platform and loads the native module. If the `.mpy` file is missing or incompatible, it falls back to the pure Python implementation transparently.
@@ -620,7 +625,36 @@ The `.mpy` files are version 6 (MicroPython 1.19+) and architecture-specific. Pr
 | `ed25519_fast_xtensawin.mpy` | Xtensa (windowed) | ESP32, ESP32-S2, ESP32-S3 |
 | `ed25519_fast_armv6m.mpy` | ARM Cortex-M0+ | RP2040 (Pico W) |
 
-If a future MicroPython version changes the `.mpy` format, see [BUILDING_NATIVE_CRYPTO.md](tools/natmod/BUILDING_NATIVE_CRYPTO.md) for cross-compilation instructions.
+If a future MicroPython version changes the `.mpy` format, see [BUILDING_NATIVE_MODULES.md](tools/natmod/BUILDING_NATIVE_MODULES.md) for cross-compilation instructions.
+
+## Native BZ2 Module
+
+Reference RNS always compresses Resource transfers with bz2. The native C module provides both **compression and decompression**, producing stdlib-compatible bz2 output that interoperates with reference RNS.
+
+- **Decompression**: ~100x faster than pure Python (~2ms vs ~200ms for 1KB). Falls back to pure Python if native module is missing.
+- **Compression**: ~500ms for 1KB on ESP32. Reduces text payloads by 60-80% (e.g. 1253B → 394B). Only available with native module — without it, Resources are sent uncompressed (which is valid).
+
+### Setup
+
+1. Copy the `.mpy` file for your architecture to the device:
+   ```bash
+   # ESP32 / ESP32-S3 (Xtensa)
+   mpremote cp firmware/lib/bz2_fast_xtensawin.mpy :lib/bz2_fast_xtensawin.mpy
+
+   # RP2040 (ARM Cortex-M0+)
+   mpremote cp firmware/lib/bz2_fast_armv6m.mpy :lib/bz2_fast_armv6m.mpy
+   ```
+
+2. The `bz2dec.py` module auto-detects the platform and loads the native module. Falls back to pure Python decompression if the `.mpy` file is missing. Compression is skipped (sends uncompressed) without the native module.
+
+### Compatibility
+
+| File | Architecture | Devices |
+|------|-------------|---------|
+| `bz2_fast_xtensawin.mpy` | Xtensa (windowed) | ESP32, ESP32-S2, ESP32-S3 |
+| `bz2_fast_armv6m.mpy` | ARM Cortex-M0+ | RP2040 (Pico W) |
+
+If a future MicroPython version changes the `.mpy` format, see [BUILDING_NATIVE_MODULES.md](tools/natmod/BUILDING_NATIVE_MODULES.md) for cross-compilation instructions.
 
 ## Camera Module
 

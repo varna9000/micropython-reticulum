@@ -1,8 +1,42 @@
 # µReticulum bz2 decompressor
 # Ported from pyflate (pfalcon) — BSD/GPLv2
-# Pure Python, no C extensions. Works on MicroPython with PSRAM.
+#
+# Automatically uses native C module (bz2_fast) if available
+# for the current architecture, otherwise falls back to pure Python.
 
 import io
+import sys
+
+_native = None
+
+def _try_native():
+    global _native
+    mod = None
+    try:
+        if sys.platform == "esp32":
+            import bz2_fast_xtensawin
+            mod = bz2_fast_xtensawin
+        elif sys.platform == "rp2":
+            import bz2_fast_armv6m
+            mod = bz2_fast_armv6m
+        else:
+            import bz2_fast
+            mod = bz2_fast
+    except ImportError:
+        pass
+    if mod is None:
+        try:
+            import bz2_fast
+            mod = bz2_fast
+        except ImportError:
+            pass
+    _native = mod
+
+_try_native()
+
+if _native:
+    from .log import log, LOG_VERBOSE
+    log("bz2: native C module loaded", LOG_VERBOSE)
 
 
 class _Bitfield:
@@ -142,6 +176,20 @@ def _bwt_reverse(data, end):
 
 def decompress(data):
     """Decompress bz2-compressed bytes. Returns bytes."""
+    if _native:
+        return _native.decompress(data)
+    return _decompress_python(data)
+
+
+def compress(data):
+    """Compress bytes with bz2. Requires native C module. Returns bytes or None."""
+    if _native and hasattr(_native, 'compress'):
+        return _native.compress(data)
+    return None
+
+
+def _decompress_python(data):
+    """Pure Python fallback decompressor."""
     f = io.BytesIO(data)
 
     magic = f.read(2)

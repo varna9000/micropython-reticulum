@@ -12,6 +12,7 @@ from .packet import Packet, PacketReceipt
 from .transport import Transport
 from .link import Link
 from . import lxmf
+from . import bz2dec
 from .reticulum import Reticulum
 
 
