@@ -114,6 +114,19 @@ class Packet:
 
     def pack(self):
         self.destination_hash = self.destination.hash
+
+        # Auto-upgrade to HDR_2 if destination is reachable via a transport
+        # node (learned from HDR_2 announces stored in Transport.path_table).
+        if (self.header_type == const.HDR_1
+                and self.transport_id is None
+                and self.packet_type == const.PKT_DATA):
+            from .transport import Transport
+            _tid = Transport.path_table.get(self.destination_hash)
+            if _tid is not None:
+                self.header_type = const.HDR_2
+                self.transport_id = _tid
+                self.flags = self._get_packed_flags()
+
         self.header = b""
         self.header += struct.pack("!B", self.flags)
         self.header += struct.pack("!B", self.hops)
@@ -144,6 +157,11 @@ class Packet:
                     self.header += self.destination.hash
                     if self.packet_type == const.PKT_ANNOUNCE:
                         self.ciphertext = self.data
+                    else:
+                        # Encrypt data packets (same as HDR_1 path)
+                        self.ciphertext = self.destination.encrypt(self.data)
+                        if hasattr(self.destination, 'latest_ratchet_id'):
+                            self.ratchet_id = self.destination.latest_ratchet_id
                 else:
                     raise OSError("Header type 2 requires transport ID")
 

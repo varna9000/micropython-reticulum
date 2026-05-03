@@ -19,6 +19,8 @@ TIMEOUT = 120
 HASHMAP_IS_EXHAUSTED = 0xFF
 HASHMAP_IS_NOT_EXHAUSTED = 0x00
 MAX_RESOURCE_SIZE = 16384  # 16KB — ESP32 memory safe
+REQUEST_RETRY_INTERVAL = 10  # seconds between request retries
+MAX_REQUEST_RETRIES = 5
 
 # Resource flags
 FLAG_ENCRYPTED = 0x01
@@ -180,6 +182,8 @@ class Resource:
         r.parts = [None] * r.total_parts
         r.received_count = 0
         r.window_count = 0  # parts received since last request
+        r.last_request_at = 0
+        r.request_retries = 0
         r.sdu = link.sdu
         r.encrypted = None
         r.expected_proof = None
@@ -251,8 +255,25 @@ class Resource:
             req_data += self.hashmap[i]
 
         self.window_count = 0
+        self.last_request_at = time.time()
+        self.request_retries += 1
         self.link.send(req_data, const.CTX_RESOURCE_REQ)
         log("Resource request: " + str(len(missing)) + " parts for " + self.hash.hex()[:8], LOG_DEBUG)
+
+    def check_request_timeout(self):
+        """(Receiver) Retry resource request if no parts arrived within interval."""
+        if self.status != TRANSFERRING:
+            return
+        if self.last_request_at == 0:
+            return
+        if time.time() - self.last_request_at < REQUEST_RETRY_INTERVAL:
+            return
+        if self.request_retries >= MAX_REQUEST_RETRIES:
+            log("Resource request max retries reached: " + self.hash.hex()[:8], LOG_ERROR)
+            self.cancel()
+            return
+        log("Resource request retry " + str(self.request_retries) + "/" + str(MAX_REQUEST_RETRIES) + " for " + self.hash.hex()[:8], LOG_DEBUG)
+        self.request_next()
 
     def receive_part(self, data):
         """(Receiver) Receive a raw resource part."""

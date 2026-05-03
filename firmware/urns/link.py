@@ -443,6 +443,10 @@ class Link:
         if self.status != Link.ACTIVE:
             return
 
+        # Check resource request timeouts (retry if no parts arrived)
+        for r in self.incoming_resources:
+            r.check_request_timeout()
+
         # Check stale grace period
         if now - self.last_activity > Link.STALE_GRACE:
             log("Link " + self.link_id.hex()[:8] + " stale, closing", LOG_VERBOSE)
@@ -700,6 +704,9 @@ class OutgoingLink:
             return
         if self.status != OutgoingLink.ACTIVE:
             return
+        # Check resource request timeouts (retry if no parts arrived)
+        for r in self.incoming_resources:
+            r.check_request_timeout()
         if time.time() - self.last_activity > 720:  # STALE_GRACE
             log("OutLink " + self.link_id.hex()[:8] + " stale, closing", LOG_VERBOSE)
             self._close()
