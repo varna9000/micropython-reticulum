@@ -122,13 +122,9 @@ class Destination:
         if self.direction != Destination.IN:
             raise TypeError("Only IN destinations can be announced")
 
-        import sys
         ratchet = b""
         destination_hash = self.hash
-        t = int(time.time())
-        if sys.platform == "esp32":
-            t += 946684800  # ESP32 MicroPython epoch is 2000-01-01, convert to Unix
-        random_hash = Identity.get_random_hash()[0:5] + t.to_bytes(5, "big")
+        random_hash = Identity.get_random_hash()[0:5] + int(time.time()).to_bytes(5, "big")
 
         if self.ratchets is not None:
             self.rotate_ratchets()
