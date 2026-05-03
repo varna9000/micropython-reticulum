@@ -136,14 +136,32 @@ class Transport:
 
     @staticmethod
     def _forward(raw, receiving_interface):
-        """Forward raw packet to all interfaces except the one it arrived on"""
+        """Forward raw packet to all interfaces except the one it arrived on.
+
+        Announces are rewritten from HDR_1 to HDR_2 with the transport
+        node's identity hash as transport_id, so downstream nodes learn the
+        transport path back (matching reference RNS Transport behaviour).
+        """
         hops = raw[1]
         if hops >= const.TRANSPORT_HOPLIMIT:
             log("Forward: hop limit reached (" + str(hops) + "), dropping", LOG_DEBUG)
             return
 
-        fwd = bytearray(raw)
-        fwd[1] = hops + 1
+        flags = raw[0]
+        packet_type = flags & 0x03
+        is_hdr1 = (flags & 0x40) == 0x00
+
+        # Rewrite HDR_1 announces as HDR_2 with our transport_id
+        if packet_type == const.PKT_ANNOUNCE and is_hdr1 and Transport.identity:
+            transport_id = Transport.identity.hash
+            # New flags: set HDR_2 (bit 6) + TRANSPORT (bit 4)
+            new_flags = (flags | 0x50)
+            # HDR_2 format: flags(1) + hops(1) + transport_id(16) + dest_hash(16) + context(1) + data
+            fwd = bytearray(bytes([new_flags, hops + 1]) + transport_id + raw[2:])
+            log("Forward announce as HDR_2: transport=" + transport_id.hex()[:8], LOG_DEBUG)
+        else:
+            fwd = bytearray(raw)
+            fwd[1] = hops + 1
 
         for interface in Transport.interfaces:
             if interface is receiving_interface:
