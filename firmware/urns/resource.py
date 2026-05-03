@@ -113,6 +113,8 @@ class Resource:
         if is_response:
             self.flags |= FLAG_IS_RESPONSE
 
+        self.sent_count = 0
+
         # Register with link
         self.link.register_outgoing_resource(self)
 
@@ -260,6 +262,15 @@ class Resource:
         self.link.send(req_data, const.CTX_RESOURCE_REQ)
         log("Resource request: " + str(len(missing)) + " parts for " + self.hash.hex()[:8], LOG_DEBUG)
 
+    def get_progress(self):
+        """Return transfer progress as a float 0.0 to 1.0."""
+        if self.total_parts == 0:
+            return 0.0
+        if self.is_initiator:
+            return self.sent_count / self.total_parts
+        else:
+            return self.received_count / self.total_parts
+
     def check_request_timeout(self):
         """(Receiver) Retry resource request if no parts arrived within interval."""
         if self.status != TRANSFERRING:
@@ -288,8 +299,9 @@ class Resource:
                 self.parts[i] = data
                 self.received_count += 1
                 self.window_count += 1
-                log("Resource part " + str(i + 1) + "/" + str(self.total_parts) +
-                    " for " + self.hash.hex()[:8], LOG_DEBUG)
+                pct = int(self.received_count * 100 / self.total_parts)
+                log("Resource RX " + str(self.received_count) + "/" + str(self.total_parts) +
+                    " (" + str(pct) + "%) " + self.hash.hex()[:8], LOG_DEBUG)
 
                 if self.received_count == self.total_parts:
                     self.assemble()
@@ -430,9 +442,6 @@ class Resource:
             requested_hashes.append(plaintext[offset:offset + MAPHASH_LEN])
             offset += MAPHASH_LEN
 
-        log("Resource sending " + str(len(requested_hashes)) + " parts for " +
-            self.hash.hex()[:8], LOG_DEBUG)
-
         # Send matching parts
         from .packet import Packet, LinkDestination
         for req_hash_part in requested_hashes:
@@ -448,7 +457,12 @@ class Resource:
                     )
                     pkt.MTU = self.link.mtu
                     pkt.send()
+                    self.sent_count += 1
                     break
+
+        pct = int(self.sent_count * 100 / self.total_parts)
+        log("Resource TX " + str(self.sent_count) + "/" + str(self.total_parts) +
+            " (" + str(pct) + "%) " + self.hash.hex()[:8], LOG_DEBUG)
 
     def cancel(self):
         """Cancel this resource transfer."""
