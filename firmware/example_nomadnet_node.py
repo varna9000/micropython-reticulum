@@ -82,6 +82,16 @@ def connect_wifi(ssid, password, timeout=15):
     ip = wlan.ifconfig()[0]
     if DEBUG >= 1:
         print("Connected! IP:", ip)
+
+    try:
+        import ntptime
+        ntptime.settime()
+        if DEBUG >= 1:
+            print("NTP synced")
+    except Exception as e:
+        if DEBUG >= 1:
+            print("NTP sync failed:", e)
+
     return ip
 
 
