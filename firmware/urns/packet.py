@@ -119,7 +119,7 @@ class Packet:
         # node (learned from HDR_2 announces stored in Transport.path_table).
         if (self.header_type == const.HDR_1
                 and self.transport_id is None
-                and self.packet_type == const.PKT_DATA):
+                and self.packet_type in (const.PKT_DATA, const.PKT_LINKREQUEST)):
             from .transport import Transport
             _tid = Transport.path_table.get(self.destination_hash)
             if _tid is not None:
@@ -155,7 +155,7 @@ class Packet:
                 if self.transport_id is not None:
                     self.header += self.transport_id
                     self.header += self.destination.hash
-                    if self.packet_type == const.PKT_ANNOUNCE:
+                    if self.packet_type in (const.PKT_ANNOUNCE, const.PKT_LINKREQUEST):
                         self.ciphertext = self.data
                     else:
                         # Encrypt data packets (same as HDR_1 path)
