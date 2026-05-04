@@ -40,11 +40,11 @@ For the **LilyGO T-Deck** (ESP32-S3 + SX1262 + display + keyboard) with a GUI me
 - **Wire Protocol** — Byte-identical packet format to reference Reticulum. Validated bidirectionally against the reference implementation.
 - **NomadNet Page Serving** — Serve micron-format pages to NomadNet clients over Reticulum Links. Full ECDH link handshake with request/response RPC. Pages and files of any size (up to 16KB) are automatically served via Resource transfer when they exceed a single packet.
 - **File Serving** — Serve downloadable files from a `files/` directory. Files are registered as `/file/<filename>` handlers and linked from micron pages with `` [label`:/file/name] `` syntax. Large files are transferred via the Resource protocol.
-- **Resource Transfer** — Wire-compatible segmented data transfer over Links for payloads exceeding a single packet (~417 bytes). Supports bz2 decompression (with optional native C acceleration — see [Native BZ2 Module](#native-bz2-module)), hash verification, and proof exchange. Confirmed working with MeshChat and NomadNet for both incoming and outgoing transfers.
+- **Resource Transfer** — Wire-compatible segmented data transfer over Links for payloads exceeding a single packet (~417 bytes). Supports bz2 decompression (with optional native C acceleration — see [Native BZ2 Module](#native-bz2-module)), hash verification, and proof exchange. Includes request retry mechanism for reliable delivery over lossy links (LoRa). Progress tracking with percentage logging. Confirmed working with MeshChat and NomadNet for both incoming and outgoing transfers.
 - **Link MTU Negotiation** — Links negotiate MTU via signalling bytes in the handshake, matching reference Reticulum. Over TCP, Resource transfers use the full negotiated MTU (up to 16KB parts) instead of the base 500-byte MTU.
-- **Transport Mode** — Blind flood forwarding between interfaces. Bridge WiFi and LoRa so packets from one interface are relayed to all others.
+- **Transport Mode** — Packet forwarding between interfaces with announce rewriting. Forwarded announces are converted from HDR_1 to HDR_2 with the transport node's identity, so downstream nodes learn the correct transport path. Bridges WiFi and LoRa so packets from one interface reach the wider network.
 - **UDP Interface** — WiFi networking with auto-detected subnet broadcast. Non-blocking async I/O with ESP32 socket recovery.
-- **TCP Client Interface** — HDLC-framed TCP connection to remote RNS transport servers. Automatic transport path routing: learns relay paths from HDR_2 announces and wraps outbound DATA packets for correct delivery through the transport server. Enables long-range connectivity beyond the local LAN.
+- **TCP Client Interface** — HDLC-framed TCP connection to remote RNS transport servers. Automatic transport path routing: learns relay paths from HDR_2 announces and wraps outbound DATA and LINKREQUEST packets as HDR_2 for correct multi-hop delivery through transport nodes. Enables long-range connectivity beyond the local LAN.
 - **SX1262 SPI LoRa Interface** — Native SPI control of SX1262 LoRa radios (e.g. Seeed XIAO ESP32S3 + Wio-SX1262). Implements RNode-compatible split-packet framing: packets up to 500 bytes are transparently split across two 255-byte LoRa frames, matching the exact protocol used by RNode firmware. Full interop with RNode (SX1276/SX1278) — bidirectional LXMF messaging, announces, and delivery proofs all work. RSSI/SNR reporting.
 - **Serial Interface** — HDLC-framed UART for RNode, LoRa radios, packet radio TNCs, or ESP32-to-ESP32 links.
 - **Persistent Identity** — Keys and known destinations survive reboots. JSON configuration.
@@ -412,7 +412,7 @@ Enable transport mode to relay packets between interfaces. This turns your ESP32
 }
 ```
 
-Transport uses blind flood forwarding: packets received on one interface are re-sent on all others (with hop count incremented). No path computation or routing tables — simple and RAM-friendly.
+Transport forwards packets between interfaces with hop count incremented. Announces are rewritten from HDR_1 to HDR_2 with the transport node's identity hash, so downstream nodes learn the correct path back through the transport chain. Other packet types are forwarded as-is (blind flood). Simple and RAM-friendly.
 
 See `firmware/config.py` for all config variants (UDP, LoRa, TCP, dual WiFi+LoRa). Uncomment the interfaces you need.
 
@@ -696,7 +696,7 @@ Available resolutions: `qqvga` (160x120), `qvga` (320x240), `cif` (400x296), `hv
 ## Limitations
 
 - **MicroPython only** — no CPython/desktop support. Uses `uhashlib`, `ucryptolib`, `uasyncio`, `micropython.const` directly.
-- **Opportunistic LXMF only** — Single-packet messages up to ~295 bytes content for opportunistic delivery. Link-based LXMF delivery is supported for larger messages (up to 16KB) via Resource transfer.
+- **LXMF message size** — Single-packet opportunistic messages up to ~295 bytes content. Larger messages (up to 16KB) use Link-based DIRECT delivery via Resource transfer, including through multi-hop transport chains.
 - **No propagation nodes** — Cannot store-and-forward messages for offline peers.
 - **Pure Python crypto fallback** — ~4 second message round-trip without the native C module. With native module: <200ms.
 
