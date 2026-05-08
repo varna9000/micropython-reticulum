@@ -326,7 +326,7 @@ Native SPI LoRa using the `lora-sx126x` driver from `micropython-lib`. Talks dir
 **Prerequisites:** Install the LoRa driver on your device first:
 
 ```
-mpremote mip install lora-sx126x
+mpremote mip install lora-sx126x lora-sync
 ```
 
 ```json
@@ -585,7 +585,7 @@ The receiver matches split frames by sequence number and reassembles them into a
 
 ### Note on the `lora-sx126x` driver
 
-The `lora-sx126x` MicroPython driver (`mpremote mip install lora-sx126x`) sends and receives bytes faithfully — the RNode header byte is the first byte returned by `poll_recv()` on RX and the first byte written by `send()` on TX. No FIFO offset workarounds are needed.
+The `lora-sx126x` MicroPython driver (`mpremote mip install lora-sx126x lora-sync`) sends and receives bytes faithfully — the RNode header byte is the first byte returned by `poll_recv()` on RX and the first byte written by `send()` on TX. No FIFO offset workarounds are needed.
 
 ### IFAC filtering
 

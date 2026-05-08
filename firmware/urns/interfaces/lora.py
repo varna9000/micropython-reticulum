@@ -1,6 +1,6 @@
 # µReticulum SX1262 SPI LoRa Interface
 # Direct SPI control via micropython-lib lora-sx126x driver.
-# Install: mpremote mip install lora-sx126x
+# Install: mpremote mip install lora-sx126x lora-sync
 #
 # RNode-compatible framing: 1-byte header per LoRa frame.
 # Upper nibble = random sequence, bit 0 = FLAG_SPLIT.
