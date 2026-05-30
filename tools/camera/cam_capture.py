@@ -43,7 +43,7 @@ RESOLUTIONS = {
 _cam = None
 
 
-def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False):
+def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False, warmup_frames=3, vflip=True, hmirror=False):
     """Capture a JPEG image.
 
     Args:
@@ -51,6 +51,9 @@ def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False):
         resolution: one of "qqvga","qvga","cif","hvga","vga","svga","xga","hd","sxga","uxga"
         quality: JPEG quality 10-63 (lower = smaller file, 10 is fine for LoRa)
         grayscale: if True, capture in grayscale (smaller file, no color)
+        warmup_frames: discard this many frames before keeping one (AGC/AWB settle)
+        vflip: flip image vertically (board-orientation dependent)
+        hmirror: mirror image horizontally
     Returns:
         file size in bytes
     """
@@ -80,7 +83,14 @@ def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False):
     if not grayscale:
         _cam.set_quality(quality)
 
-    _cam.capture()  # discard first frame (auto-exposure settling)
+    try:
+        _cam.set_vflip(vflip)
+        _cam.set_hmirror(hmirror)
+    except AttributeError:
+        pass  # older camera-API builds without flip/mirror setters
+
+    for _ in range(warmup_frames):
+        _cam.capture()  # discard for AGC/AWB settling
     img = _cam.capture()
     img_bytes = bytes(img)
     gc.collect()
