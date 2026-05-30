@@ -31,6 +31,7 @@ class Reticulum:
         self.is_connected_to_shared_instance = False
         self.config = {}
         self.interfaces = []
+        self.probe_destination = None
 
         # Derive storage directory from config path
         if "/" in config_path:
@@ -154,6 +155,26 @@ class Reticulum:
             except Exception as e:
                 log("Interface " + itype + " init failed: " + str(e), LOG_ERROR)
 
+        self._setup_probe_destination()
+
+    def _setup_probe_destination(self):
+        """Optionally expose a probe destination that replies to rnprobe.
+        Mirrors upstream Transport.probe_destination (Reticulum Transport.py:399)."""
+        probe_cfg = self.config.get("probe", {})
+        if not probe_cfg.get("enabled", False):
+            return
+        from .destination import Destination
+        app_name = probe_cfg.get("app_name", "urns")
+        aspect = probe_cfg.get("aspect", "probe")
+        self.probe_destination = Destination(
+            self.identity, Destination.IN, Destination.SINGLE,
+            app_name, aspect,
+        )
+        self.probe_destination.accepts_links(False)
+        self.probe_destination.set_proof_strategy(Destination.PROVE_ALL)
+        print("Probe address:", self.probe_destination.hexhash,
+              "(" + app_name + "." + aspect + ")")
+
     async def run(self):
         """Main async event loop. Run with asyncio.run(reticulum.run())"""
         import uasyncio as asyncio
@@ -167,8 +188,35 @@ class Reticulum:
             if hasattr(iface, 'poll_loop'):
                 tasks.append(asyncio.create_task(iface.poll_loop()))
 
+        if self.probe_destination is not None:
+            tasks.append(asyncio.create_task(self._probe_announce_loop()))
+
         log("Event loop running with " + str(len(tasks)) + " tasks", LOG_VERBOSE)
         await asyncio.gather(*tasks)
+
+    async def _probe_announce_loop(self):
+        """Initial + periodic announce for the probe destination."""
+        import uasyncio as asyncio
+
+        await asyncio.sleep(0.5)
+        try:
+            self.probe_destination.announce()
+            log("Probe announced", LOG_NOTICE)
+        except Exception as e:
+            log("Probe initial announce error: " + str(e), LOG_ERROR)
+        gc.collect()
+
+        interval = self.config.get("probe", {}).get("announce_interval", 60 * 60)
+        if interval <= 0:
+            return
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                self.probe_destination.announce()
+                log("Probe re-announced", LOG_VERBOSE)
+            except Exception as e:
+                log("Probe re-announce error: " + str(e), LOG_ERROR)
+            gc.collect()
 
     def shutdown(self):
         """Clean shutdown - persist state and close interfaces"""

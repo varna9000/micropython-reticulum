@@ -416,6 +416,57 @@ Transport forwards packets between interfaces with hop count incremented. Announ
 
 See `firmware/config.py` for all config variants (UDP, LoRa, TCP, dual WiFi+LoRa). Uncomment the interfaces you need.
 
+## Probe Responder
+
+µReticulum can optionally expose a dedicated destination that replies to `rnprobe`, the reference Reticulum reachability / RTT tool. This is useful for debugging multi-hop transport paths and measuring round-trip latency from a desktop RNS node to an embedded one.
+
+### Enabling
+
+In `config.py`, inside the `CONFIG` dict:
+
+```python
+CONFIG = {
+    ...
+    "probe": {
+        "enabled": True,
+        "app_name": "urns",
+        "aspect": "probe",
+        "announce_interval": 60 * 60,   # 1 hour; 0 = announce once at boot only
+    },
+    "interfaces": [...],
+}
+```
+
+When enabled, the boot log prints both the destination hash and the full_name:
+
+```
+Probe address: 4a1b… (urns.probe)
+```
+
+The probe destination is owned by `Reticulum` itself — any example script (`example_node.py`, `example_proxy.py`, `example_nomadnet_node.py`, …) that uses `Reticulum.setup_interfaces()` + `Reticulum.run()` gets the probe responder automatically.
+
+### Probing from a desktop
+
+On a machine running reference Reticulum, with the desktop's RNS daemon already learning announces from the network:
+
+```
+rnprobe urns.probe 4a1b…
+```
+
+Both `full_name` and `destination_hash` are required:
+
+- `full_name` — the dot-notation `app_name.aspect` exactly as configured on the responder. Announces only carry a *hash* of the name, so this string has to be known out of band (this README, the responder's boot log, or any prior agreement). Different name → different destination hash → packet is ignored.
+- `destination_hash` — copied from the responder's boot log or from the desktop daemon's announce log (`rnstatus -v` shows recent announces; `rnpath <hash>` confirms a route exists).
+
+A successful probe prints `Valid reply received from <hash>` with the measured RTT.
+
+### Notes
+
+- The probe destination has its own announce interval (separate from LXMF). 1 h is the default; lower it for active debug sessions, raise it (or set `0`) to keep airtime down.
+- Each reply performs one Ed25519 sign (~10 ms with the native crypto module, ~2 s on pure-Python Ed25519). Because nothing else is routed to this destination, sign cost is bounded by probe rate.
+- The probe destination explicitly refuses link requests (`accepts_links(False)`) — it only signs PROOF replies, mirroring upstream `Transport.probe_destination`.
+- Other apps (MeshChat, Sideband, NomadNet) filter announces by their own app_name and will not surface the probe destination in their UIs. This is intentional.
+
 ## NomadNet Page Serving
 
 µReticulum can serve [micron-format](https://github.com/markqvist/NomadNet) pages to NomadNet clients over Reticulum Links. This requires the full ECDH link handshake (3-packet exchange), after which the client can request pages via RPC.

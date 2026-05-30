@@ -19,6 +19,16 @@ DEBUG = 2
 CONFIG = {
     "loglevel": 3,
     "enable_transport": False,
+
+    # Dedicated destination that replies to `rnprobe` (reference RNS tool).
+    # Set "enabled": True to expose the probe destination. See README.
+    "probe": {
+        "enabled": False,
+        "app_name": "urns",            # full_name = "urns.probe"
+        "aspect": "probe",
+        "announce_interval": 60 * 60,  # 1 hour; 0 = announce once at boot only
+    },
+
     "interfaces": [
 
         # ---- WiFi UDP ----

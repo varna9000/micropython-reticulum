@@ -333,10 +333,21 @@ class Transport:
 
     @staticmethod
     def _handle_data(packet):
+        from .destination import Destination
         for dest in Transport.destinations:
             if dest.hash == packet.destination_hash:
                 import gc; gc.collect()
-                dest.receive(packet)
+                if dest.receive(packet):
+                    # Honour proof_strategy (mirrors reference RNS Transport.py).
+                    if dest.proof_strategy == Destination.PROVE_ALL:
+                        packet.prove()
+                    elif dest.proof_strategy == Destination.PROVE_APP:
+                        if dest.proof_requested_callback is not None:
+                            try:
+                                if dest.proof_requested_callback(packet):
+                                    packet.prove()
+                            except Exception as e:
+                                log("Proof requested callback error: " + str(e), LOG_ERROR)
                 return True
         # Check active links
         for link in Transport.active_links:
