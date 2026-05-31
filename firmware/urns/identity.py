@@ -187,6 +187,7 @@ class Identity:
             # Some transport paths or older Reticulum versions may encode the
             # context_flag differently, causing ratchet field misalignment.
             if not sig_valid:
+                alternate_layout = False
                 if has_ratchet:
                     log("Ratchet path failed, retrying without ratchet", LOG_DEBUG)
                     ratchet = b""
@@ -194,6 +195,7 @@ class Identity:
                     app_data = b""
                     if len(packet.data) > base + sig_len:
                         app_data = packet.data[base + sig_len:]
+                    alternate_layout = True
                 elif len(packet.data) >= base + ratchetsize + sig_len:
                     log("No-ratchet path failed, retrying with ratchet", LOG_DEBUG)
                     ratchet = packet.data[base:base + ratchetsize]
@@ -201,7 +203,8 @@ class Identity:
                     app_data = b""
                     if len(packet.data) > base + ratchetsize + sig_len:
                         app_data = packet.data[base + ratchetsize + sig_len:]
-                if len(signature) == sig_len:
+                    alternate_layout = True
+                if alternate_layout and len(signature) == sig_len:
                     signed_data = destination_hash + public_key + name_hash + random_hash + ratchet + app_data
                     sig_valid = announced_identity.validate(signature, signed_data)
                     try:

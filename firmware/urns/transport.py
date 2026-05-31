@@ -298,8 +298,17 @@ class Transport:
             log("Valid announce from " + packet.destination_hash.hex(), LOG_NOTICE)
 
             # Record transport path from HDR_2 announces so outbound
-            # DATA packets can be routed via the transport node.
-            if packet.header_type == const.HDR_2 and packet.transport_id:
+            # DATA packets can be routed via the transport node. Skip our
+            # own destinations — a relay echoing our announce back as HDR_2
+            # would otherwise install a transport path to ourselves.
+            from .destination import Destination as _Dest
+            is_self = any(
+                d.hash == packet.destination_hash and d.direction == _Dest.IN
+                for d in Transport.destinations
+            )
+            if is_self:
+                pass
+            elif packet.header_type == const.HDR_2 and packet.transport_id:
                 if len(Transport.path_table) < const.MAX_PATH_TABLE or packet.destination_hash in Transport.path_table:
                     Transport.path_table[packet.destination_hash] = packet.transport_id
                     log("Path: " + packet.destination_hash.hex()[:8] + " via transport " + packet.transport_id.hex()[:8], LOG_VERBOSE)
@@ -325,8 +334,12 @@ class Transport:
 
     @staticmethod
     def _handle_linkrequest(packet):
+        from .destination import Destination
         for dest in Transport.destinations:
-            if dest.hash == packet.destination_hash:
+            # Only IN destinations can answer link requests — OUT entries
+            # (peers we've heard from) live in the same table but their
+            # identity has no private key.
+            if dest.hash == packet.destination_hash and dest.direction == Destination.IN:
                 dest.receive(packet)
                 return True
         return False
@@ -335,7 +348,7 @@ class Transport:
     def _handle_data(packet):
         from .destination import Destination
         for dest in Transport.destinations:
-            if dest.hash == packet.destination_hash:
+            if dest.hash == packet.destination_hash and dest.direction == Destination.IN:
                 import gc; gc.collect()
                 if dest.receive(packet):
                     # Honour proof_strategy (mirrors reference RNS Transport.py).
