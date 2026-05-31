@@ -436,24 +436,70 @@ class LXMRouter:
 
         return msg
 
+    def _find_active_link_for(self, destination_hash):
+        """Return an existing ACTIVE link that already carries traffic for
+        this LXMF peer, or None. Used to reply to incoming link-borne
+        messages without opening a fresh OutLink (which can fail when
+        path_table has no route to the peer yet)."""
+        from .transport import Transport
+        from .link import OutgoingLink
+        for link in Transport.active_links:
+            if link.status != 0x01:  # ACTIVE
+                continue
+            # Peer-initiated link: source_hash stamped on it when its first
+            # LXMF message arrived.
+            if getattr(link, "lxmf_source_hash", None) == destination_hash:
+                return link
+            # OutgoingLink we opened earlier to the same peer destination.
+            if isinstance(link, OutgoingLink) and link.destination.hash == destination_hash:
+                return link
+        return None
+
     def _send_direct(self, message, destination):
-        """Send LXMF message via DIRECT link delivery (link + Resource)."""
+        """Send LXMF message via DIRECT link delivery (link + Resource).
+
+        If an active link to the peer already exists (because the peer
+        opened one to us and sent the request over it), reuse it instead of
+        establishing a new OutLink — that path can't be resolved when the
+        peer is only reachable via a transport node we have no path entry
+        for yet.
+        """
         from .link import OutgoingLink
         from . import const
 
-        def on_established(link):
+        def deliver_on(link, owns_link):
             packed = message.packed
             # Single link packet capacity: ~415B after Token encryption
             if len(packed) <= 415:
                 link.send(packed, const.CTX_NONE)
                 message.state = LXMessage.SENT
                 log("LXMF DIRECT sent as packet: " + str(len(packed)) + "B", LOG_VERBOSE)
-                link.teardown()
+                if owns_link:
+                    link.teardown()
             else:
                 from .resource import Resource
-                link.resource_concluded_callback = lambda r: self._direct_resource_concluded(r, message, link)
+                # Chain with any existing resource-concluded callback (e.g. the
+                # router's incoming-delivery handler on a peer-initiated link)
+                # so future incoming resources still fire their handler.
+                previous_cb = link.resource_concluded_callback
+                def on_resource_done(r):
+                    if getattr(r, "is_initiator", False):
+                        self._direct_resource_concluded(r, message, link, owns_link)
+                    elif previous_cb is not None:
+                        previous_cb(r)
+                link.resource_concluded_callback = on_resource_done
                 Resource(link, packed, is_response=False)
                 log("LXMF DIRECT sending as resource: " + str(len(packed)) + "B", LOG_VERBOSE)
+
+        existing = self._find_active_link_for(message.destination_hash)
+        if existing is not None:
+            log("LXMF DIRECT reusing active link " + existing.link_id.hex()[:8] +
+                " to " + message.destination_hash.hex()[:8], LOG_NOTICE)
+            deliver_on(existing, owns_link=False)
+            return
+
+        def on_established(link):
+            deliver_on(link, owns_link=True)
 
         def on_closed(link):
             if message.state < LXMessage.SENT:
@@ -463,7 +509,7 @@ class LXMRouter:
         OutgoingLink(destination, established_callback=on_established, closed_callback=on_closed)
         log("LXMF DIRECT delivery initiated to " + message.destination_hash.hex()[:8], LOG_NOTICE)
 
-    def _direct_resource_concluded(self, resource, message, link):
+    def _direct_resource_concluded(self, resource, message, link, owns_link=True):
         """Called when outgoing DIRECT Resource transfer completes."""
         from .resource import COMPLETE
         if resource.status == COMPLETE:
@@ -472,7 +518,10 @@ class LXMRouter:
         else:
             message.state = LXMessage.FAILED
             log("LXMF DIRECT resource failed", LOG_ERROR)
-        link.teardown()
+        # Only teardown links we opened ourselves — if we reused a peer-
+        # initiated link, tearing it down would close their channel.
+        if owns_link:
+            link.teardown()
 
     def _on_link_established(self, link):
         """Called when a link is established to our delivery destination."""
@@ -499,6 +548,15 @@ class LXMRouter:
                 reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
                 log("LXMF unverified link message (" + reason + ") from " +
                     message.source_hash.hex()[:8], LOG_NOTICE)
+
+            # Remember which LXMF peer this link carries so we can reuse it
+            # for replies instead of opening a new OutLink (which may fail
+            # when path_table doesn't yet have a route to the peer).
+            from .transport import Transport
+            for l in Transport.active_links:
+                if l.link_id == packet.destination_hash:
+                    l.lxmf_source_hash = message.source_hash
+                    break
 
             # Dedup check
             if message.hash in self.delivered_ids:
@@ -550,6 +608,11 @@ class LXMRouter:
                 reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
                 log("LXMF unverified resource message (" + reason + ") from " +
                     message.source_hash.hex()[:8], LOG_NOTICE)
+
+            # Remember which LXMF peer this link carries (see _link_packet_received).
+            link = getattr(resource, "link", None)
+            if link is not None:
+                link.lxmf_source_hash = message.source_hash
 
             # Dedup check
             if message.hash in self.delivered_ids:
