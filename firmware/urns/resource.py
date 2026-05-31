@@ -114,6 +114,11 @@ class Resource:
             self.flags |= FLAG_IS_RESPONSE
 
         self.sent_count = 0
+        # Per-part "have we ever served this part?" tracker so the progress
+        # log reflects unique parts delivered, not raw TX events including
+        # retransmits.
+        self._parts_served = [False] * self.total_parts
+        self._unique_parts_served = 0
 
         # Register with link
         self.link.register_outgoing_resource(self)
@@ -418,9 +423,10 @@ class Resource:
         if self.status not in (ADVERTISED, TRANSFERRING):
             return
 
-        self.status = TRANSFERRING
-
         # Parse request: exhausted(1) + [last_map(4)] + hash(32) + requested(4 each)
+        # NOTE: Link dispatches every resource_req to all outgoing_resources,
+        # so we MUST check the hash before mutating state — otherwise we'd
+        # transition status / log misleading errors for unrelated resources.
         offset = 0
         exhausted = plaintext[offset]
         offset += 1
@@ -433,8 +439,11 @@ class Resource:
         offset += hash_len
 
         if req_hash != self.hash:
-            log("Resource request hash mismatch", LOG_DEBUG)
+            # Not for us — Link iterates all outgoing resources, so a request
+            # for a sibling resource lands here too. Silent return.
             return
+
+        self.status = TRANSFERRING
 
         # Extract requested part hashes
         requested_hashes = []
@@ -442,7 +451,8 @@ class Resource:
             requested_hashes.append(plaintext[offset:offset + MAPHASH_LEN])
             offset += MAPHASH_LEN
 
-        # Send matching parts
+        # Send matching parts. Count unique parts served (not raw TX events)
+        # so progress stays in [0, total_parts].
         from .packet import Packet, LinkDestination
         for req_hash_part in requested_hashes:
             for i in range(self.total_parts):
@@ -458,11 +468,17 @@ class Resource:
                     pkt.MTU = self.link.mtu
                     pkt.send()
                     self.sent_count += 1
+                    if not self._parts_served[i]:
+                        self._parts_served[i] = True
+                        self._unique_parts_served += 1
                     break
 
-        pct = int(self.sent_count * 100 / self.total_parts)
-        log("Resource TX " + str(self.sent_count) + "/" + str(self.total_parts) +
-            " (" + str(pct) + "%) " + self.hash.hex()[:8], LOG_DEBUG)
+        served = self._unique_parts_served
+        pct = int(served * 100 / self.total_parts)
+        retx = self.sent_count - served
+        suffix = " retx=" + str(retx) if retx else ""
+        log("Resource TX " + str(served) + "/" + str(self.total_parts) +
+            " (" + str(pct) + "%) " + self.hash.hex()[:8] + suffix, LOG_DEBUG)
 
     def cancel(self):
         """Cancel this resource transfer."""
