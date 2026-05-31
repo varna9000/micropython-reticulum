@@ -89,7 +89,7 @@ class Link:
 
         log("Link request on " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8] + " mtu=" + str(self.mtu)
             + " hashable=" + str(len(hashable_part)) + "B pkt_data=" + str(len(packet.data)) + "B"
-            + " signalling=" + self._signalling_bytes.hex()
+            + " signalling=" + (self._signalling_bytes.hex() if self._signalling_bytes else "")
             + " raw[0]=0x" + ("%02x" % packet.raw[0]), LOG_VERBOSE)
 
         # --- Check capacity and rate limit BEFORE expensive crypto ---
@@ -541,23 +541,19 @@ class OutgoingLink:
         sig_len = 64
         key_len = 32
 
+        # Discard malformed/corrupt LRPROOFs without killing the link. A
+        # second, intact copy of the same proof may still arrive (multi-path
+        # RF, transport relay echo). If none ever does, the establishment
+        # timeout will close us.
         if len(proof_data) < sig_len + key_len:
-            log("OutLink proof too short: " + str(len(proof_data)), LOG_ERROR)
-            self._close()
+            log("OutLink proof too short: " + str(len(proof_data)) + ", ignoring", LOG_DEBUG)
             return
 
+        # Tentative parse — do NOT mutate self.mtu/sdu until signature verifies,
+        # otherwise a corrupt proof can silently shrink our MTU.
         signature = proof_data[:sig_len]
         peer_ecdh_pub_bytes = proof_data[sig_len:sig_len + key_len]
-
-        # Parse signalling from proof if present — negotiate link MTU
-        if len(proof_data) > sig_len + key_len:
-            signalling_bytes = proof_data[sig_len + key_len:]
-            peer_mtu, _ = _parse_signalling(signalling_bytes)
-            if peer_mtu > 0:
-                self.mtu = min(self.mtu, peer_mtu)
-                self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
-        else:
-            signalling_bytes = b""
+        signalling_bytes = proof_data[sig_len + key_len:] if len(proof_data) > sig_len + key_len else b""
 
         # Verify server's signature: sign(link_id + server_ecdh_pub + server_ed25519_pub + signalling)
         peer_sig_pub_bytes = self.destination.identity.sig_pub_bytes
@@ -565,10 +561,16 @@ class OutgoingLink:
 
         gc.collect()
         if not self.destination.identity.validate(signature, signed_data):
-            log("OutLink proof signature invalid", LOG_ERROR)
-            self._close()
+            log("OutLink proof signature invalid, ignoring (link " + self.link_id.hex()[:8] + " still pending)", LOG_DEBUG)
             return
         gc.collect()
+
+        # Signature OK — commit MTU negotiation.
+        if signalling_bytes:
+            peer_mtu, _ = _parse_signalling(signalling_bytes)
+            if peer_mtu > 0:
+                self.mtu = min(self.mtu, peer_mtu)
+                self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
 
         # ECDH key exchange
         peer_pub = X25519PublicKey.from_public_bytes(peer_ecdh_pub_bytes)
