@@ -10,7 +10,7 @@ Supported template variables in .mu files:
   {uptime}     — system uptime in seconds (epoch)
   {sensor}     — output from all active peripherals
 
-Usage (MicroPython on ESP32/Pico W):
+Usage (MicroPython on ESP32-S3 / RP2040):
   1. Edit config.py — set WiFi credentials and interfaces
   2. Copy the urns/ folder, config.py, pages/, and this file to the device
   3. Uncomment peripherals you have connected below

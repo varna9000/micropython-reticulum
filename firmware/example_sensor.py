@@ -3,7 +3,7 @@
 ========================================
 Compatible with MeshChat, Sideband, NomadNet over UDP on the same LAN.
 
-Usage (MicroPython on ESP32/Pico W):
+Usage (MicroPython on ESP32-S3 / RP2040):
   1. Edit config.py — set WiFi credentials, node name, interfaces and sensor 'hub' (LXMF address for data to be sent to)
   2. Copy the urns/ folder, config.py, and this file to the device
   3. Uncomment peripherals you have connected below
@@ -109,7 +109,7 @@ def connect_wifi(ssid, password, timeout=15):
 
     platform = sys.platform  # "esp32" or "rp2"
 
-    # ESP32: deactivate AP interface — dual-interface mode routes broadcast
+    # ESP32-S3: deactivate AP interface — dual-interface mode routes broadcast
     # packets to AP instead of STA, preventing UDP broadcast reception.
     if platform == "esp32":
         ap = network.WLAN(network.AP_IF)
@@ -213,7 +213,7 @@ def needs_wifi(config):
 
 
 def main():
-    """Run on MicroPython (ESP32, Pico W, etc.)"""
+    """Run on MicroPython (ESP32-S3, RP2040, etc.)"""
     import uasyncio as asyncio
 
     if needs_wifi(CONFIG):
