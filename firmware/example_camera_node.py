@@ -31,7 +31,7 @@ def _peer_name(router, dest_hash):
 def capture_image():
     """Capture a JPEG image and return the bytes."""
     from peripherals.camera import capture
-    return capture(path=None, resolution=CAM_RESOLUTION, quality=CAM_QUALITY)
+    return capture(path=None, resolution=CAM_RESOLUTION, quality=CAM_QUALITY, vflip=False)
 
 
 async def send_image_reply(router, source_hash, content):

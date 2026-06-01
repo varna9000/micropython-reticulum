@@ -114,8 +114,8 @@ CONFIG = {
         #     "busy_pin": 40,
         #     "dio1_pin": 39,
         #     "reset_pin": 42,
-        #     "freq_khz": 868000,
-        #     "sf": 7,
+        #     "freq_khz": 868800,
+        #     "sf": 8,
         #     "bw": "125",
         #     "coding_rate": 5,
         #     "tx_power": 14,
@@ -125,6 +125,44 @@ CONFIG = {
         #     "dio2_rf_sw": True,
         #     "dio3_tcxo_millivolts": 1800,
         # },
+
+        # ---- SX1262 SPI LoRa (ESP32-S3 WROOM N16R8 CAM + Wio-SX1262) ----
+        # Custom board: ESP32-S3-CAM module wired to Wio-SX1262 (XIAO variant).
+        # Reuses the SD-MMC pins (GPIO38/39/40) for SPI — do NOT mount the SD
+        # card slot while LoRa is active.
+        #
+        # Pinout (from board schematic):
+        #   SX1262 RST  (RESET) -> GPIO45   (NOTE: strapping pin)
+        #   SX1262 NSS  (CS)    -> GPIO47
+        #   SX1262 BUSY         -> GPIO41
+        #   SX1262 DIO1         -> GPIO42
+        #   SX1262 SCK          -> GPIO39   (shared with SD CLK)
+        #   SX1262 MOSI         -> GPIO38   (shared with SD CMD/D0)
+        #   SX1262 MISO         -> GPIO40   (shared with SD D1)
+        #
+        {
+            "type": "LoRaInterface",
+            "name": "LoRa SX1262 CAM",
+            "enabled": True,
+            "spi_bus": 1,
+            "sck_pin": 39,
+            "mosi_pin": 38,
+            "miso_pin": 40,
+            "cs_pin": 47,
+            "busy_pin": 41,
+            "dio1_pin": 42,
+            "reset_pin": 45,
+            "freq_khz": 868800,
+            "sf": 8,
+            "bw": "125",
+            "coding_rate": 5,
+            "tx_power": 14,
+            "preamble_len": 8,
+            "crc_en": True,
+            "syncword": 0x1424,
+            "dio2_rf_sw": True,
+            "dio3_tcxo_millivolts": 1800,
+        },
 
         # ---- TCP Client ----
         # Connects to a remote RNS TCP server (TCPServerInterface).
