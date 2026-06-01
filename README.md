@@ -33,7 +33,7 @@ These are the boards µReticulum has been tested on. All are inexpensive and eas
 | [Waveshare ESP32-S3-Zero](https://www.waveshare.com/wiki/ESP32-S3-Zero) | ~$4 | First-time users, chat/sensor/NomadNet nodes | ESP32-S3, 2 MB PSRAM, onboard NeoPixel LED, USB-C, 24.8 × 18 mm |
 | [Seeed XIAO ESP32-S3](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/) + [Wio-SX1262 LoRa kit](https://wiki.seeedstudio.com/wio_sx1262_xiao_esp32s3_for_lora/) | ~$25 | LoRa + WiFi nodes that interop with RNode | XIAO + SX1262 stack |
 | ESP32-S3-CAM (OV2640) | ~$10 | Anything with the camera example | Many clones available — pick one with PSRAM |
-| [Waveshare RP2040-Zero](https://www.waveshare.com/rp2040-zero.htm) + EByte E32-900T20D | ~$10 | Cheapest LoRa option, USB serial chat | Wiring + power notes in the [E32 LoRa Interface](#e32-lora-interface-ebyte-e32-900t20d) section |
+| [Waveshare RP2040-Zero](https://www.waveshare.com/rp2040-zero.htm) + [EByte E32-900T20D](https://www.cdebyte.com/products/E32-900T20D/7) | ~$10 | Cheapest LoRa option, USB serial chat | Wiring + power notes in the [E32 LoRa Interface](#e32-lora-interface-ebyte-e32-900t20d) section |
 | [LilyGO T-Deck](https://lilygo.cc/products/t-deck) v1 | ~$60 | Portable LoRa messenger with display + keyboard | Uses a separate GUI project: [reticulum-tdeck](https://github.com/varna9000/reticulum-tdeck) |
 
 Should also work on other ESP32-S3 boards and Raspberry Pi Pico W. **Pure ESP32 (non-S3) is no longer supported** — the project targets ESP32-S3 and RP2040.
@@ -283,54 +283,6 @@ HDLC-framed UART. Use this for an RNode device, a generic LoRa modem in transpar
 }
 ```
 
-### E32 LoRa interface (EByte E32-900T20D)
-
-Transparent serial LoRa module with HDLC framing, AUX flow control, and optional auto-configuration of the module's hex registers.
-
-```python
-{
-    "type": "E32Interface",
-    "name": "LoRa E32",
-    "enabled": True,
-    "uart_id": 1,
-    "tx_pin": 4,
-    "rx_pin": 5,
-    "speed": 9600,
-    "m0_pin": 15,
-    "m1_pin": 2,
-    "aux_pin": 6,
-    "auto_configure": False,
-    "timeout": 3000,
-    "channel": 6,
-    "air_rate": 2,
-    "tx_power": 3,
-}
-```
-
-**Parameters**
-
-- `channel`: freq = 862 + channel MHz. Channel 6 = 868 MHz (EU ISM), 60 = 922 MHz (US ISM).
-- `air_rate`: 0 = 300 bps, 1 = 1200, 2 = 2400 (default), 3 = 4800, 4 = 9600, 5 = 19200.
-- `tx_power`: 0 = 20 dBm, 1 = 17 dBm, 2 = 14 dBm, 3 = 10 dBm.
-- `auto_configure`: `True` writes the channel/rate/power registers to the module's flash at boot. Set `False` once the module is configured.
-- `timeout`: HDLC frame timeout in ms. Must be >2× the air time of a full packet. At 2400 bps a 182-byte announce takes ~760 ms, so 3000 ms is safe.
-
-**Wiring (Waveshare RP2040-Zero example)**
-
-| E32 Pin | Function | RP2040 GPIO |
-|---------|----------|-------------|
-| RXD | Module RX | GPIO 4 (UART1 TX) |
-| TXD | Module TX | GPIO 5 (UART1 RX) |
-| M0 | Mode select | GPIO 15 |
-| M1 | Mode select | GPIO 2 |
-| AUX | Busy signal | GPIO 6 |
-| VCC | Power | 5 V |
-| GND | Ground | GND |
-
-**Pin gotcha:** on RP2040, do **not** use UART1 alternate-function pins (GPIO 3, 6, 7, 8) for M0/M1 — UART1 init claims them for CTS/RTS/TX and the resulting contention can damage the GPIO drivers. The driver also sets M0/M1 to 12 mA drive strength (vs the 4 mA default) so the E32's internal pull-ups release reliably.
-
-**Power gotcha:** the E32-900T20D draws ~120 mA at 20 dBm TX. On RP2040-Zero this current spike will crash the MCU even off the 5 V USB rail. Use `tx_power: 3` (10 dBm, ~40 mA) unless the E32 has its own supply with decoupling.
-
 ### SX1262 SPI LoRa interface (e.g. XIAO ESP32-S3 + Wio-SX1262)
 
 Native SPI talk to the SX1262 radio. No external serial module needed.
@@ -376,6 +328,54 @@ mpremote mip install lora-sx126x lora-sync
 - `syncword`: `0x1424` — Reticulum/RNode-compatible.
 - `dio2_rf_sw`: `True` on Wio-SX1262 (radio drives DIO2 as RF switch internally).
 - `dio3_tcxo_millivolts`: `1800` on Wio-SX1262 (TCXO). `None` to disable (crystal-only modules).
+
+### E32 LoRa interface (EByte E32-900T20D)
+
+Transparent serial LoRa module ([product page](https://www.cdebyte.com/products/E32-900T20D/7)) with HDLC framing, AUX flow control, and optional auto-configuration of the module's hex registers.
+
+```python
+{
+    "type": "E32Interface",
+    "name": "LoRa E32",
+    "enabled": True,
+    "uart_id": 1,
+    "tx_pin": 4,
+    "rx_pin": 5,
+    "speed": 9600,
+    "m0_pin": 15,
+    "m1_pin": 2,
+    "aux_pin": 6,
+    "auto_configure": False,
+    "timeout": 3000,
+    "channel": 6,
+    "air_rate": 2,
+    "tx_power": 3,
+}
+```
+
+**Parameters**
+
+- `channel`: freq = 862 + channel MHz. Channel 6 = 868 MHz (EU ISM), 60 = 922 MHz (US ISM).
+- `air_rate`: 0 = 300 bps, 1 = 1200, 2 = 2400 (default), 3 = 4800, 4 = 9600, 5 = 19200.
+- `tx_power`: 0 = 20 dBm, 1 = 17 dBm, 2 = 14 dBm, 3 = 10 dBm.
+- `auto_configure`: `True` writes the channel/rate/power registers to the module's flash at boot. Set `False` once the module is configured.
+- `timeout`: HDLC frame timeout in ms. Must be >2× the air time of a full packet. At 2400 bps a 182-byte announce takes ~760 ms, so 3000 ms is safe.
+
+**Wiring (Waveshare RP2040-Zero example)**
+
+| E32 Pin | Function | RP2040 GPIO |
+|---------|----------|-------------|
+| RXD | Module RX | GPIO 4 (UART1 TX) |
+| TXD | Module TX | GPIO 5 (UART1 RX) |
+| M0 | Mode select | GPIO 15 |
+| M1 | Mode select | GPIO 2 |
+| AUX | Busy signal | GPIO 6 |
+| VCC | Power | 5 V |
+| GND | Ground | GND |
+
+**Pin gotcha:** on RP2040, do **not** use UART1 alternate-function pins (GPIO 3, 6, 7, 8) for M0/M1 — UART1 init claims them for CTS/RTS/TX and the resulting contention can damage the GPIO drivers. The driver also sets M0/M1 to 12 mA drive strength (vs the 4 mA default) so the E32's internal pull-ups release reliably.
+
+**Power gotcha:** the E32-900T20D draws ~120 mA at 20 dBm TX. On RP2040-Zero this current spike will crash the MCU even off the 5 V USB rail. Use `tx_power: 3` (10 dBm, ~40 mA) unless the E32 has its own supply with decoupling.
 
 ### TCP client
 
