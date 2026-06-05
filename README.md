@@ -201,7 +201,7 @@ isn't installed.
 - **Firmware**: **camera-enabled MicroPython is mandatory** (see [Step 1](#step-1--flash-micropython-to-your-board)). Standard MicroPython will fail at `import camera`.
 - **Config**: WiFi creds.
 - **How to use**: send `image` from MeshChat / Sideband to get a photo back (delivered via a Link + Resource transfer). Send `help` or `settings` to see the live controls.
-- **Image format & quality**: resolution, WebP quality, downscale, exposure and more are all adjustable at runtime by messaging the node — see **[Camera image settings (JPEG & WebP)](docs/CAMERA_WEBP.md)** for every parameter and the size/quality trade-offs.
+- **Image format & quality**: resolution, WebP quality, downscale, exposure, flash and night mode are all adjustable at runtime by messaging the node — see **[Camera image settings (JPEG & WebP)](docs/CAMERA_WEBP.md)** for every parameter and the size/quality trade-offs.
 - **WebP encoder**: the optional native module `webp_fast.mpy` in `/lib` (built from [`tools/natmod/webp_fast/`](tools/natmod/webp_fast/)). Without it the node simply sends JPEG.
 
 For direct (non-LXMF) capture you can also use the peripheral module from the REPL:

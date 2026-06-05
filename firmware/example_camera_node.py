@@ -2,12 +2,16 @@
 µReticulum Example: Camera Node
 ================================
 Responds to incoming LXMF messages with a camera image.
-Send any message to this node and it replies with a CIF (400x296)
-JPEG photo as an LXMF image attachment.
+Send any message to this node and it replies with a VGA (640x480) WebP photo
+as an LXMF attachment — small enough for LoRa, yet higher resolution than a
+same-size JPEG. Falls back to JPEG if the WebP encoder isn't installed.
+
+Resolution, WebP quality, flash, night mode and more are adjustable at runtime
+by messaging the node — send 'help' or 'settings'. See docs/CAMERA_WEBP.md.
 
 Usage (MicroPython on ESP32-S3 with OV2640):
   1. Edit config.py — set WiFi credentials, node name, and interfaces
-  2. Copy the urns/ folder, peripherals/, config.py, and this file to the device
+  2. Copy urns/, peripherals/, lib/webp_fast_*.mpy, config.py, and this file
   3. Run with: import example_camera_node
 """
 

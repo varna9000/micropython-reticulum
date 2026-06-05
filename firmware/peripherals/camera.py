@@ -9,13 +9,16 @@ Pin mapping for ESP32-S3-CAM board (from pinout diagram):
   XCLK=15, PCLK=13, VSYNC=6, HREF=7, SDA=4, SCL=5
 
 Usage:
-  from cam_capture import capture
+  from peripherals.camera import capture
 
   capture()                                    # VGA q30 (default)
   capture(resolution="qvga", quality=20)       # 320x240
-  capture(resolution="hvga", quality=15)       # 480x320
   capture(resolution="cif")                    # 400x296
   capture(grayscale=True)                      # VGA grayscale
+  capture(flash="auto", flash_pin=48)          # fill flash (NeoPixel) when dark
+
+JPEG by default. The camera node (example_camera_node.py) re-encodes to WebP
+via the webp_fast native module — see docs/CAMERA_WEBP.md.
 """
 
 from camera import Camera, PixelFormat, FrameSize
