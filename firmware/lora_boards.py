@@ -32,8 +32,13 @@ LORA_BOARDS = {
     # Seeed XIAO ESP32-S3 + Wio-SX1262 (kit version).
     "xiao_esp32s3_sx1262": {
         "spi_bus": 1,
-        "sck_pin": 7, "mosi_pin": 9, "miso_pin": 8,
-        "cs_pin": 41, "busy_pin": 40, "dio1_pin": 39, "reset_pin": 42,
+        "sck_pin": 7,
+        "mosi_pin": 9,
+        "miso_pin": 8,
+        "cs_pin": 41,
+        "busy_pin": 40,
+        "dio1_pin": 39,
+        "reset_pin": 42,
         "dio2_rf_sw": True,
         "dio3_tcxo_millivolts": 1800,
     },
@@ -42,8 +47,13 @@ LORA_BOARDS = {
     # Same SPI bus/pins as the kit; only the control pins differ.
     "xiao_esp32s3_sx1262_header": {
         "spi_bus": 1,
-        "sck_pin": 7, "mosi_pin": 9, "miso_pin": 8,
-        "cs_pin": 5, "busy_pin": 4, "dio1_pin": 2, "reset_pin": 3,
+        "sck_pin": 7,
+        "mosi_pin": 9,
+        "miso_pin": 8,
+        "cs_pin": 5,
+        "busy_pin": 4,
+        "dio1_pin": 2,
+        "reset_pin": 3,
         "dio2_rf_sw": True,
         "dio3_tcxo_millivolts": 1800,
     },
@@ -53,8 +63,13 @@ LORA_BOARDS = {
     # slot while LoRa is active. RESET (GPIO45) is a strapping pin.
     "esp32s3_cam_sx1262": {
         "spi_bus": 1,
-        "sck_pin": 39, "mosi_pin": 38, "miso_pin": 40,   # shared with SD CLK/CMD/D1
-        "cs_pin": 47, "busy_pin": 41, "dio1_pin": 42, "reset_pin": 45,
+        "sck_pin": 39,
+        "mosi_pin": 38,
+        "miso_pin": 40,   # shared with SD CLK/CMD/D1
+        "cs_pin": 47,
+        "busy_pin": 41,
+        "dio1_pin": 42,
+        "reset_pin": 45,
         "dio2_rf_sw": True,
         "dio3_tcxo_millivolts": 1800,
     },
@@ -70,8 +85,12 @@ LORA_BOARDS = {
     # T-Deck radio.py — they are not documented in this repo.
     # "tdeck_v1_sx1262": {
     #     "spi_bus": 1,
-    #     "sck_pin": 40, "mosi_pin": 41, "miso_pin": None,
-    #     "cs_pin": 9, "busy_pin": None, "dio1_pin": None, "reset_pin": None,
+    #     "sck_pin": 40,
+    #     "mosi_pin": 41, "miso_pin": None,
+    #     "cs_pin": 9,
+    #     "busy_pin": None,
+    #     "dio1_pin": None,
+    #     "reset_pin": None,
     #     "dio2_rf_sw": True,
     #     "dio3_tcxo_millivolts": 3300,
     #     "use_dcdc": True,
