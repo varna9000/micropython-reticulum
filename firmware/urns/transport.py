@@ -335,10 +335,12 @@ class Transport:
         if unix_ts < _TIME_FLOOR:
             return
 
+        src8 = source_hash.hex()[:8] if source_hash is not None else "?"
+
         # Authority mode: a single trusted source is enough.
         if Transport.time_sync_trusted:
             if source_hash is not None and source_hash.hex() in Transport.time_sync_trusted:
-                Transport._apply_clock(unix_ts)
+                Transport._apply_clock(unix_ts, "trusted node " + src8)
             return
 
         # Corroboration mode: require agreement across distinct peers.
@@ -353,12 +355,17 @@ class Transport:
 
         tol = Transport.time_sync_tolerance
         agree = sorted(o for o in Transport._time_votes.values() if abs(o - offset) <= tol)
-        if len(agree) >= Transport.time_sync_min_sources:
+        need = Transport.time_sync_min_sources
+        if len(agree) >= need:
             median = agree[len(agree) // 2]
-            Transport._apply_clock(int(time.time() + _EPOCH_OFFSET) + median)
+            Transport._apply_clock(int(time.time() + _EPOCH_OFFSET) + median,
+                                   str(len(agree)) + " peers agree")
+        else:
+            log("Time sync: vote " + str(len(agree)) + "/" + str(need)
+                + " from " + src8 + " (waiting for more peers)", LOG_NOTICE)
 
     @staticmethod
-    def _apply_clock(unix_ts):
+    def _apply_clock(unix_ts, detail=""):
         try:
             import machine
             local = unix_ts - _EPOCH_OFFSET   # convert Unix -> this port's epoch
@@ -369,7 +376,12 @@ class Transport:
             machine.RTC().datetime((t[0], t[1], t[2], t[6], t[3], t[4], t[5], 0))
             Transport._clock_synced = True
             Transport._time_votes = {}
-            log("Clock synced to " + str(unix_ts), LOG_NOTICE)
+            stamp = "%04d-%02d-%02d %02d:%02d:%02d UTC" % (
+                t[0], t[1], t[2], t[3], t[4], t[5])
+            msg = "Time synced from network: " + stamp
+            if detail:
+                msg += " (" + detail + ")"
+            log(msg, LOG_NOTICE)
         except Exception as e:
             log("Clock sync failed: " + str(e), LOG_ERROR)
 
