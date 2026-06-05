@@ -22,6 +22,8 @@ CAM_QUALITY = 30
 CAM_EXPOSURE = None  # None = auto-exposure; int (~0..1200) = fixed exposure time
 CAM_AE_LEVEL = -2    # auto-exposure brightness bias -2..+2 (lower if overexposed)
 CAM_WARMUP = 10      # frames discarded so auto-exposure can settle
+CAM_VFLIP = True     # vertical flip
+CAM_HMIRROR = True   # horizontal mirror
 
 # Maps helper keywords -> the module-level setting they change, with help text.
 _CAM_SETTINGS = {
@@ -30,6 +32,8 @@ _CAM_SETTINGS = {
     "exposure":   "CAM_EXPOSURE",
     "ae_level":   "CAM_AE_LEVEL",
     "warmup":     "CAM_WARMUP",
+    "vflip":      "CAM_VFLIP",
+    "hmirror":    "CAM_HMIRROR",
 }
 _CAM_HELP = {
     "image":      "capture a photo and send it back",
@@ -40,6 +44,8 @@ _CAM_HELP = {
     "exposure":   "None = auto-exposure, or int ~0..1200 = fixed exposure time",
     "ae_level":   "auto-exposure brightness bias -2..+2 (lower = darker)",
     "warmup":     "frames discarded so auto-exposure can settle",
+    "vflip":      "vertical flip on/off",
+    "hmirror":    "horizontal mirror on/off",
 }
 
 
@@ -57,7 +63,8 @@ def camera_config(settings=False, help=False, **kwargs):
     if help:
         lines = ["Camera keywords (send '<key>' to read, '<key> <value>' to set):"]
         for key in ("image", "settings", "help",
-                    "resolution", "quality", "exposure", "ae_level", "warmup"):
+                    "resolution", "quality", "exposure", "ae_level", "warmup",
+                    "vflip", "hmirror"):
             lines.append("  " + key + " - " + _CAM_HELP[key])
         return "\n".join(lines)
 
@@ -84,7 +91,8 @@ def capture_image():
     """Capture a JPEG image and return the bytes."""
     from peripherals.camera import capture
     return capture(path=None, resolution=CAM_RESOLUTION, quality=CAM_QUALITY,
-                   vflip=False, exposure=CAM_EXPOSURE, ae_level=CAM_AE_LEVEL,
+                   vflip=CAM_VFLIP, hmirror=CAM_HMIRROR,
+                   exposure=CAM_EXPOSURE, ae_level=CAM_AE_LEVEL,
                    warmup_frames=CAM_WARMUP)
 
 
@@ -145,7 +153,8 @@ def _format_settings():
     """Human-readable dump of the current camera settings."""
     s = camera_config(settings=True)
     lines = ["Camera settings:"]
-    for key in ("resolution", "quality", "exposure", "ae_level", "warmup"):
+    for key in ("resolution", "quality", "exposure", "ae_level", "warmup",
+                "vflip", "hmirror"):
         lines.append("  " + key + " = " + str(s[key]))
     return "\n".join(lines)
 
@@ -154,6 +163,8 @@ def _coerce_setting(key, val):
     """Convert a text value into the right type for a setting."""
     if key == "resolution":
         return val.lower()
+    if key in ("vflip", "hmirror"):
+        return val.lower() in ("1", "true", "on", "yes")
     if key == "exposure" and val.lower() in ("auto", "none", "off"):
         return None
     return int(val)   # quality, ae_level, warmup, exposure
