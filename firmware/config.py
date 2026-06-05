@@ -4,6 +4,8 @@
 Edit this file to configure your node. Uncomment the interface(s) you need.
 """
 
+from lora_boards import LORA_BOARDS
+
 # ---- Node settings ----
 WIFI_SSID = "AP"
 WIFI_PASS = "pass"
@@ -19,6 +21,11 @@ DEBUG = 2
 CONFIG = {
     "loglevel": 3,
     "enable_transport": False,
+
+    # LoRa board pinout presets (see firmware/lora_boards.py). An interface
+    # below references one with "board": "<name>"; the preset's pins are merged
+    # in at startup. Edit lora_boards.py to add a board — no other changes.
+    "lora_boards": LORA_BOARDS,
 
     # Dedicated destination that replies to `rnprobe` (reference RNS tool).
     # Set "enabled": True to expose the probe destination. See README.
@@ -111,94 +118,48 @@ CONFIG = {
          #     "tx_power": 3,
          # },
 
-        # ---- SX1262 SPI LoRa (e.g. Seeed XIAO ESP32S3 + Wio-SX1262) ----
-        # Native SPI LoRa using micropython-lib lora-sx126x driver.
+        # ---- SX1262 SPI LoRa (micropython-lib lora-sx126x driver) ----
         # Install: mpremote mip install lora-sx126x
         #
-        # Kit version pins: CS=41, DIO1=39, RESET=42, BUSY=40
-        # Header board pins: CS=5, DIO1=2, RESET=3, BUSY=4
-        # SPI pins (both variants): SCK=7, MOSI=9, MISO=8
+        # The board's pins come from a preset in lora_boards.py — just set
+        # "board" to its name. Only network/radio params live here, and they
+        # must match on every node of the mesh:
+        #   freq_khz: 868000 (EU), 915000 (US), 923000 (AS)
+        #   sf: 7-12 (higher = longer range, slower)
+        #   bw: "125"/"250"/"500" (lower = longer range, slower)
+        #   tx_power: -9 to +22 dBm     syncword: 0x1424 (Reticulum/RNode)
         #
-        # freq_khz: 868000 (EU), 915000 (US), 923000 (AS)
-        # sf: 7-12 (higher = longer range, slower)
-        # bw: "125"/"250"/"500" (lower = longer range, slower)
-        # tx_power: -9 to +22 dBm
-        # syncword: 0x1424 (Reticulum/RNode compatible)
-        # dio2_rf_sw: true = SX1262 internally drives DIO2 as RF switch (default, correct for Wio-SX1262)
-        # dio3_tcxo_millivolts: 1800 for Wio-SX1262 TCXO. Set null to disable.
+        # Available board presets (see lora_boards.py):
+        #   "xiao_esp32s3_sx1262"          XIAO ESP32-S3 + Wio-SX1262 (kit)
+        #   "xiao_esp32s3_sx1262_header"   XIAO ESP32-S3 + Wio-SX1262 (header)
+        #   "esp32s3_cam_sx1262"           ESP32-S3 WROOM CAM + Wio-SX1262
         #
-        # {
-        #     "type": "LoRaInterface",
-        #     "name": "LoRa SX1262",
-        #     "enabled": True,
-        #     "spi_bus": 1,
-        #     "sck_pin": 7,
-        #     "mosi_pin": 9,
-        #     "miso_pin": 8,
-        #     "cs_pin": 41,
-        #     "busy_pin": 40,
-        #     "dio1_pin": 39,
-        #     "reset_pin": 42,
-        #     "freq_khz": 868800,
-        #     "sf": 8,
-        #     "bw": "125",
-        #     "coding_rate": 5,
-        #     "tx_power": 14,
-        #     "preamble_len": 8,
-        #     "crc_en": True,
-        #     "syncword": 0x1424,
-        #     "dio2_rf_sw": True,
-        #     "dio3_tcxo_millivolts": 1800,
-        # },
-
-        # ---- SX1262 SPI LoRa (ESP32-S3 WROOM N16R8 CAM + Wio-SX1262) ----
-        # Custom board: ESP32-S3-CAM module wired to Wio-SX1262 (XIAO variant).
-        # Reuses the SD-MMC pins (GPIO38/39/40) for SPI — do NOT mount the SD
-        # card slot while LoRa is active.
-        #
-        # Pinout (from board schematic):
-        #   SX1262 RST  (RESET) -> GPIO45   (NOTE: strapping pin)
-        #   SX1262 NSS  (CS)    -> GPIO47
-        #   SX1262 BUSY         -> GPIO41
-        #   SX1262 DIO1         -> GPIO42
-        #   SX1262 SCK          -> GPIO39   (shared with SD CLK)
-        #   SX1262 MOSI         -> GPIO38   (shared with SD CMD/D0)
-        #   SX1262 MISO         -> GPIO40   (shared with SD D1)
-        #
+        # Any pin can still be overridden inline (it wins over the preset).
         {
             "type": "LoRaInterface",
+            "board": "esp32s3_cam_sx1262",
             "name": "LoRa SX1262 CAM",
             "enabled": True,
-            "spi_bus": 1,
-            "sck_pin": 39,
-            "mosi_pin": 38,
-            "miso_pin": 40,
-            "cs_pin": 47,
-            "busy_pin": 41,
-            "dio1_pin": 42,
-            "reset_pin": 45,
             "freq_khz": 868800,
             "sf": 8,
             "bw": "125",
             "coding_rate": 5,
-            "tx_power": 14,
+            "tx_power": 20,
             "preamble_len": 8,
             "crc_en": True,
             "syncword": 0x1424,
-            "dio2_rf_sw": True,
-            "dio3_tcxo_millivolts": 1800,
         },
 
         # ---- TCP Client ----
         # Connects to a remote RNS TCP server (TCPServerInterface).
         # Uses HDLC framing, wire-compatible with reference Reticulum.
-        {
-           "type": "TCPClientInterface",
-           "name": "VarnaTransport",
-           "enabled": True,
-           "target_host": "rn.varnatransport.com",
-           "target_port": 4243,
-        },
+        #{
+        #   "type": "TCPClientInterface",
+        #   "name": "VarnaTransport",
+        #   "enabled": True,
+        #   "target_host": "rn.varnatransport.com",
+        #   "target_port": 4243,
+        #},
 
         # ---- Serial (for RNode / wired link) ----
         # {

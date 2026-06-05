@@ -130,6 +130,25 @@ class Reticulum:
         "TCPClientInterface": "tcp",
     }
 
+    def _resolve_board(self, iface_config):
+        """Merge a named board pinout preset into an interface config.
+
+        An interface may set "board": "<name>" to pull a hardware pinout from
+        the "lora_boards" registry (see firmware/lora_boards.py). Preset values
+        are applied first; any key set explicitly on the interface overrides the
+        preset. Returns the config unchanged if no board is referenced."""
+        board = iface_config.get("board")
+        if not board:
+            return iface_config
+        preset = self.config.get("lora_boards", {}).get(board)
+        if preset is None:
+            log("Unknown board preset: " + str(board), LOG_ERROR)
+            return iface_config
+        merged = {}
+        merged.update(preset)
+        merged.update(iface_config)   # explicit interface keys win
+        return merged
+
     def setup_interfaces(self):
         """Initialize network interfaces from config. Call after WiFi is connected.
         Only the modules for configured interfaces are imported."""
@@ -156,6 +175,7 @@ class Reticulum:
         for iface_config in self.config.get("interfaces", []):
             if not iface_config.get("enabled", True):
                 continue
+            iface_config = self._resolve_board(iface_config)
             itype = iface_config.get("type", "")
             modname = self._INTERFACE_MAP.get(itype)
             if modname is None:

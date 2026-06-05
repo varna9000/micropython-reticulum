@@ -37,6 +37,7 @@ class LoRaInterface(Interface):
 
         # SPI bus and pin numbers
         self._spi_bus = config.get("spi_bus", 1)
+        self._spi_baudrate = config.get("spi_baudrate", 2_000_000)
         self._sck_pin = config.get("sck_pin", 7)
         self._mosi_pin = config.get("mosi_pin", 9)
         self._miso_pin = config.get("miso_pin", 8)
@@ -88,7 +89,7 @@ class LoRaInterface(Interface):
         else:
             spi = SPI(
                 self._spi_bus,
-                baudrate=2_000_000,
+                baudrate=self._spi_baudrate,
                 sck=Pin(self._sck_pin),
                 mosi=Pin(self._mosi_pin),
                 miso=Pin(self._miso_pin),

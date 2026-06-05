@@ -293,33 +293,36 @@ Native SPI talk to the SX1262 radio. No external serial module needed.
 mpremote mip install lora-sx126x lora-sync
 ```
 
+**Board pinout presets.** The board's wiring (SPI + control pins, TCXO, regulator) lives in `firmware/lora_boards.py` as named presets — you reference one with a `"board"` key and keep only the network/radio parameters in the interface entry:
+
 ```python
 {
     "type": "LoRaInterface",
+    "board": "esp32s3_cam_sx1262",   # pinout preset (lora_boards.py)
     "name": "LoRa SX1262",
     "enabled": True,
-    "spi_bus": 1,
-    "sck_pin": 7,
-    "mosi_pin": 9,
-    "miso_pin": 8,
-    "cs_pin": 41,
-    "busy_pin": 40,
-    "dio1_pin": 39,
-    "reset_pin": 42,
-    "freq_khz": 868000,
-    "sf": 7,
+    "freq_khz": 868800,
+    "sf": 8,
     "bw": "125",
     "coding_rate": 5,
     "tx_power": 14,
     "syncword": 0x1424,
-    "dio2_rf_sw": True,
-    "dio3_tcxo_millivolts": 1800,
 }
 ```
 
-**Pin variants** — the pins above match the Wio-SX1262 *kit* version. For the *header board* version use: `cs_pin=5`, `dio1_pin=2`, `reset_pin=3`, `busy_pin=4`. SCK/MOSI/MISO are identical.
+The pins are merged in at startup. Any pin set explicitly on the interface overrides the preset, so you can tweak one pin without editing `lora_boards.py`.
 
-**Radio parameters**
+**Built-in presets:**
+
+| `board` | Hardware |
+|---------|----------|
+| `xiao_esp32s3_sx1262` | Seeed XIAO ESP32-S3 + Wio-SX1262 (kit) |
+| `xiao_esp32s3_sx1262_header` | XIAO ESP32-S3 + Wio-SX1262 (header board) |
+| `esp32s3_cam_sx1262` | ESP32-S3 WROOM CAM module + Wio-SX1262 |
+
+**Adding a board:** add one entry to `LORA_BOARDS` in `firmware/lora_boards.py` with that board's `sck/mosi/miso/cs/busy/dio1/reset` pins (plus `dio2_rf_sw`, `dio3_tcxo_millivolts`, and optionally `use_dcdc` / `spi_baudrate`), then point an interface at it by name. Radio params stay in `config.py` so every node on the mesh shares them.
+
+**Radio parameters** (interface entry — must match across the whole mesh)
 
 - `freq_khz`: 868000 (EU), 915000 (US), 923000 (AS).
 - `sf`: 7–12 (higher = longer range, slower).
