@@ -455,6 +455,31 @@ rnprobe urns.probe 4a1b…
 
 Both `full_name` and `destination_hash` are required: announces only carry a hash of the name, so the dot-name has to be known out of band. A successful probe prints `Valid reply received from <hash>` with the measured RTT. The probe destination refuses link requests — it only signs PROOF replies. Other apps filter it out of their UIs by app_name.
 
+### Time sync (clock for pure-LoRa nodes)
+
+A LoRa-only node has no WiFi/NTP and no battery-backed RTC, so its clock sits at `2000-01-01` and every message/announce it sends is stamped *January 2000* (you'll see this on received images in MeshChat). Time sync fixes this by learning the real time **from the mesh itself** — every announce and every signed LXMF message already carries the sender's Unix timestamp.
+
+```python
+CONFIG = {
+    "time_sync": {
+        "enabled": True,
+        "trusted_nodes": [],   # see modes below
+        "min_sources": 2,      # corroboration quorum (when trusted_nodes is empty)
+        "tolerance": 120,      # seconds of allowed disagreement between peers
+    },
+    "interfaces": [...],
+}
+```
+
+Two modes:
+
+- **Authority** — list one or more LXMF delivery hashes (hex, exactly as shown in MeshChat/Sideband) in `trusted_nodes`. The first announce or signed message from a matching node sets the clock. Fastest, and corrects time on the very first packet heard.
+- **Corroboration** — leave `trusted_nodes` empty. The clock is set only once `min_sources` *distinct* peers agree on the time within `tolerance` seconds (the median is applied). No single node can move your clock, so you don't have to trust anyone in particular.
+
+The sync runs **once per power-on**, only while the clock is still unset — it never re-adjusts mid-session. A reboot resets the RTC to 2000, and the node re-syncs from the next qualifying packet. After syncing, both outgoing message timestamps and announce timestamps are correct for the rest of the session.
+
+> The ESP32's internal RTC keeps time only while powered — it does not survive a full power cycle. For instant-correct time at boot with no peer audible, add a battery-backed RTC (e.g. DS3231 over I²C).
+
 ---
 
 ## Peripherals

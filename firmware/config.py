@@ -29,6 +29,31 @@ CONFIG = {
         "announce_interval": 60 * 60,  # 1 hour; 0 = announce once at boot only
     },
 
+    # ---- Time sync ----
+    # Pure-LoRa nodes have no RTC or NTP, so their clock sits at 2000-01-01 and
+    # every outgoing message/announce is stamped "Jan 2000". With time sync
+    # enabled, the node learns the real time ONCE per boot from a trusted
+    # peer it overhears — either an announce timestamp or a signature-validated
+    # LXMF message timestamp. After that the ESP32's internal RTC keeps time
+    # for the rest of the power-on session (a reboot resets it, then it
+    # re-syncs from the next trusted packet).
+    #
+    # Two modes:
+    #   - Authority: list LXMF delivery destination hashes (hex, exactly as
+    #     shown in MeshChat/Sideband) in trusted_nodes. One matching source
+    #     sets the clock immediately.
+    #   - Corroboration: leave trusted_nodes empty. The clock is set only once
+    #     `min_sources` distinct peers agree on the time within `tolerance`
+    #     seconds (the median is applied). No single node can set it alone.
+    "time_sync": {
+        "enabled": True,
+        "trusted_nodes": [
+            # "a1b2c3d4e5f60718293a4b5c6d7e8f90",   # e.g. your phone's MeshChat address
+        ],
+        "min_sources": 2,      # corroboration quorum when trusted_nodes is empty
+        "tolerance": 120,      # seconds; max clock disagreement between peers
+    },
+
     "interfaces": [
 
         # ---- WiFi UDP ----

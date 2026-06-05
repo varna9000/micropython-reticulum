@@ -137,6 +137,22 @@ class Reticulum:
         if Transport.transport_enabled:
             log("Transport mode enabled", LOG_NOTICE)
 
+        # Time sync (for nodes with no RTC/NTP). Learn wall-clock time once per
+        # boot from a trusted peer's announce/message timestamp.
+        ts_cfg = self.config.get("time_sync", {})
+        Transport.time_sync_enabled = ts_cfg.get("enabled", False)
+        Transport.time_sync_trusted = set(
+            h.lower() for h in ts_cfg.get("trusted_nodes", [])
+        )
+        Transport.time_sync_min_sources = ts_cfg.get("min_sources", 2)
+        Transport.time_sync_tolerance = ts_cfg.get("tolerance", 120)
+        if Transport.time_sync_enabled:
+            if Transport.time_sync_trusted:
+                _mode = "trusted: " + str(len(Transport.time_sync_trusted))
+            else:
+                _mode = "corroborate: " + str(Transport.time_sync_min_sources) + " nodes"
+            log("Time sync enabled (" + _mode + ")", LOG_NOTICE)
+
         for iface_config in self.config.get("interfaces", []):
             if not iface_config.get("enabled", True):
                 continue

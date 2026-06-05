@@ -3,9 +3,18 @@
 # Uses uasyncio instead of threading
 
 import os
+import sys
 import time
 from . import const
 from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_EXTREME, LOG_NOTICE, LOG_WARNING
+
+# ESP32 MicroPython counts seconds from 2000-01-01; convert to/from Unix epoch.
+_EPOCH_OFFSET = 946684800 if sys.platform == "esp32" else 0
+# Single sanity floor: a clock/timestamp at/above this is considered "real".
+# Below it, the source (or our own clock) is still unset. This also keeps the
+# 2000-epoch conversion non-negative. The upper bound is handled by requiring
+# corroboration from multiple nodes rather than a hardcoded max.
+_TIME_FLOOR = 1704067200       # 2024-01-01 UTC
 
 # Transport types (module-level for import compatibility)
 BROADCAST  = const.TRANSPORT_BROADCAST
@@ -32,6 +41,18 @@ class Transport:
     blackholed_identities = []
 
     transport_enabled = False
+
+    # Time sync (for nodes with no RTC/NTP, e.g. pure-LoRa). Set from config
+    # in Reticulum.setup_interfaces(). trusted set holds lowercase hex LXMF
+    # delivery hashes. With trusted nodes set, one matching source is enough
+    # (authority mode). With no trusted nodes, require min_sources distinct
+    # peers whose clock offsets agree within tolerance (corroboration mode).
+    time_sync_enabled = False
+    time_sync_trusted = set()
+    time_sync_min_sources = 2
+    time_sync_tolerance = 120    # seconds
+    _clock_synced = False
+    _time_votes = {}             # source_hex -> clock offset (peer_unix - our_unix)
 
     _jobs_running = False
     _last_job = 0
@@ -289,6 +310,70 @@ class Transport:
             log("Error processing inbound packet: " + str(e), LOG_ERROR)
 
     @staticmethod
+    def sync_clock_from(unix_ts, source_hash=None):
+        """Learn wall-clock time from a peer's Unix timestamp.
+
+        Acts only on a fresh boot (clock still unset) and runs the RTC set at
+        most once per power-on. Two modes:
+          - Authority: if trusted_nodes is configured, one matching source sets
+            the clock immediately.
+          - Corroboration: with no trusted_nodes, buffer offsets from distinct
+            peers and only set the clock once min_sources of them agree within
+            tolerance (then apply the median). This needs no upper sanity bound.
+        """
+        if not Transport.time_sync_enabled or Transport._clock_synced:
+            return
+        # Fresh-boot only: stop once we already hold a real wall clock.
+        if time.time() + _EPOCH_OFFSET >= _TIME_FLOOR:
+            Transport._clock_synced = True
+            return
+        try:
+            unix_ts = int(unix_ts)
+        except (TypeError, ValueError):
+            return
+        # Ignore sources whose own clock is unset (and keep epoch math >= 0).
+        if unix_ts < _TIME_FLOOR:
+            return
+
+        # Authority mode: a single trusted source is enough.
+        if Transport.time_sync_trusted:
+            if source_hash is not None and source_hash.hex() in Transport.time_sync_trusted:
+                Transport._apply_clock(unix_ts)
+            return
+
+        # Corroboration mode: require agreement across distinct peers.
+        if source_hash is None:
+            return
+        # Offset is time-invariant (true_time - our_clock), so offsets gathered
+        # at different moments are directly comparable.
+        offset = unix_ts - int(time.time() + _EPOCH_OFFSET)
+        Transport._time_votes[source_hash.hex()] = offset
+        if len(Transport._time_votes) > 16:
+            Transport._time_votes.pop(next(iter(Transport._time_votes)))
+
+        tol = Transport.time_sync_tolerance
+        agree = sorted(o for o in Transport._time_votes.values() if abs(o - offset) <= tol)
+        if len(agree) >= Transport.time_sync_min_sources:
+            median = agree[len(agree) // 2]
+            Transport._apply_clock(int(time.time() + _EPOCH_OFFSET) + median)
+
+    @staticmethod
+    def _apply_clock(unix_ts):
+        try:
+            import machine
+            local = unix_ts - _EPOCH_OFFSET   # convert Unix -> this port's epoch
+            if local < 0:
+                return
+            t = time.gmtime(local)
+            # RTC tuple: (year, month, mday, weekday, hour, minute, second, subsec)
+            machine.RTC().datetime((t[0], t[1], t[2], t[6], t[3], t[4], t[5], 0))
+            Transport._clock_synced = True
+            Transport._time_votes = {}
+            log("Clock synced to " + str(unix_ts), LOG_NOTICE)
+        except Exception as e:
+            log("Clock sync failed: " + str(e), LOG_ERROR)
+
+    @staticmethod
     def _handle_announce(packet):
         from .identity import Identity
         import gc; gc.collect()
@@ -296,6 +381,18 @@ class Transport:
         gc.collect()
         if valid:
             log("Valid announce from " + packet.destination_hash.hex(), LOG_NOTICE)
+
+            # Bootstrap the clock from the announce timestamp (last 5 bytes of
+            # the 10-byte random_hash). No-op unless time sync is enabled and
+            # the clock is still unset.
+            if Transport.time_sync_enabled and not Transport._clock_synced:
+                try:
+                    _off = const.KEYSIZE // 8 + const.NAME_HASH_LENGTH // 8
+                    if packet.data is not None and len(packet.data) >= _off + 10:
+                        _ts = int.from_bytes(packet.data[_off + 5:_off + 10], "big")
+                        Transport.sync_clock_from(_ts, packet.destination_hash)
+                except Exception:
+                    pass
 
             # Record transport path from HDR_2 announces so outbound
             # DATA packets can be routed via the transport node. Skip our

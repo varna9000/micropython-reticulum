@@ -313,6 +313,15 @@ class LXMessage:
             message.signature_validated = False
             message.unverified_reason = LXMessage.SOURCE_UNKNOWN
 
+        # Bootstrap the clock from a trusted, signature-validated sender.
+        # No-op unless time sync is enabled and the clock is still unset.
+        if message.signature_validated:
+            try:
+                from .transport import Transport
+                Transport.sync_clock_from(timestamp, source_hash)
+            except Exception:
+                pass
+
         return message
 
     def __str__(self):
