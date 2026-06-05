@@ -1,3 +1,14 @@
 .DS_Store
 CLAUDE.md
 __pycache__
+
+# webp_fast natmod build artifacts (large; the built .mpy is committed instead)
+tools/natmod/webp_fast/build/
+tools/natmod/webp_fast/.mpy_ld_cache/
+tools/natmod/webp_fast/libwebp.tar.gz
+# desktop WebP evaluation scratch (harness + sample/generated images)
+tools/webp_eval/
+# soft-float probe (diagnostic only)
+tools/natmod/sf_probe/
+# editor backups
+\#*\#

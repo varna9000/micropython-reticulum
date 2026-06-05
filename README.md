@@ -190,14 +190,19 @@ Pages under ~417 bytes ride a single encrypted link packet. Larger pages and dow
 
 ### 3 — Camera node (`example_camera_node.py`)
 
-Captures a JPEG with an OV2640 and ships it back as an LXMF image attachment.
+Captures a photo with an OV2640 and ships it back as an LXMF image attachment. By
+default it sends a **VGA (640 × 480) WebP** (~7 KB) — small enough for LoRa yet far
+higher resolution than a same-size JPEG — and falls back to JPEG if the WebP encoder
+isn't installed.
 
 ![camera demo](images/image2-cam.png "Camera Module Demo")
 
 - **Hardware**: an ESP32-S3-CAM board with an OV2640 camera + PSRAM.
 - **Firmware**: **camera-enabled MicroPython is mandatory** (see [Step 1](#step-1--flash-micropython-to-your-board)). Standard MicroPython will fail at `import camera`.
 - **Config**: WiFi creds.
-- **How to use**: send `image` from MeshChat / Sideband. You'll receive a JPEG photo back — captured at CIF (400 × 296) and delivered via a Link + Resource transfer.
+- **How to use**: send `image` from MeshChat / Sideband to get a photo back (delivered via a Link + Resource transfer). Send `help` or `settings` to see the live controls.
+- **Image format & quality**: resolution, WebP quality, downscale, exposure and more are all adjustable at runtime by messaging the node — see **[Camera image settings (JPEG & WebP)](docs/CAMERA_WEBP.md)** for every parameter and the size/quality trade-offs.
+- **WebP encoder**: the optional native module `webp_fast.mpy` in `/lib` (built from [`tools/natmod/webp_fast/`](tools/natmod/webp_fast/)). Without it the node simply sends JPEG.
 
 For direct (non-LXMF) capture you can also use the peripheral module from the REPL:
 

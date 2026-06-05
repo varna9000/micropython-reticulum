@@ -16,36 +16,68 @@ from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
 import gc
 gc.collect()
 
-# Camera settings
-CAM_RESOLUTION = "cif"  # 400x296
-CAM_QUALITY = 30
+# Camera settings.
+# Default is VGA + WebP: capture a clean q90 JPEG, re-encode to WebP at a very
+# low quality. The clean (noise-free) source compresses beautifully, so VGA fits
+# the ~16 KB LoRa Resource limit with detail to spare (q1 ~7 KB, q10 ~11 KB).
+# Needs /lib/webp_fast_xtensawin.mpy — without it the node falls back to JPEG.
+CAM_RESOLUTION = "vga"   # 640x480
+CAM_QUALITY = 90         # JPEG capture quality (higher = better/cleaner WebP source)
+CAM_FB_COUNT = 2         # frame buffers; 2 needed so a q90 JPEG doesn't overflow (FB-OVF)
+CAM_FORMAT = "webp"      # "webp" (default) or "jpg"
+CAM_WEBP_QUALITY = 1     # WebP quality 0..100; from a clean source q1 ~7 KB at VGA.
+                         # Raise for crisper: q5 ~9 KB, q10 ~11 KB, q20 ~14 KB (all fit).
+CAM_WEBP_SCALE = 0       # downscale during decode: 0/1/2/3 = 1/1, 1/2, 1/4, 1/8
+CAM_WEBP_METHOD = 4      # WebP effort 0..6 (higher = slower/smaller; VGA m4 ~7 s)
+CAM_MAX_BYTES = 15500    # ceiling; WebP quality auto-lowered to stay under the 16 KB limit
 CAM_EXPOSURE = None  # None = auto-exposure; int (~0..1200) = fixed exposure time
-CAM_AE_LEVEL = -2    # auto-exposure brightness bias -2..+2 (lower if overexposed)
-CAM_WARMUP = 10      # frames discarded so auto-exposure can settle
+CAM_AE_LEVEL = 0     # auto-exposure brightness bias -2..+2 (lower if overexposed)
+CAM_WARMUP = 12      # frames discarded so auto-exposure can settle
 CAM_VFLIP = True     # vertical flip
 CAM_HMIRROR = True   # horizontal mirror
+CAM_LED_PIN = 48     # onboard NeoPixel (RGB) pin; turned off at boot. None = leave it alone
+CAM_FLASH = "off"    # GPIO48 NeoPixel as flash: "off" / "on" / "auto" (when dark).
+                     # Onboard LED is weak (close-ups only); "auto" adds ~0.7 s/capture.
+CAM_FLASH_THRESHOLD = 50  # "auto" fires when the brightness probe reads below this (0-255)
+CAM_FLASH_COLOR = (255, 150, 210)  # green-corrected white (WS2812 green is over-bright)
+CAM_NIGHT = False    # night mode: low xclk (long exposure) + high gain + flash for
+                     # near-dark scenes. Dim/grainy and slow — best this hardware can do.
 
 # Maps helper keywords -> the module-level setting they change, with help text.
 _CAM_SETTINGS = {
-    "resolution": "CAM_RESOLUTION",
-    "quality":    "CAM_QUALITY",
-    "exposure":   "CAM_EXPOSURE",
-    "ae_level":   "CAM_AE_LEVEL",
-    "warmup":     "CAM_WARMUP",
-    "vflip":      "CAM_VFLIP",
-    "hmirror":    "CAM_HMIRROR",
+    "resolution":   "CAM_RESOLUTION",
+    "quality":      "CAM_QUALITY",
+    "format":       "CAM_FORMAT",
+    "webp_quality": "CAM_WEBP_QUALITY",
+    "webp_scale":   "CAM_WEBP_SCALE",
+    "webp_method":  "CAM_WEBP_METHOD",
+    "flash":        "CAM_FLASH",
+    "flash_threshold": "CAM_FLASH_THRESHOLD",
+    "night":        "CAM_NIGHT",
+    "exposure":     "CAM_EXPOSURE",
+    "ae_level":     "CAM_AE_LEVEL",
+    "warmup":       "CAM_WARMUP",
+    "vflip":        "CAM_VFLIP",
+    "hmirror":      "CAM_HMIRROR",
 }
 _CAM_HELP = {
-    "image":      "capture a photo and send it back",
-    "settings":   "show the current camera settings",
-    "help":       "show this list of keywords",
-    "resolution": "frame size: qqvga, qvga, cif, hvga, vga, svga, xga, ...",
-    "quality":    "JPEG quality 10-63 (lower = smaller file)",
-    "exposure":   "None = auto-exposure, or int ~0..1200 = fixed exposure time",
-    "ae_level":   "auto-exposure brightness bias -2..+2 (lower = darker)",
-    "warmup":     "frames discarded so auto-exposure can settle",
-    "vflip":      "vertical flip on/off",
-    "hmirror":    "horizontal mirror on/off",
+    "image":        "capture a photo and send it back",
+    "settings":     "show the current camera settings",
+    "help":         "show this list of keywords",
+    "resolution":   "frame size: qqvga, qvga, cif, hvga, vga, svga, xga, ...",
+    "quality":      "JPEG capture quality (higher = better/larger)",
+    "format":       "image format: webp (smaller) or jpg",
+    "webp_quality": "WebP quality 0-100 (auto-lowered to fit the size budget)",
+    "webp_scale":   "WebP downscale 0/1/2/3 = 1/1, 1/2, 1/4, 1/8 (speed/size)",
+    "webp_method":  "WebP effort 0-6 (higher = slower/smaller)",
+    "flash":        "onboard LED flash: off / on / auto (fire when dark)",
+    "flash_threshold": "auto-flash fires when brightness probe < this (0-255)",
+    "night":        "night mode on/off: long exposure + gain + flash (dim/grainy, slow)",
+    "exposure":     "None = auto-exposure, or int ~0..1200 = fixed exposure time",
+    "ae_level":     "auto-exposure brightness bias -2..+2 (lower = darker)",
+    "warmup":       "frames discarded so auto-exposure can settle",
+    "vflip":        "vertical flip on/off",
+    "hmirror":      "horizontal mirror on/off",
 }
 
 
@@ -63,8 +95,10 @@ def camera_config(settings=False, help=False, **kwargs):
     if help:
         lines = ["Camera keywords (send '<key>' to read, '<key> <value>' to set):"]
         for key in ("image", "settings", "help",
-                    "resolution", "quality", "exposure", "ae_level", "warmup",
-                    "vflip", "hmirror"):
+                    "resolution", "quality", "format",
+                    "webp_quality", "webp_scale", "webp_method",
+                    "flash", "flash_threshold", "night",
+                    "exposure", "ae_level", "warmup", "vflip", "hmirror"):
             lines.append("  " + key + " - " + _CAM_HELP[key])
         return "\n".join(lines)
 
@@ -87,13 +121,68 @@ def _peer_name(router, dest_hash):
     return dest_hash.hex()[:8]
 
 
+def _led_off():
+    """Turn off the onboard NeoPixel so the board LED isn't lit during operation.
+
+    An uninitialised NeoPixel often powers up showing a random colour. Set
+    CAM_LED_PIN = None to skip this (or if your board has no NeoPixel on this pin).
+    """
+    if CAM_LED_PIN is None:
+        return
+    try:
+        import neopixel
+        from machine import Pin
+        np = neopixel.NeoPixel(Pin(CAM_LED_PIN), 1)
+        np[0] = (0, 0, 0)
+        np.write()
+    except Exception as e:
+        if DEBUG >= 2:
+            print("[Camera] LED off failed:", e)
+
+
 def capture_image():
     """Capture a JPEG image and return the bytes."""
     from peripherals.camera import capture
+    if CAM_NIGHT:
+        # Night mode: drop xclk for a long exposure, max gain, force the flash.
+        # Best-effort for near-dark — dim, grainy and slow, but recognizable.
+        return capture(path=None, resolution=CAM_RESOLUTION, quality=CAM_QUALITY,
+                       vflip=CAM_VFLIP, hmirror=CAM_HMIRROR,
+                       warmup_frames=CAM_WARMUP, fb_count=CAM_FB_COUNT,
+                       xclk=5000000, exposure=1200, gainceiling=6,
+                       flash="on", flash_pin=CAM_LED_PIN, flash_color=CAM_FLASH_COLOR)
     return capture(path=None, resolution=CAM_RESOLUTION, quality=CAM_QUALITY,
                    vflip=CAM_VFLIP, hmirror=CAM_HMIRROR,
                    exposure=CAM_EXPOSURE, ae_level=CAM_AE_LEVEL,
-                   warmup_frames=CAM_WARMUP)
+                   warmup_frames=CAM_WARMUP, fb_count=CAM_FB_COUNT,
+                   flash=CAM_FLASH, flash_pin=CAM_LED_PIN,
+                   flash_threshold=CAM_FLASH_THRESHOLD, flash_color=CAM_FLASH_COLOR)
+
+
+def _encode_image():
+    """Capture a JPEG and return (format_string, bytes) to attach.
+
+    Default path: capture JPEG -> WebP (auto-fit under CAM_MAX_BYTES). Falls back
+    to the raw JPEG if WebP is requested-off, the native module is absent, or the
+    encode fails. WebP encode is synchronous (~7 s at VGA, m4) — it briefly
+    blocks the event loop, so it runs before the Resource transfer starts.
+    """
+    jpg = capture_image()
+    gc.collect()
+    if CAM_FORMAT == "webp":
+        from peripherals import webp
+        if webp.available():
+            data = webp.from_jpeg_under(
+                jpg, max_bytes=CAM_MAX_BYTES, quality=CAM_WEBP_QUALITY,
+                scale=CAM_WEBP_SCALE, method=CAM_WEBP_METHOD)
+            gc.collect()
+            if data:
+                return "webp", data
+            if DEBUG >= 1:
+                print("[Camera] WebP encode failed; sending JPEG")
+        elif DEBUG >= 1:
+            print("[Camera] webp_fast.mpy not found; sending JPEG")
+    return "jpg", jpg
 
 
 async def send_image_reply(router, source_hash, content):
@@ -107,13 +196,17 @@ async def send_image_reply(router, source_hash, content):
         if DEBUG >= 1:
             print("[Camera] Capturing for " + source_hash.hex()[:8] + "...")
 
-        img_data = capture_image()
+        fmt, img_data = _encode_image()
         gc.collect()
 
-        if DEBUG >= 1:
-            print("[Camera] Sending {} bytes...".format(len(img_data)))
+        if len(img_data) > CAM_MAX_BYTES and DEBUG >= 1:
+            print("[Camera] WARNING image {} B exceeds {} B limit".format(
+                len(img_data), CAM_MAX_BYTES))
 
-        fields = {FIELD_IMAGE: ["jpg", img_data]}
+        if DEBUG >= 1:
+            print("[Camera] Sending {} {} bytes...".format(len(img_data), fmt))
+
+        fields = {FIELD_IMAGE: [fmt, img_data]}
         msg = router.send_message(
             source_hash,
             "Camera capture",
@@ -153,21 +246,24 @@ def _format_settings():
     """Human-readable dump of the current camera settings."""
     s = camera_config(settings=True)
     lines = ["Camera settings:"]
-    for key in ("resolution", "quality", "exposure", "ae_level", "warmup",
-                "vflip", "hmirror"):
+    for key in ("resolution", "quality", "format",
+                "webp_quality", "webp_scale", "webp_method",
+                "flash", "flash_threshold", "night",
+                "exposure", "ae_level", "warmup", "vflip", "hmirror"):
         lines.append("  " + key + " = " + str(s[key]))
     return "\n".join(lines)
 
 
 def _coerce_setting(key, val):
     """Convert a text value into the right type for a setting."""
-    if key == "resolution":
+    if key in ("resolution", "format", "flash"):
         return val.lower()
-    if key in ("vflip", "hmirror"):
+    if key in ("vflip", "hmirror", "night"):
         return val.lower() in ("1", "true", "on", "yes")
     if key == "exposure" and val.lower() in ("auto", "none", "off"):
         return None
-    return int(val)   # quality, ae_level, warmup, exposure
+    # quality, webp_quality, webp_scale, webp_method, ae_level, warmup, exposure
+    return int(val)
 
 
 def _handle_command(text):
@@ -189,7 +285,12 @@ def _handle_command(text):
         key = parts[0].lower() if parts else ""
         val = parts[1].strip() if len(parts) > 1 else None
     if key not in _CAM_SETTINGS:
-        return "Unknown command '" + (key or text) + "'. Send 'help' for keywords."
+        # suggest near matches (shared 3-char prefix or substring) — catches typos
+        sugg = [k for k in _CAM_SETTINGS
+                if (key and (k[:3] == key[:3] or key in k or k in key))]
+        hint = (" Did you mean: " + ", ".join(sugg) + "?") if sugg \
+               else " Send 'help' for keywords."
+        return "Unknown command '" + (key or text) + "'." + hint
     if not val:
         # No value -> report the current setting.
         return key + " = " + str(camera_config(settings=True)[key])
@@ -301,6 +402,8 @@ def needs_wifi(config):
 def main():
     import uasyncio as asyncio
 
+    _led_off()   # turn off the onboard LED at boot
+
     if needs_wifi(CONFIG):
         ip = connect_wifi(WIFI_SSID, WIFI_PASS)
     gc.collect()
@@ -321,7 +424,12 @@ def main():
     if DEBUG >= 1:
         print("Camera node ready!")
         print("LXMF address:", dest.hexhash)
-        print("Resolution: {} quality: {}".format(CAM_RESOLUTION, CAM_QUALITY))
+        fmt_note = CAM_FORMAT
+        if CAM_FORMAT == "webp":
+            from peripherals import webp
+            fmt_note = "webp" if webp.available() else "webp->JPEG (webp_fast.mpy missing)"
+        print("Resolution: {} format: {} quality: {}".format(
+            CAM_RESOLUTION, fmt_note, CAM_QUALITY))
         print("Free memory:", gc.mem_free(), "bytes")
         print("Send any message to get a photo back.")
 
