@@ -20,6 +20,7 @@ Usage:
 
 from camera import Camera, PixelFormat, FrameSize
 import gc
+import time
 
 DATA_PINS = [11, 9, 8, 10, 12, 18, 17, 16]  # D0-D7
 
@@ -43,7 +44,7 @@ RESOLUTIONS = {
 _cam = None
 
 
-def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False, warmup_frames=3, vflip=True, hmirror=False):
+def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False, warmup_frames=8, vflip=True, hmirror=False, exposure=None, ae_level=None):
     """Capture a JPEG image.
 
     Args:
@@ -51,9 +52,16 @@ def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False, wa
         resolution: one of "qqvga","qvga","cif","hvga","vga","svga","xga","hd","sxga","uxga"
         quality: JPEG quality 10-63 (lower = smaller file, 10 is fine for LoRa)
         grayscale: if True, capture in grayscale (smaller file, no color)
-        warmup_frames: discard this many frames before keeping one (AGC/AWB settle)
+        warmup_frames: discard this many frames before keeping one so auto
+            exposure/gain/white-balance can converge. Too few -> over/under
+            exposed. 8-15 is usually enough; raise it if images come out bright.
         vflip: flip image vertically (board-orientation dependent)
         hmirror: mirror image horizontally
+        exposure: None = auto-exposure (AEC, the default). An int fixes the
+            exposure time: auto-exposure is disabled and the AEC register is set
+            to this value (~0..1200, higher = longer/brighter).
+        ae_level: when using auto-exposure, bias its target brightness, -2..+2
+            (negative = darker). Use this if auto images are over/under exposed.
     Returns:
         file size in bytes
     """
@@ -89,8 +97,24 @@ def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False, wa
     except AttributeError:
         pass  # older camera-API builds without flip/mirror setters
 
+    # Exposure: None keeps auto-exposure (AEC); an int fixes the exposure time.
+    # Set before the warmup loop so the discarded frames settle at this value.
+    try:
+        if exposure is None:
+            _cam.set_exposure_ctrl(True)
+            if ae_level is not None:
+                _cam.set_ae_level(int(ae_level))   # bias auto target darker/brighter
+        else:
+            _cam.set_exposure_ctrl(False)
+            _cam.set_aec_value(int(exposure))
+    except AttributeError:
+        pass  # older camera-API builds without exposure setters
+
+    # Discard frames so auto exposure/gain/AWB can converge. A short gap lets
+    # the sensor integrate and apply new register values between frames.
     for _ in range(warmup_frames):
-        _cam.capture()  # discard for AGC/AWB settling
+        _cam.capture()
+        time.sleep_ms(50)
     img = _cam.capture()
     img_bytes = bytes(img)
     gc.collect()

@@ -19,6 +19,58 @@ gc.collect()
 # Camera settings
 CAM_RESOLUTION = "cif"  # 400x296
 CAM_QUALITY = 30
+CAM_EXPOSURE = None  # None = auto-exposure; int (~0..1200) = fixed exposure time
+CAM_AE_LEVEL = -2    # auto-exposure brightness bias -2..+2 (lower if overexposed)
+CAM_WARMUP = 10      # frames discarded so auto-exposure can settle
+
+# Maps helper keywords -> the module-level setting they change, with help text.
+_CAM_SETTINGS = {
+    "resolution": "CAM_RESOLUTION",
+    "quality":    "CAM_QUALITY",
+    "exposure":   "CAM_EXPOSURE",
+    "ae_level":   "CAM_AE_LEVEL",
+    "warmup":     "CAM_WARMUP",
+}
+_CAM_HELP = {
+    "image":      "capture a photo and send it back",
+    "settings":   "show the current camera settings",
+    "help":       "show this list of keywords",
+    "resolution": "frame size: qqvga, qvga, cif, hvga, vga, svga, xga, ...",
+    "quality":    "JPEG quality 10-63 (lower = smaller file)",
+    "exposure":   "None = auto-exposure, or int ~0..1200 = fixed exposure time",
+    "ae_level":   "auto-exposure brightness bias -2..+2 (lower = darker)",
+    "warmup":     "frames discarded so auto-exposure can settle",
+}
+
+
+def camera_config(settings=False, help=False, **kwargs):
+    """Adjust camera capture settings at runtime, or read the current ones.
+
+    Read:   camera_config(settings=True)        -> {'resolution': 'cif', ...}
+    Adjust: camera_config(quality=20, ae_level=-1, warmup=15)
+    Help:   camera_config(help=True)            -> keyword list (str)
+
+    Accepted keywords: resolution, quality, exposure, ae_level, warmup.
+    Setting calls return the current settings dict (after applying changes).
+    The next capture_image() call picks up the new values automatically.
+    """
+    if help:
+        lines = ["Camera keywords:"]
+        for key in ("image", "settings", "help",
+                    "resolution", "quality", "exposure", "ae_level", "warmup"):
+            lines.append("  " + key + " - " + _CAM_HELP[key])
+        return "\n".join(lines)
+
+    g = globals()
+    for key, value in kwargs.items():
+        name = _CAM_SETTINGS.get(key)
+        if name is None:
+            print("camera_config: unknown setting '" + str(key) + "'")
+            continue
+        g[name] = value
+        if DEBUG >= 1:
+            print("[Camera] " + key + " = " + str(value))
+    return {key: g[name] for key, name in _CAM_SETTINGS.items()}
 
 
 def _peer_name(router, dest_hash):
@@ -31,7 +83,9 @@ def _peer_name(router, dest_hash):
 def capture_image():
     """Capture a JPEG image and return the bytes."""
     from peripherals.camera import capture
-    return capture(path=None, resolution=CAM_RESOLUTION, quality=CAM_QUALITY, vflip=False)
+    return capture(path=None, resolution=CAM_RESOLUTION, quality=CAM_QUALITY,
+                   vflip=False, exposure=CAM_EXPOSURE, ae_level=CAM_AE_LEVEL,
+                   warmup_frames=CAM_WARMUP)
 
 
 async def send_image_reply(router, source_hash, content):
@@ -67,6 +121,66 @@ async def send_image_reply(router, source_hash, content):
         from urns.log import log, LOG_ERROR
         log("Camera reply error: " + str(e), LOG_ERROR)
     gc.collect()
+
+
+async def send_text_reply(router, source_hash, text):
+    """Send a plain-text LXMF reply (used for help/settings/ack responses).
+
+    Uses the router's resilient delivery: reuse an open link if present, else
+    opportunistic, else request a path and send once the route is learned.
+    """
+    import uasyncio as asyncio
+    await asyncio.sleep(0)
+    try:
+        if not router.send_message(source_hash, text):
+            if DEBUG >= 1:
+                print("[Camera] Cannot reply to " + source_hash.hex()[:8] + " (unknown identity)")
+    except Exception as e:
+        from urns.log import log, LOG_ERROR
+        log("Camera reply error: " + str(e), LOG_ERROR)
+    gc.collect()
+
+
+def _format_settings():
+    """Human-readable dump of the current camera settings."""
+    s = camera_config(settings=True)
+    lines = ["Camera settings:"]
+    for key in ("resolution", "quality", "exposure", "ae_level", "warmup"):
+        lines.append("  " + key + " = " + str(s[key]))
+    return "\n".join(lines)
+
+
+def _coerce_setting(key, val):
+    """Convert a text value into the right type for a setting."""
+    if key == "resolution":
+        return val.lower()
+    if key == "exposure" and val.lower() in ("auto", "none", "off"):
+        return None
+    return int(val)   # quality, ae_level, warmup, exposure
+
+
+def _apply_command(text):
+    """Parse 'set <key> <value>' or '<key>=<value>' and apply it. Returns reply."""
+    t = text.strip()
+    if t.lower().startswith("set "):
+        t = t[4:].strip()
+    if "=" in t:
+        key, _, val = t.partition("=")
+    else:
+        parts = t.split(None, 1)
+        if len(parts) != 2:
+            return "Usage: set <keyword> <value>  (e.g. set quality 20)"
+        key, val = parts[0], parts[1]
+    key = key.strip().lower()
+    val = val.strip()
+    if key not in _CAM_SETTINGS:
+        return "Unknown setting '" + key + "'. Send 'help'."
+    try:
+        value = _coerce_setting(key, val)
+    except Exception:
+        return "Bad value for " + key + ": " + val
+    camera_config(**{key: value})
+    return key + " set to " + str(value)
 
 
 def connect_wifi(ssid, password, timeout=15):
@@ -131,8 +245,21 @@ def setup_node(rns, node_name):
             print()
             print("<" + name + "/" + sender + "> " + content)
 
-        if content.strip().lower() == "image":
-            asyncio.create_task(send_image_reply(router, message.source_hash, content))
+        cmd = content.strip()
+        low = cmd.lower()
+        src = message.source_hash
+
+        if low == "image":
+            asyncio.create_task(send_image_reply(router, src, content))
+        elif low == "help":
+            asyncio.create_task(send_text_reply(router, src, camera_config(help=True)))
+        elif low == "settings":
+            asyncio.create_task(send_text_reply(router, src, _format_settings()))
+        elif low.startswith("set ") or "=" in cmd:
+            asyncio.create_task(send_text_reply(router, src, _apply_command(cmd)))
+        else:
+            asyncio.create_task(send_text_reply(
+                router, src, "Unknown command. Send 'help' for keywords."))
         gc.collect()
 
     router.register_delivery_callback(on_message)
