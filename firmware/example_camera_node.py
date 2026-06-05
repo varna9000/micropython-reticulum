@@ -55,7 +55,7 @@ def camera_config(settings=False, help=False, **kwargs):
     The next capture_image() call picks up the new values automatically.
     """
     if help:
-        lines = ["Camera keywords:"]
+        lines = ["Camera keywords (send '<key>' to read, '<key> <value>' to set):"]
         for key in ("image", "settings", "help",
                     "resolution", "quality", "exposure", "ae_level", "warmup"):
             lines.append("  " + key + " - " + _CAM_HELP[key])
@@ -159,22 +159,29 @@ def _coerce_setting(key, val):
     return int(val)   # quality, ae_level, warmup, exposure
 
 
-def _apply_command(text):
-    """Parse 'set <key> <value>' or '<key>=<value>' and apply it. Returns reply."""
+def _handle_command(text):
+    """Parse and apply a setting command. Accepted forms:
+        <key>               -> report the current value
+        <key> <value>       -> set
+        <key>=<value>       -> set
+        set <key> <value>   -> set
+    Returns the reply string.
+    """
     t = text.strip()
     if t.lower().startswith("set "):
         t = t[4:].strip()
     if "=" in t:
         key, _, val = t.partition("=")
+        key, val = key.strip().lower(), val.strip()
     else:
         parts = t.split(None, 1)
-        if len(parts) != 2:
-            return "Usage: set <keyword> <value>  (e.g. set quality 20)"
-        key, val = parts[0], parts[1]
-    key = key.strip().lower()
-    val = val.strip()
+        key = parts[0].lower() if parts else ""
+        val = parts[1].strip() if len(parts) > 1 else None
     if key not in _CAM_SETTINGS:
-        return "Unknown setting '" + key + "'. Send 'help'."
+        return "Unknown command '" + (key or text) + "'. Send 'help' for keywords."
+    if not val:
+        # No value -> report the current setting.
+        return key + " = " + str(camera_config(settings=True)[key])
     try:
         value = _coerce_setting(key, val)
     except Exception:
@@ -255,11 +262,10 @@ def setup_node(rns, node_name):
             asyncio.create_task(send_text_reply(router, src, camera_config(help=True)))
         elif low == "settings":
             asyncio.create_task(send_text_reply(router, src, _format_settings()))
-        elif low.startswith("set ") or "=" in cmd:
-            asyncio.create_task(send_text_reply(router, src, _apply_command(cmd)))
         else:
-            asyncio.create_task(send_text_reply(
-                router, src, "Unknown command. Send 'help' for keywords."))
+            # Any other message is treated as a setting command:
+            #   "quality" (read), "quality 20" / "quality=20" / "set quality 20"
+            asyncio.create_task(send_text_reply(router, src, _handle_command(cmd)))
         gc.collect()
 
     router.register_delivery_callback(on_message)
