@@ -624,6 +624,7 @@ The native C module (Monocypher-based) is ~160× faster than pure-Python Curve25
 - **MicroPython only** — no CPython/desktop support. Uses `uhashlib`, `ucryptolib`, `uasyncio`, `micropython.const` directly.
 - **LXMF message size** — single-packet opportunistic messages up to ~295 bytes content. Larger messages (up to 16 KB) use Link-based DIRECT delivery via Resource transfer, including through multi-hop transport chains.
 - **No propagation node** — cannot store-and-forward messages for offline peers.
+- **On-demand path resolution** — when sending to a peer it has no route to (e.g. a transport-distant node right after a reboot), the node issues a Reticulum **path request** and delivers the message once the route is learned, instead of silently dropping it. Replies also reuse an already-open link when present.
 - **Pure-Python crypto fallback** — ~4 s message round-trip without the native module. With native module: <200 ms.
 
 ## Roadmap

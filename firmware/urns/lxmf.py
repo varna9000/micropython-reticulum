@@ -412,10 +412,34 @@ class LXMRouter:
                      fields=None, desired_method=None):
         """Send an LXMF message to a destination hash.
 
-        Returns the LXMessage, or None if path/identity not known.
-        Automatically uses DIRECT delivery for messages too large for opportunistic.
+        Resilient delivery chain:
+          1. reuse an already-open link to the peer (DIRECT), else
+          2. send opportunistically if a path is known, else
+          3. request a path and defer the send until the route is learned.
+
+        Returns the LXMessage when sent/started, True when queued pending a path,
+        or None on hard failure (reachable but identity still unknown).
         """
-        # Look up destination identity
+        from .transport import Transport
+
+        have_link = self._find_active_link_for(destination_hash) is not None
+
+        # No route yet: solicit a path and defer the send. The retry re-enters
+        # this method once the path (and the peer's identity, carried in the
+        # path-response announce) is known.
+        if not have_link and not Transport.has_path(destination_hash):
+            log("No path to " + destination_hash.hex()[:8] + ", requesting path", LOG_VERBOSE)
+            Transport.ensure_path(
+                destination_hash,
+                on_found=lambda: self.send_message(
+                    destination_hash, content, title, fields, desired_method),
+                on_timeout=lambda: log(
+                    "LXMF send to " + destination_hash.hex()[:8]
+                    + " failed: no path", LOG_ERROR),
+            )
+            return True   # queued
+
+        # Reachable — we need the peer's keys to encrypt.
         dest_identity = Identity.recall(destination_hash)
         if dest_identity is None:
             log("Cannot send LXMF: unknown identity for " + destination_hash.hex()[:8], LOG_ERROR)
@@ -426,6 +450,11 @@ class LXMRouter:
 
         source = Destination(self.delivery_identity, Destination.OUT,
                              Destination.SINGLE, APP_NAME, "delivery")
+
+        # Prefer an already-open link when the caller hasn't forced a method:
+        # avoids a redundant path request when we can answer over the link.
+        if have_link and desired_method is None:
+            desired_method = LXMessage.DIRECT
 
         msg = LXMessage(
             destination=dest,

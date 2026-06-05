@@ -16,6 +16,12 @@ _EPOCH_OFFSET = 946684800 if sys.platform == "esp32" else 0
 # corroboration from multiple nodes rather than a hardcoded max.
 _TIME_FLOOR = 1704067200       # 2024-01-01 UTC
 
+# Path requests (wire-compatible with reference RNS). A leaf cannot relay, but it
+# can ASK a transport node for a route to a destination it has no path to yet.
+_PATH_APP_NAME = "rnstransport"     # well-known: "rnstransport.path.request"
+_PATH_REQUEST_TIMEOUT = 15          # seconds before a waiting send gives up
+_PATH_REREQUEST_INTERVAL = 5        # seconds between re-requests while waiting
+
 # Transport types (module-level for import compatibility)
 BROADCAST  = const.TRANSPORT_BROADCAST
 TRANSPORT  = const.TRANSPORT_TRANSPORT
@@ -39,6 +45,13 @@ class Transport:
     destination_table = {}
     path_table = {}          # dest_hash -> transport_id (from HDR_2 announces)
     blackholed_identities = []
+
+    # Reachability + on-demand path resolution (path requests). Membership-only,
+    # no expiry — see has_path(). path_table is the HDR_2-route subset of this.
+    reachable_destinations = {}   # dest_hash -> last announce time (capped)
+    _path_waiters = {}            # dest_hash -> [ {on_found, on_timeout, deadline} ]
+    _path_request_times = {}      # dest_hash -> last request sent (rate-limit)
+    _path_request_dest = None     # cached OUT/PLAIN "rnstransport.path.request"
 
     transport_enabled = False
 
@@ -386,6 +399,112 @@ class Transport:
             log("Clock sync failed: " + str(e), LOG_ERROR)
 
     @staticmethod
+    def has_path(destination_hash):
+        """True if we currently know how to reach this destination.
+
+        Membership-only, NO expiry: a transport answers a path request by
+        replaying the destination's *cached* announce, which has the same packet
+        hash as the original. If reachability expired while that hash were still
+        in packet_hashlist, the replayed response would be dropped as a duplicate
+        and the path never re-learned. So a destination is "unreachable" only when
+        we have genuinely never heard it this boot (packet_hashlist also empty),
+        which avoids that dedup conflict.
+        """
+        return destination_hash in Transport.reachable_destinations
+
+    @staticmethod
+    def request_path(destination_hash, on_interface=None):
+        """Broadcast a path request so a transport node re-announces the route.
+
+        Wire-compatible with reference RNS: a PLAIN broadcast packet addressed to
+        "rnstransport.path.request" carrying destination_hash + a random tag.
+        """
+        from .destination import Destination
+        from .identity import Identity
+        from .packet import Packet
+        if Transport._path_request_dest is None:
+            Transport._path_request_dest = Destination(
+                None, Destination.OUT, Destination.PLAIN,
+                _PATH_APP_NAME, "path", "request",
+            )
+        tag = Identity.get_random_hash()
+        # Leaf form is dest(16)+tag(16); transport nodes insert their own id.
+        if Transport.transport_enabled and Transport.identity is not None:
+            data = destination_hash + Transport.identity.hash + tag
+        else:
+            data = destination_hash + tag
+        try:
+            pkt = Packet(
+                Transport._path_request_dest, data, const.PKT_DATA,
+                transport_type=const.TRANSPORT_BROADCAST,
+                header_type=const.HDR_1,
+                attached_interface=on_interface,
+                create_receipt=False,
+            )
+            pkt.send()
+            Transport._path_request_times[destination_hash] = time.time()
+            log("Path request for " + destination_hash.hex()[:8], LOG_VERBOSE)
+        except Exception as e:
+            log("Path request failed: " + str(e), LOG_ERROR)
+
+    @staticmethod
+    def ensure_path(destination_hash, on_found, on_timeout=None,
+                    timeout=_PATH_REQUEST_TIMEOUT):
+        """Call on_found() as soon as a path to destination_hash is known,
+        requesting one if necessary. on_timeout() fires if none appears within
+        `timeout` seconds. Waiters are serviced in job_loop()."""
+        if Transport.has_path(destination_hash):
+            try:
+                on_found()
+            except Exception as e:
+                log("Path on_found error: " + str(e), LOG_ERROR)
+            return
+        waiter = {"on_found": on_found, "on_timeout": on_timeout,
+                  "deadline": time.time() + timeout}
+        waiters = Transport._path_waiters.get(destination_hash)
+        if waiters is None:
+            Transport._path_waiters[destination_hash] = [waiter]
+            Transport.request_path(destination_hash)   # first request immediately
+        else:
+            waiters.append(waiter)                      # request already in flight
+
+    @staticmethod
+    def _process_path_waiters():
+        """job_loop tick: fire found waiters, time out stale ones, re-request."""
+        if not Transport._path_waiters:
+            return
+        now = time.time()
+        for dest in list(Transport._path_waiters.keys()):
+            waiters = Transport._path_waiters[dest]
+            if Transport.has_path(dest):
+                del Transport._path_waiters[dest]
+                Transport._path_request_times.pop(dest, None)
+                for w in waiters:
+                    try:
+                        w["on_found"]()
+                    except Exception as e:
+                        log("Path on_found error: " + str(e), LOG_ERROR)
+                continue
+            live = []
+            for w in waiters:
+                if now >= w["deadline"]:
+                    if w["on_timeout"] is not None:
+                        try:
+                            w["on_timeout"]()
+                        except Exception as e:
+                            log("Path on_timeout error: " + str(e), LOG_ERROR)
+                else:
+                    live.append(w)
+            if not live:
+                del Transport._path_waiters[dest]
+                Transport._path_request_times.pop(dest, None)
+                continue
+            Transport._path_waiters[dest] = live
+            last = Transport._path_request_times.get(dest, 0)
+            if now - last >= _PATH_REREQUEST_INTERVAL:
+                Transport.request_path(dest)
+
+    @staticmethod
     def _handle_announce(packet):
         from .identity import Identity
         import gc; gc.collect()
@@ -393,6 +512,15 @@ class Transport:
         gc.collect()
         if valid:
             log("Valid announce from " + packet.destination_hash.hex(), LOG_NOTICE)
+
+            # Mark the destination reachable (membership-only) so opportunistic
+            # sends know a route exists and any deferred sends waiting on it can
+            # fire. Covers both HDR_1 (direct) and HDR_2 (via transport) peers.
+            if (len(Transport.reachable_destinations) >= const.MAX_DESTINATIONS
+                    and packet.destination_hash not in Transport.reachable_destinations):
+                Transport.reachable_destinations.pop(
+                    next(iter(Transport.reachable_destinations)), None)
+            Transport.reachable_destinations[packet.destination_hash] = time.time()
 
             # Bootstrap the clock from the announce timestamp (last 5 bytes of
             # the 10-byte random_hash). No-op unless time sync is enabled and
@@ -543,6 +671,9 @@ class Transport:
                 for l in closed_links:
                     if l in Transport.active_links:
                         Transport.active_links.remove(l)
+
+                # Service deferred sends waiting on a path request.
+                Transport._process_path_waiters()
 
                 import gc
                 gc.collect()
