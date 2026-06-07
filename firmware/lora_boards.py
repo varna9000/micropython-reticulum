@@ -96,5 +96,21 @@ LORA_BOARDS = {
     #     "use_dcdc": True,
     #     "spi_baudrate": 8_000_000,
     # },
+    
+    # HTIT-WB32LAF ESP32-S3 Heltec V4 + LoRa SX1262 + Oled SSD1315.
+    # LoRa has dedicated soldered connection, should be no GPIO conflicts.
+    # Pin map https://heltec.org/wp-content/uploads/2025/09/V4-pinmap-1.png
+    "HTIT-WB32LAF": {
+        "spi_bus": 1,
+        "sck_pin": 9,
+        "mosi_pin": 10,
+        "miso_pin": 11,
+        "cs_pin": 8,
+        "busy_pin": 13,
+        "dio1_pin": 14,
+        "reset_pin": 12,
+        "dio2_rf_sw": True,
+        "dio3_tcxo_millivolts": 1800,
+    },
 
 }
