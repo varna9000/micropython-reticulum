@@ -133,8 +133,10 @@ CONFIG = {
         #   "xiao_esp32s3_sx1262"          XIAO ESP32-S3 + Wio-SX1262 (kit)
         #   "xiao_esp32s3_sx1262_header"   XIAO ESP32-S3 + Wio-SX1262 (header)
         #   "esp32s3_cam_sx1262"           ESP32-S3 WROOM CAM + Wio-SX1262
+        #   "HTIT-WB32LAF"                 Heltec V4 LoRa HTIT-WB32LAF + SX-1262 embedded
         #
         # Any pin can still be overridden inline (it wins over the preset).
+        #
         {
             "type": "LoRaInterface",
             "board": "esp32s3_cam_sx1262",
