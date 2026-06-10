@@ -10,6 +10,7 @@ from .packet import Packet
 from .transport import Transport
 from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_INFO
 from .crypto.hashes import sha256
+from .crypto import ed25519
 
 APP_NAME = "lxmf"
 
@@ -340,7 +341,10 @@ class LXMRouter:
     - Peer announce tracking
     """
 
-    verify_signatures = False  # Skip Ed25519 verify on constrained devices
+    # Verify sender signatures when the native Ed25519 module makes it cheap
+    # (milliseconds). Pure Python verify costs ~2s/message on ESP32, so fall
+    # back to trusting the encryption layer (X25519 ECDH + HMAC-SHA256) there.
+    verify_signatures = ed25519.have_native()
 
     def __init__(self, identity=None, storagepath=None):
         self.identity = identity
@@ -381,7 +385,9 @@ class LXMRouter:
         # Set app_data for announces
         if display_name is not None:
             dn = display_name.encode("utf-8") if isinstance(display_name, str) else display_name
-            self.delivery_destination._default_app_data = umsgpack.packb([dn, stamp_cost])
+            # [display_name, stamp_cost, supported_functionality] — upstream
+            # LXMF shape; empty functionality list = no LXMF compression.
+            self.delivery_destination._default_app_data = umsgpack.packb([dn, stamp_cost, []])
 
         log("LXMF delivery registered: " + self.delivery_destination.hexhash, LOG_NOTICE)
         return self.delivery_destination
@@ -402,11 +408,13 @@ class LXMRouter:
             log("LXMF announced as: " + (self.display_name or "unnamed"), LOG_NOTICE)
 
     def _get_announce_app_data(self):
-        """Build announce app_data: msgpack([display_name_bytes, stamp_cost])"""
+        """Build announce app_data: msgpack([display_name_bytes, stamp_cost,
+        supported_functionality]) — matches upstream LXMF; the empty
+        functionality list tells peers we don't support LXMF compression."""
         dn = None
         if self.display_name:
             dn = self.display_name.encode("utf-8") if isinstance(self.display_name, str) else self.display_name
-        return umsgpack.packb([dn, None])
+        return umsgpack.packb([dn, None, []])
 
     def send_message(self, destination_hash, content, title="",
                      fields=None, desired_method=None):

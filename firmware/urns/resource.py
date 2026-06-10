@@ -164,9 +164,17 @@ class Resource:
         r.flags = adv["f"]
         hashmap_raw = adv["m"]
 
-        # Check size limit
+        # Reject what we can't assemble. Multi-segment transfers are what
+        # upstream RNS uses for data above its single-segment limit — chaining
+        # them here would blow past MAX_RESOURCE_SIZE anyway. Cancel so the
+        # sender fails fast instead of both sides stalling until timeout.
+        reject = None
         if r.total_data_size > MAX_RESOURCE_SIZE:
-            log("Resource rejected: too large (" + str(r.total_data_size) + "B)", LOG_ERROR)
+            reject = "too large (" + str(r.total_data_size) + "B)"
+        elif r.total_segments > 1 or r.segment_index > 1:
+            reject = "multi-segment (" + str(r.segment_index) + "/" + str(r.total_segments) + ")"
+        if reject:
+            log("Resource rejected: " + reject, LOG_ERROR)
             cancel_data = link._token.encrypt(r.hash)
             from .packet import Packet, LinkDestination
             cancel_pkt = Packet(

@@ -35,6 +35,11 @@ def _try_native():
 
 _try_native()
 
+
+def have_native():
+    return _native is not None
+
+
 if _native:
     from ..log import log, LOG_VERBOSE
     log("Ed25519/X25519: native C module loaded", LOG_VERBOSE)

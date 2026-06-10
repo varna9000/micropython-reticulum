@@ -104,17 +104,19 @@ class Identity:
     @staticmethod
     def _remember_ratchet(destination_hash, ratchet):
         try:
-            if destination_hash in Identity.known_ratchets:
-                if Identity.known_ratchets[destination_hash] == ratchet:
-                    return
-            Identity.known_ratchets[destination_hash] = ratchet
+            # Re-announces refresh the received time, like upstream.
+            Identity.known_ratchets[destination_hash] = (ratchet, time.time())
         except Exception as e:
             log("Could not remember ratchet: " + str(e), LOG_ERROR)
 
     @staticmethod
     def get_ratchet(destination_hash):
-        if destination_hash in Identity.known_ratchets:
-            return Identity.known_ratchets[destination_hash]
+        entry = Identity.known_ratchets.get(destination_hash)
+        if entry:
+            ratchet, received = entry
+            if time.time() < received + const.RATCHET_EXPIRY:
+                return ratchet
+            del Identity.known_ratchets[destination_hash]
         return None
 
     @staticmethod

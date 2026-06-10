@@ -1,8 +1,21 @@
 # µReticulum Minimal MessagePack
 # Implements the subset needed for LXMF: float64, bytes, str, list, dict, None, int, bool
+# Ext types decode to opaque Ext objects (preserved on repack, not interpreted)
 # Wire-compatible with reference umsgpack / msgpack
 
 import struct
+
+
+class Ext:
+    """Opaque msgpack extension value (e.g. timestamp, app-defined types).
+    Preserved as-is so unknown field types from newer clients survive an
+    unpack/repack round trip instead of raising."""
+    def __init__(self, type, data):
+        self.type = type  # raw unsigned type byte (0-255)
+        self.data = data
+
+    def __eq__(self, other):
+        return isinstance(other, Ext) and self.type == other.type and self.data == other.data
 
 
 def packb(obj):
@@ -89,6 +102,26 @@ def packb(obj):
             parts.append(packb(v))
         return b''.join(parts)
 
+    elif isinstance(obj, Ext):
+        n = len(obj.data)
+        t = bytes([obj.type])
+        if n == 1:
+            return b'\xd4' + t + obj.data
+        elif n == 2:
+            return b'\xd5' + t + obj.data
+        elif n == 4:
+            return b'\xd6' + t + obj.data
+        elif n == 8:
+            return b'\xd7' + t + obj.data
+        elif n == 16:
+            return b'\xd8' + t + obj.data
+        elif n <= 0xff:
+            return b'\xc7' + bytes([n]) + t + obj.data
+        elif n <= 0xffff:
+            return b'\xc8' + struct.pack(">H", n) + t + obj.data
+        else:
+            return b'\xc9' + struct.pack(">I", n) + t + obj.data
+
     else:
         raise TypeError("Cannot pack type: " + str(type(obj)))
 
@@ -150,6 +183,24 @@ def _unpack(data, offset):
         n = struct.unpack_from(">I", data, offset + 1)[0]
         return bytes(data[offset + 5:offset + 5 + n]), offset + 5 + n
 
+    # Ext8
+    elif b == 0xc7:
+        n = data[offset + 1]
+        t = data[offset + 2]
+        return Ext(t, bytes(data[offset + 3:offset + 3 + n])), offset + 3 + n
+
+    # Ext16
+    elif b == 0xc8:
+        n = struct.unpack_from(">H", data, offset + 1)[0]
+        t = data[offset + 3]
+        return Ext(t, bytes(data[offset + 4:offset + 4 + n])), offset + 4 + n
+
+    # Ext32
+    elif b == 0xc9:
+        n = struct.unpack_from(">I", data, offset + 1)[0]
+        t = data[offset + 5]
+        return Ext(t, bytes(data[offset + 6:offset + 6 + n])), offset + 6 + n
+
     # Float32
     elif b == 0xca:
         return struct.unpack_from(">f", data, offset + 1)[0], offset + 5
@@ -189,6 +240,12 @@ def _unpack(data, offset):
     # Int64
     elif b == 0xd3:
         return struct.unpack_from(">q", data, offset + 1)[0], offset + 9
+
+    # Fixext 1/2/4/8/16
+    elif 0xd4 <= b <= 0xd8:
+        n = 1 << (b - 0xd4)
+        t = data[offset + 1]
+        return Ext(t, bytes(data[offset + 2:offset + 2 + n])), offset + 2 + n
 
     # Str8
     elif b == 0xd9:
