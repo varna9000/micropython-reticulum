@@ -105,3 +105,69 @@ RATCHET_INTERVAL      = const(30 * 60)  # 30 min
 import math as _math
 ENCRYPTED_MDU = _math.floor((MDU - TOKEN_OVERHEAD - KEYSIZE // 16) / AES128_BLOCKSIZE) * AES128_BLOCKSIZE - 1
 PLAIN_MDU = MDU
+
+# ---------------------------------------------------------------------------
+# Transport routing / relay (directed forwarding) — see firmware transport plan
+# ---------------------------------------------------------------------------
+
+# Pathfinder parameters (subset of reference RNS Transport)
+PATHFINDER_R           = const(1)          # announce retransmit retries
+PATHFINDER_G           = const(5)          # retry grace period (s)
+PATHFINDER_RW          = 0.5               # random rebroadcast window (s) — float
+LOCAL_REBROADCASTS_MAX = const(2)          # back off after N neighbour rebroadcasts
+ANNOUNCE_CAP           = 0.02              # max fraction of interface airtime for announces
+MAX_HOPS               = const(16)         # mesh hop limit (reference RNS uses 128)
+
+# Routing-table expiry (seconds)
+PATH_EXPIRY            = const(60 * 60 * 24)    # 1 day
+REVERSE_TIMEOUT       = const(8 * 60)          # 8 minutes
+LINK_ENTRY_TIMEOUT    = const(15 * 60)         # link-table entry lifetime
+
+# Routing-table caps (RAM-bounded for MCU)
+MAX_REVERSE_TABLE     = const(32)
+MAX_LINK_TABLE        = const(16)
+MAX_ANNOUNCE_TABLE    = const(16)
+MAX_PACKET_CACHE      = const(32)
+MAX_PACKET_HASHLIST   = const(512)
+
+# Maintenance / flood-control (Phase 5/6)
+CULL_INTERVAL         = const(5)           # seconds between table-maintenance passes
+PERSIST_INTERVAL      = const(300)         # seconds between path-table flash writes
+ANNOUNCE_RATE_WINDOW  = const(60)          # per-source announce rate window (s)
+ANNOUNCE_RATE_MAX     = const(6)           # max announces/source/window before throttling rebroadcast
+
+# path_table entry: [timestamp, next_hop, hops, expires, recv_if, announce_hash, emitted]
+IDX_PT_TIMESTAMP      = const(0)
+IDX_PT_NEXT_HOP       = const(1)
+IDX_PT_HOPS           = const(2)
+IDX_PT_EXPIRES        = const(3)
+IDX_PT_RECV_IF        = const(4)
+IDX_PT_ANNOUNCE       = const(5)
+IDX_PT_EMITTED        = const(6)
+
+# reverse_table entry: [recv_if, outbound_if, timestamp]
+IDX_RT_RECV_IF        = const(0)
+IDX_RT_OUTB_IF        = const(1)
+IDX_RT_TIMESTAMP      = const(2)
+
+# link_table entry: [ts, next_hop, nh_if, rem_hops, recv_if, hops, dest, validated, proof_tmo]
+IDX_LT_TIMESTAMP      = const(0)
+IDX_LT_NEXT_HOP       = const(1)
+IDX_LT_NH_IF          = const(2)
+IDX_LT_REM_HOPS       = const(3)
+IDX_LT_RECV_IF        = const(4)
+IDX_LT_HOPS           = const(5)
+IDX_LT_DEST           = const(6)
+IDX_LT_VALIDATED      = const(7)
+IDX_LT_PROOF_TMO      = const(8)
+
+# announce_table entry: [ts, retransmit_tmo, retries, recv_from, hops, raw, lcl_rbrd, blk_rbrd, attchd_if]
+IDX_AT_TIMESTAMP      = const(0)
+IDX_AT_RTMO           = const(1)
+IDX_AT_RETRIES        = const(2)
+IDX_AT_RECV_FROM      = const(3)
+IDX_AT_HOPS           = const(4)
+IDX_AT_RAW            = const(5)
+IDX_AT_LCL_RBRD       = const(6)
+IDX_AT_BLK_RBRD       = const(7)
+IDX_AT_ATTCHD_IF      = const(8)

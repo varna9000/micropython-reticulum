@@ -118,9 +118,11 @@ class TCPClientInterface(Interface):
             # the transport server routes these via its link_table.
             if len(data) >= 19 and (data[0] & 0x40) == 0x00 and (data[0] & 0x03) != 0x01:
                 from ..transport import Transport
-                transport_id = Transport.path_table.get(data[2:18])
-                if transport_id:
+                from .. import const
+                _entry = Transport.path_table.get(data[2:18])
+                if _entry:
                     # Set HDR_2 (bit 6) + TRANSPORT (bit 4), keep other bits
+                    transport_id = _entry[const.IDX_PT_NEXT_HOP]
                     data = bytes([data[0] | 0x50]) + data[1:2] + transport_id + data[2:]
 
             # Apply IFAC after transport wrapping, before framing

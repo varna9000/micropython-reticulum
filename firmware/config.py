@@ -7,9 +7,13 @@ Edit this file to configure your node. Uncomment the interface(s) you need.
 from lora_boards import LORA_BOARDS
 
 # ---- Node settings ----
-WIFI_SSID = "AP"
-WIFI_PASS = "pass"
+WIFI_SSID = "YOUR_WIFI_SSID"      # <- your WiFi network name
+WIFI_PASS = "YOUR_WIFI_PASSWORD"  # <- your WiFi password
 NODE_NAME = "ESP32s3"
+
+# WebREPL login password (4-9 chars) for over-the-network control at
+# ws://<node-ip>:8266/  (started by boot.py). Change it from the default.
+WEBREPL_PASSWORD = "changeme"
 
 # DEBUG levels: 0 = silent, 1 = messages & announces only, 2 = full debug
 DEBUG = 2
@@ -20,7 +24,10 @@ DEBUG = 2
 # Multiple interfaces can be active at the same time (e.g. WiFi + LoRa).
 CONFIG = {
     "loglevel": 3,
-    "enable_transport": False,
+    # True = this node RELAYS for others (a transport router); False = leaf node.
+    # The example you run decides the role: example_transport_router = pure relay,
+    # example_node = LXMF inbox (and also relays if this is True).
+    "enable_transport": True,
 
     # LoRa board pinout presets (see firmware/lora_boards.py). An interface
     # below references one with "board": "<name>"; the preset's pins are merged
@@ -139,29 +146,29 @@ CONFIG = {
         #
         {
             "type": "LoRaInterface",
-            "board": "esp32s3_cam_sx1262",
-            "name": "LoRa SX1262 CAM",
+            "board": "xiao_esp32s3_sx1262",   # XIAO ESP32-S3 + Wio-SX1262 kit
+            "name": "LoRa",
             "enabled": True,
             "freq_khz": 868800,
             "sf": 8,
             "bw": "125",
             "coding_rate": 5,
-            "tx_power": 20,
+            "tx_power": 22,
             "preamble_len": 8,
             "crc_en": True,
             "syncword": 0x1424,
         },
 
-        # ---- TCP Client ----
-        # Connects to a remote RNS TCP server (TCPServerInterface).
-        # Uses HDLC framing, wire-compatible with reference Reticulum.
-        #{
-        #   "type": "TCPClientInterface",
-        #   "name": "VarnaTransport",
-        #   "enabled": True,
-        #   "target_host": "rn.varnatransport.com",
-        #   "target_port": 4243,
-        #},
+        # ---- TCP Client (the WiFi/IP side of a transport bridge) ----
+        # Connects OUT to a remote RNS TCPServerInterface (rnsd / MeshChat on the
+        # LAN, or a public transport node). HDLC-framed, wire-compatible with RNS.
+        {
+            "type": "TCPClientInterface",
+            "name": "WiFi TCP",
+            "enabled": True,
+            "target_host": "192.168.1.10",   # <- your RNS TCP server IP / hostname
+            "target_port": 4243,
+        },
 
         # ---- Serial (for RNode / wired link) ----
         # {

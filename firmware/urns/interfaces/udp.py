@@ -55,6 +55,10 @@ class UDPInterface(Interface):
         self.forward_ip = config.get("forward_ip", None)
         self.forward_port = config.get("forward_port", 4242)
         self.bitrate = config.get("bitrate", 10000000)  # ~10Mbps WiFi
+        # WiFi/IP can carry far more than the LoRa-sized base MTU. A larger
+        # HW_MTU also sizes the recv buffer so full-size relayed packets
+        # (RNS MTU + IFAC framing) are not truncated. Matches reference RNS UDP.
+        self.HW_MTU = config.get("hw_mtu", 1064)
 
         # Auto-detect subnet broadcast if not specified
         if self.forward_ip is None or self.forward_ip == "255.255.255.255":
@@ -193,7 +197,7 @@ class UDPInterface(Interface):
                     continue
 
                 try:
-                    data, addr = self._socket.recvfrom(self.mtu)
+                    data, addr = self._socket.recvfrom(self.HW_MTU)
                     if data:
                         log("UDP recv " + str(len(data)) + "B from " + str(addr), LOG_DEBUG)
                         self.process_incoming(data)

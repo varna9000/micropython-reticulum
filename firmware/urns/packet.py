@@ -121,10 +121,10 @@ class Packet:
                 and self.transport_id is None
                 and self.packet_type in (const.PKT_DATA, const.PKT_LINKREQUEST)):
             from .transport import Transport
-            _tid = Transport.path_table.get(self.destination_hash)
-            if _tid is not None:
+            _entry = Transport.path_table.get(self.destination_hash)
+            if _entry is not None:
                 self.header_type = const.HDR_2
-                self.transport_id = _tid
+                self.transport_id = _entry[const.IDX_PT_NEXT_HOP]
                 self.flags = self._get_packed_flags()
 
         self.header = b""

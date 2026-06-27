@@ -22,11 +22,24 @@ _level_names = {
 }
 
 
+# Bounded in-memory ring of recent log lines, for the optional HTTP monitor.
+_LOG_RING = []
+_LOG_RING_MAX = 100
+
+
+def get_log_ring():
+    return _LOG_RING
+
+
 def log(msg, level=LOG_NOTICE):
     if loglevel >= level:
         try:
             ln = _level_names.get(level, "????")
-            print("[%d][%s] %s" % (time.time(), ln, str(msg)))
+            line = "[%d][%s] %s" % (time.time(), ln, str(msg))
+            print(line)
+            _LOG_RING.append(line)
+            if len(_LOG_RING) > _LOG_RING_MAX:
+                _LOG_RING.pop(0)
         except:
             pass
 

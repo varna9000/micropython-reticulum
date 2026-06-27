@@ -20,6 +20,14 @@ class Interface:
         self.mode = Interface.MODE_FULL
         self.bitrate = 0
         self.mtu = 500
+        # Directed-routing attributes (used by Transport relay forwarding).
+        # HW_MTU = largest single RNS packet this interface can carry on the
+        # wire; used for link-MTU clamping at transit. OUT/IN gate egress/ingress.
+        # Guard so a subclass class-attribute default (e.g. TCP's 16384) wins.
+        if not hasattr(self, "HW_MTU"):
+            self.HW_MTU = 500
+        self.OUT = True
+        self.IN = True
 
         # Statistics
         self.rxb = 0

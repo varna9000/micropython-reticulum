@@ -30,6 +30,10 @@ class LoRaInterface(Interface):
         name = config.get("name", "LoRa SX1262")
         super().__init__(name)
 
+        # Max on-air RNS packet: RNode protocol splits >254B into 2 frames
+        # (max 508B total). Used for link-MTU clamping at transit.
+        self.HW_MTU = 508
+
         # External SPI + bus arbitration (for shared SPI, e.g. T-Deck)
         self._external_spi = config.get("spi", None)
         self._spi_acquire = config.get("spi_acquire", None)

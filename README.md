@@ -417,21 +417,41 @@ Add `networkname` and/or `passphrase` to *any* interface to require authenticati
 
 The optional `ifac_size` (default 16 bytes) controls the IFAC tag length and must match the server.
 
-### Transport mode (bridge two interfaces)
+### Transport mode (full routing — turn a node into a relay)
 
-Set `enable_transport: True` to relay packets between interfaces — e.g. WiFi ↔ LoRa, so a LoRa-only node can reach the wider Reticulum network.
+Set `enable_transport: True` and the node becomes a **Reticulum transport router**: it forwards traffic between its interfaces so a LoRa-only mesh reaches the wider network and back. It is wire-compatible with reference RNS — a µReticulum router can sit transparently in a path between reference RNS, MeshChat, Sideband or NomadNet nodes.
+
+This is **directed routing, not blind flooding**: the node learns routes from announces and forwards each packet on the *one* correct interface toward its destination, extending range without saturating the mesh. [`example_transport_router.py`](firmware/example_transport_router.py) is a ready-made LoRa ↔ WiFi/TCP router built on it.
 
 ```python
 CONFIG = {
-    "enable_transport": True,
+    "enable_transport": True,                   # this node relays for others
     "interfaces": [
-        { "type": "UDPInterface",  ... },
-        { "type": "LoRaInterface", ... },
+        { "type": "LoRaInterface",      ... },  # the LoRa mesh side
+        { "type": "TCPClientInterface", ... },  # the IP side (rnsd / MeshChat); or a UDPInterface
     ],
 }
 ```
 
-Forwarded announces are rewritten from HDR_1 to HDR_2 with the bridge node's identity hash, so downstream nodes learn the correct path back.
+**What it carries** — everything, multi-hop, wire-compatible:
+
+| Traffic | How the router handles it |
+|---|---|
+| **Announces** | re-broadcast with the router's transport id stamped in (so downstream nodes learn the route back), with jitter, retries, neighbour-suppression and per-source rate-limiting |
+| **Opportunistic messages** (single-packet LXMF) | directed forward to the next-hop interface via the path table; the delivery **proof** returns along the recorded reverse path |
+| **Link sessions** (MeshChat / Sideband / NomadNet) | a link table is built from the transit `LINKREQUEST`; in-link traffic is routed both ways, the link proof returns, and the link **MTU is clamped** at the LoRa↔IP boundary so packets still fit on the air |
+| **Resource transfers** (large messages, ≤ 16 KB) | ride the link table automatically |
+| **Path requests** | answered on demand by replaying the cached announce; unknown routes trigger recursive discovery |
+
+Routing state lives in RAM-bounded tables: `path_table` (dest → next-hop + interface + hop count), `reverse_table` (proof return), `link_table` (link/resource transit), plus a small cache of recent announces.
+
+**Resilience** (built for an open, long-running mesh): routing tables expire and are **purged when an interface drops** (WiFi-flap recovery); per-source announce rate-limiting and hard table caps prevent runaway memory; optional **strict link-proof validation** (native-gated Ed25519, ~17 ms); **blackholing** of misbehaving identities; and the **path table persists to flash** so a reboot isn't a mesh blackout.
+
+**Watching it work**: every forward logs a `Relay …` line at `NOTICE` and bumps a counter, so you can follow relay activity in the console. The router example also serves a plain-HTTP dashboard on the LAN showing live `RELAYED ann/data/link/proof` counts, the path table, and the log stream.
+
+**Running it headless**: a transport router usually runs without a USB cable, so it wants WiFi up at boot and a way back in to control it. [`boot.py`](firmware/boot.py) can bring up **WiFi + WebREPL** automatically on every reset — but it ships **commented out**, so a plain leaf node (LoRa-only, sensor, proxy) boots straight to the REPL instead of sitting through a needless ~15 s WiFi connect. Uncomment the execution block at the bottom of `boot.py` **only on a transport node**; you can then reach it at `ws://<node-ip>:8266/` (log in with `WEBREPL_PASSWORD` from `config.py`) to start/stop the router and push fixes over the air.
+
+> A transport router wants the RAM headroom of an ESP32-S3 (PSRAM is ideal). Forwarding is single-instance (no shared-instance or tunnel interfaces) — most useful as a **LoRa ↔ IP gateway**.
 
 ### Probe responder (rnprobe)
 
@@ -822,7 +842,7 @@ uP-reticulum/
         ├── identity.py          # Identity, key generation, announce validation
         ├── destination.py       # Addressing, encryption, announces
         ├── packet.py            # Packet framing, proof generation, receipts
-        ├── transport.py         # Routing, announce handling, interfaces
+        ├── transport.py         # Directed routing / relay, path tables, announce propagation
         ├── link.py              # Reticulum Links (ECDH, RPC)
         ├── resource.py          # Resource protocol (segmented data)
         ├── lxmf.py              # LXMF message format, LXMRouter

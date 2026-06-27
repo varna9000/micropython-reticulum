@@ -20,6 +20,8 @@ from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
 import gc
 gc.collect()
 
+ANNOUNCE_INTERVAL=1800 #30 min
+
 # Camera settings.
 # Default is VGA + WebP: capture a clean q90 JPEG, re-encode to WebP at a very
 # low quality. The clean (noise-free) source compresses beautifully, so VGA fits
@@ -29,14 +31,19 @@ CAM_RESOLUTION = "vga"   # 640x480
 CAM_QUALITY = 90         # JPEG capture quality (higher = better/cleaner WebP source)
 CAM_FB_COUNT = 2         # frame buffers; 2 needed so a q90 JPEG doesn't overflow (FB-OVF)
 CAM_FORMAT = "webp"      # "webp" (default) or "jpg"
-CAM_WEBP_QUALITY = 1     # WebP quality 0..100; from a clean source q1 ~7 KB at VGA.
-                         # Raise for crisper: q5 ~9 KB, q10 ~11 KB, q20 ~14 KB (all fit).
+CAM_WEBP_QUALITY = 25    # WebP quality 0..100; low q destroys color (amplifies pink cast).
+                         # q10 ~5 KB, q25 ~10 KB, q40 ~14 KB (all fit the 16 KB limit).
 CAM_WEBP_SCALE = 0       # downscale during decode: 0/1/2/3 = 1/1, 1/2, 1/4, 1/8
 CAM_WEBP_METHOD = 4      # WebP effort 0..6 (higher = slower/smaller; VGA m4 ~7 s)
 CAM_MAX_BYTES = 15500    # ceiling; WebP quality auto-lowered to stay under the 16 KB limit
 CAM_EXPOSURE = None  # None = auto-exposure; int (~0..1200) = fixed exposure time
 CAM_AE_LEVEL = 0     # auto-exposure brightness bias -2..+2 (lower if overexposed)
-CAM_WARMUP = 12      # frames discarded so auto-exposure can settle
+CAM_GAINCEILING = 0  # 0..6 (2x..128x); 0 prevents gain amplifying a bright scene
+CAM_BRIGHTNESS = 0   # DSP brightness -2..+2 (cosmetic, does not affect sensor exposure)
+CAM_CONTRAST = 0     # DSP contrast -2..+2 (boost amplifies artifacts before WebP compress)
+CAM_SATURATION = -1  # DSP color saturation -2..+2 (slight reduce mutes OV2640 pink cast)
+CAM_WB_MODE = 0      # white balance: 0=auto, 1=sunny, 2=cloudy, 3=office, 4=home
+CAM_WARMUP = 25      # frames on cold init for AEC convergence (subsequent captures reuse)
 CAM_VFLIP = True     # vertical flip
 CAM_HMIRROR = True   # horizontal mirror
 CAM_LED_PIN = 48     # onboard NeoPixel (RGB) pin; turned off at boot. None = leave it alone
@@ -60,6 +67,11 @@ _CAM_SETTINGS = {
     "night":        "CAM_NIGHT",
     "exposure":     "CAM_EXPOSURE",
     "ae_level":     "CAM_AE_LEVEL",
+    "gainceiling":  "CAM_GAINCEILING",
+    "brightness":   "CAM_BRIGHTNESS",
+    "contrast":     "CAM_CONTRAST",
+    "saturation":   "CAM_SATURATION",
+    "wb_mode":      "CAM_WB_MODE",
     "warmup":       "CAM_WARMUP",
     "vflip":        "CAM_VFLIP",
     "hmirror":      "CAM_HMIRROR",
@@ -79,6 +91,11 @@ _CAM_HELP = {
     "night":        "night mode on/off: long exposure + gain + flash (dim/grainy, slow)",
     "exposure":     "None = auto-exposure, or int ~0..1200 = fixed exposure time",
     "ae_level":     "auto-exposure brightness bias -2..+2 (lower = darker)",
+    "gainceiling":  "None = driver default, or 0..6 (2x..128x) to cap auto-gain",
+    "brightness":   "post-sensor brightness -2..+2 (0 = neutral)",
+    "contrast":     "post-sensor contrast -2..+2 (higher = punchier)",
+    "saturation":   "color saturation -2..+2 (higher = more vivid)",
+    "wb_mode":      "white balance: 0=auto, 1=sunny, 2=cloudy, 3=office, 4=home",
     "warmup":       "frames discarded so auto-exposure can settle",
     "vflip":        "vertical flip on/off",
     "hmirror":      "horizontal mirror on/off",
@@ -102,7 +119,9 @@ def camera_config(settings=False, help=False, **kwargs):
                     "resolution", "quality", "format",
                     "webp_quality", "webp_scale", "webp_method",
                     "flash", "flash_threshold", "night",
-                    "exposure", "ae_level", "warmup", "vflip", "hmirror"):
+                    "exposure", "ae_level", "gainceiling",
+                    "brightness", "contrast", "saturation", "wb_mode",
+                    "warmup", "vflip", "hmirror"):
             lines.append("  " + key + " - " + _CAM_HELP[key])
         return "\n".join(lines)
 
@@ -152,12 +171,17 @@ def capture_image():
         # Best-effort for near-dark — dim, grainy and slow, but recognizable.
         return capture(path=None, resolution=CAM_RESOLUTION, quality=CAM_QUALITY,
                        vflip=CAM_VFLIP, hmirror=CAM_HMIRROR,
+                       brightness=CAM_BRIGHTNESS, contrast=CAM_CONTRAST,
+                       saturation=CAM_SATURATION, wb_mode=CAM_WB_MODE,
                        warmup_frames=CAM_WARMUP, fb_count=CAM_FB_COUNT,
                        xclk=5000000, exposure=1200, gainceiling=6,
                        flash="on", flash_pin=CAM_LED_PIN, flash_color=CAM_FLASH_COLOR)
     return capture(path=None, resolution=CAM_RESOLUTION, quality=CAM_QUALITY,
                    vflip=CAM_VFLIP, hmirror=CAM_HMIRROR,
                    exposure=CAM_EXPOSURE, ae_level=CAM_AE_LEVEL,
+                   gainceiling=CAM_GAINCEILING,
+                   brightness=CAM_BRIGHTNESS, contrast=CAM_CONTRAST,
+                   saturation=CAM_SATURATION, wb_mode=CAM_WB_MODE,
                    warmup_frames=CAM_WARMUP, fb_count=CAM_FB_COUNT,
                    flash=CAM_FLASH, flash_pin=CAM_LED_PIN,
                    flash_threshold=CAM_FLASH_THRESHOLD, flash_color=CAM_FLASH_COLOR)
@@ -253,7 +277,9 @@ def _format_settings():
     for key in ("resolution", "quality", "format",
                 "webp_quality", "webp_scale", "webp_method",
                 "flash", "flash_threshold", "night",
-                "exposure", "ae_level", "warmup", "vflip", "hmirror"):
+                "exposure", "ae_level", "gainceiling",
+                "brightness", "contrast", "saturation", "wb_mode",
+                "warmup", "vflip", "hmirror"):
         lines.append("  " + key + " = " + str(s[key]))
     return "\n".join(lines)
 
@@ -264,7 +290,7 @@ def _coerce_setting(key, val):
         return val.lower()
     if key in ("vflip", "hmirror", "night"):
         return val.lower() in ("1", "true", "on", "yes")
-    if key == "exposure" and val.lower() in ("auto", "none", "off"):
+    if key in ("exposure", "gainceiling") and val.lower() in ("auto", "none", "off"):
         return None
     # quality, webp_quality, webp_scale, webp_method, ae_level, warmup, exposure
     return int(val)
@@ -450,7 +476,7 @@ def main():
 
     async def reannounce_loop():
         while True:
-            await asyncio.sleep(120)
+            await asyncio.sleep(ANNOUNCE_INTERVAL)
             try:
                 router.announce()
             except:

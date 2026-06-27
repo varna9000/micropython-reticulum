@@ -191,6 +191,18 @@ class Reticulum:
             except Exception as e:
                 log("Interface " + itype + " init failed: " + str(e), LOG_ERROR)
 
+        # Path-table persistence (transport nodes): reload cached routes on boot so
+        # a reboot isn't a mesh blackout. Periodic saves run in job_loop; a final
+        # save runs on shutdown. Interfaces must be registered first (above) so a
+        # restored route can re-resolve its interface by name.
+        _storage = getattr(self, "storagepath", None)
+        if Transport.transport_enabled and _storage:
+            try:
+                Transport.persist_path = _storage + "/path_table"
+                Transport.load_path_table(Transport.persist_path)
+            except Exception as e:
+                log("Path persistence init failed: " + str(e), LOG_ERROR)
+
         self._setup_probe_destination()
 
     def _setup_probe_destination(self):
@@ -257,6 +269,11 @@ class Reticulum:
     def shutdown(self):
         """Clean shutdown - persist state and close interfaces"""
         log("Shutting down µReticulum", LOG_NOTICE)
+        if Transport.persist_path is not None:
+            try:
+                Transport.save_path_table(Transport.persist_path)
+            except Exception:
+                pass
         Transport.stop()
         Identity.persist_data()
         for iface in self.interfaces:

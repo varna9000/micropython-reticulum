@@ -45,6 +45,7 @@ RESOLUTIONS = {
 }
 
 _cam = None
+_cam_key = None   # (resolution, pixel_format, fb_count, xclk) — reinit only when these change
 
 
 def _flash_set(pin, color):
@@ -94,7 +95,75 @@ def _measure_brightness(warmup=4):
                 pass
 
 
-def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False, warmup_frames=8, vflip=True, hmirror=False, exposure=None, ae_level=None, fb_count=1, xclk=20000000, gainceiling=None, flash="off", flash_pin=None, flash_threshold=50, flash_settle=3, flash_color=(255, 150, 210)):
+def _apply_settings(quality, grayscale, exposure, ae_level, brightness, contrast,
+                    saturation, wb_mode, gainceiling, vflip, hmirror):
+    """Write sensor/DSP registers on the live camera. Cheap SCCB writes, no reset."""
+    if not grayscale:
+        _cam.set_quality(quality)
+
+    try:
+        _cam.set_whitebal(True)
+        _cam.set_awb_gain(True)
+    except AttributeError:
+        pass
+    try:
+        _cam.set_gain_ctrl(True)
+        if gainceiling is not None:
+            _cam.set_gainceiling(int(gainceiling))
+    except AttributeError:
+        pass
+    try:
+        _cam.set_aec2(True)
+    except AttributeError:
+        pass
+
+    # SDE mutual-interference bug (esp32-camera driver): each set_brightness /
+    # set_contrast / set_saturation writes the SDE enable byte with ONLY its
+    # own bit, zeroing the others. Only the last call is actually active.
+    # Workaround: call all three, then re-write the combined enable byte via
+    # BPADDR/BPDATA so all effects stay on.
+    try:
+        _cam.set_brightness(int(brightness))
+        _cam.set_contrast(int(contrast))
+        _cam.set_saturation(int(saturation))
+    except AttributeError:
+        pass
+    try:
+        # BPADDR=0x00 -> SDE enable byte; 0x07 = sat+hue | sat2 | bright+contrast
+        _cam.set_reg(0x7C, 0xFF, 0x00)
+        _cam.set_reg(0x7D, 0xFF, 0x07)
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        _cam.set_wb_mode(int(wb_mode))
+    except AttributeError:
+        pass
+
+    try:
+        _cam.set_vflip(vflip)
+        _cam.set_hmirror(hmirror)
+    except AttributeError:
+        pass
+
+    try:
+        if exposure is None:
+            _cam.set_exposure_ctrl(True)
+            if ae_level is not None:
+                _cam.set_ae_level(int(ae_level))
+        else:
+            _cam.set_exposure_ctrl(False)
+            _cam.set_aec_value(int(exposure))
+    except AttributeError:
+        pass
+
+
+def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False,
+            warmup_frames=8, vflip=True, hmirror=False, exposure=None,
+            ae_level=None, brightness=0, contrast=0, saturation=0, wb_mode=0,
+            fb_count=1, xclk=20000000, gainceiling=None,
+            flash="off", flash_pin=None, flash_threshold=50, flash_settle=3,
+            flash_color=(255, 150, 210)):
     """Capture a JPEG image.
 
     Args:
@@ -102,9 +171,9 @@ def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False, wa
         resolution: one of "qqvga","qvga","cif","hvga","vga","svga","xga","hd","sxga","uxga"
         quality: JPEG quality 10-63 (lower = smaller file, 10 is fine for LoRa)
         grayscale: if True, capture in grayscale (smaller file, no color)
-        warmup_frames: discard this many frames before keeping one so auto
-            exposure/gain/white-balance can converge. Too few -> over/under
-            exposed. 8-15 is usually enough; raise it if images come out bright.
+        warmup_frames: discard this many frames on first init so AEC/AGC/AWB can
+            converge from a cold sensor reset. Subsequent captures reuse the live
+            sensor — AEC stays converged, so only a few flush frames are needed.
         vflip: flip image vertically (board-orientation dependent)
         hmirror: mirror image horizontally
         exposure: None = auto-exposure (AEC, the default). An int fixes the
@@ -112,12 +181,20 @@ def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False, wa
             to this value (~0..1200, higher = longer/brighter).
         ae_level: when using auto-exposure, bias its target brightness, -2..+2
             (negative = darker). Use this if auto images are over/under exposed.
+        brightness: post-sensor brightness adjustment, -2..+2 (0 = neutral).
+            DSP-level — does not affect sensor exposure.
+        contrast: post-sensor contrast adjustment, -2..+2 (0 = neutral).
+            Raise to counteract washed-out / flat images.
+        saturation: color saturation adjustment, -2..+2 (0 = neutral).
+        wb_mode: white balance preset: 0=auto, 1=sunny, 2=cloudy, 3=office,
+            4=home. Use 1 (sunny) outdoors to correct green/cyan cast.
         fb_count: number of frame buffers. Use 2 for high JPEG quality (q~80+),
             where a single buffer can overflow (cam_hal: FB-OVF) on large frames.
         xclk: camera clock in Hz (default 20 MHz). Lowering it (e.g. 5 MHz, the
             driver's practical floor) lengthens the max exposure for dark scenes.
-        gainceiling: None to leave default, or 0..6 (2x..128x) to cap auto-gain
-            higher for low light (brighter but noisier).
+        gainceiling: None to leave default (8x), or 0..6 (2x..128x) to cap
+            auto-gain. Use 0 in daylight to prevent gain amplifying a saturated
+            signal.
         flash: "off" (default), "on" (always), or "auto" (fire when dark). Uses the
             onboard NeoPixel on flash_pin as a fill light.
         flash_pin: GPIO of the onboard NeoPixel used as flash (e.g. 48). None = no flash.
@@ -130,11 +207,7 @@ def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False, wa
     Returns:
         file size in bytes
     """
-    global _cam
-    if _cam is not None:
-        _cam.deinit()
-        _cam = None
-        gc.collect()
+    global _cam, _cam_key
 
     fs = RESOLUTIONS.get(resolution.lower())
     if fs is None:
@@ -142,70 +215,67 @@ def capture(path="/photo.jpg", resolution="vga", quality=30, grayscale=False, wa
         return 0
 
     pf = PixelFormat.GRAYSCALE if grayscale else PixelFormat.JPEG
+    key = (resolution.lower(), pf, fb_count, xclk)
 
-    # Decide the flash before configuring the real capture — the auto brightness
-    # probe needs the sensor to itself. flash: "off" | "on" | "auto".
+    # Decide the flash before anything else — the auto brightness probe needs
+    # the sensor to itself (it creates its own tiny grayscale camera).
     fire = (flash == "on")
     if flash == "auto" and flash_pin is not None:
+        # The brightness probe deinits _cam because it needs the sensor.
+        if _cam is not None:
+            _cam.deinit()
+            _cam = None
+            _cam_key = None
+            gc.collect()
         b = _measure_brightness()
         fire = b < flash_threshold
         print("[Camera] brightness={} thr={} -> flash {}".format(
             b, flash_threshold, "ON" if fire else "off"))
 
-    _cam = Camera(
-        data_pins=DATA_PINS,
-        pclk_pin=13, vsync_pin=6, href_pin=7,
-        sda_pin=4, scl_pin=5, xclk_pin=15,
-        xclk_freq=xclk,
-        pixel_format=pf,
-        frame_size=fs,
-        fb_count=fb_count,
-    )
+    # Reuse the live camera if resolution/format/xclk haven't changed.
+    # Avoids a full sensor reset — AEC/AGC/AWB state is preserved.
+    reinit = (_cam is None or _cam_key != key)
 
-    if not grayscale:
-        _cam.set_quality(quality)
+    if reinit:
+        if _cam is not None:
+            _cam.deinit()
+            _cam = None
+            gc.collect()
 
-    # gainceiling 0..6 (2x..128x): raise it in low light so AGC can amplify.
-    if gainceiling is not None:
-        try:
-            _cam.set_gain_ctrl(True)
-            _cam.set_gainceiling(int(gainceiling))
-        except AttributeError:
-            pass
+        _cam = Camera(
+            data_pins=DATA_PINS,
+            pclk_pin=13, vsync_pin=6, href_pin=7,
+            sda_pin=4, scl_pin=5, xclk_pin=15,
+            xclk_freq=xclk,
+            pixel_format=pf,
+            frame_size=fs,
+            fb_count=fb_count,
+        )
+        _cam_key = key
 
-    try:
-        _cam.set_vflip(vflip)
-        _cam.set_hmirror(hmirror)
-    except AttributeError:
-        pass  # older camera-API builds without flip/mirror setters
+    _apply_settings(quality, grayscale, exposure, ae_level, brightness, contrast,
+                    saturation, wb_mode, gainceiling, vflip, hmirror)
 
-    # Exposure: None keeps auto-exposure (AEC); an int fixes the exposure time.
-    # Set before the warmup loop so the discarded frames settle at this value.
-    try:
-        if exposure is None:
-            _cam.set_exposure_ctrl(True)
-            if ae_level is not None:
-                _cam.set_ae_level(int(ae_level))   # bias auto target darker/brighter
-        else:
-            _cam.set_exposure_ctrl(False)
-            _cam.set_aec_value(int(exposure))
-    except AttributeError:
-        pass  # older camera-API builds without exposure setters
+    if reinit:
+        # Cold start: AEC needs many frames to converge from sensor reset.
+        for _ in range(warmup_frames):
+            _cam.capture()
+            time.sleep_ms(50)
+    else:
+        # Warm: AEC is already converged, just flush stale frame buffers.
+        for _ in range(min(3, fb_count)):
+            _cam.capture()
+            time.sleep_ms(30)
 
-    # Discard frames so auto exposure/gain/AWB can converge. A short gap lets
-    # the sensor integrate and apply new register values between frames.
-    for _ in range(warmup_frames):
-        _cam.capture()
-        time.sleep_ms(50)
     if fire and flash_pin is not None:
-        _flash_set(flash_pin, flash_color)          # fill flash on (green-corrected white)
-        for _ in range(max(1, flash_settle)):       # let the LED light a full frame
+        _flash_set(flash_pin, flash_color)
+        for _ in range(max(1, flash_settle)):
             _cam.capture()
             time.sleep_ms(40)
     img = _cam.capture()
     img_bytes = bytes(img)
     if fire and flash_pin is not None:
-        _flash_set(flash_pin, (0, 0, 0))            # flash off
+        _flash_set(flash_pin, (0, 0, 0))
     gc.collect()
 
     if path:
