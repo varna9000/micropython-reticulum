@@ -22,6 +22,16 @@ Radio/network parameters (freq, sf, bw, coding_rate, tx_power, syncword, …) ar
 NOT board-specific — they must match across every node on the mesh — so they
 stay in the interface entry in config.py.
 
+A preset may also carry an optional "battery" block describing this board's
+battery-voltage sense, resolved by battery_config() and read by
+peripherals/adc_reader.py:
+
+    "battery": {"pin": 1, "divider": 2.0},   # ADC GPIO, vbat = vpin * divider
+
+Omit it on boards with no battery->ADC path — e.g. the XIAO ESP32-S3, which has
+none (Meshtastic itself ships that board with battery monitoring disabled). An
+inline CONFIG["battery"] dict overrides the preset's block, same as the pins.
+
 To add a board: copy a block below, rename the key, and set its pins. Any key
 you also set in the interface entry overrides the preset (handy for one-off
 tweaks without editing this file).
@@ -41,6 +51,9 @@ LORA_BOARDS = {
         "reset_pin": 42,
         "dio2_rf_sw": True,
         "dio3_tcxo_millivolts": 1800,
+        # No "battery" block: this board has no BAT->ADC path (Meshtastic ships
+        # it with battery monitoring disabled). Only add one if YOU solder a
+        # divider, e.g.:  "battery": {"pin": 1, "divider": 2.0},  # BAT->A0, x2
     },
 
     # Seeed XIAO ESP32-S3 + Wio-SX1262 (header board variant).
@@ -114,3 +127,31 @@ LORA_BOARDS = {
     },
 
 }
+
+
+def battery_config(config):
+    """Battery ADC params for the active board, or None if it has no battery sense.
+
+    Resolves the board named by the active LoRa interface (or a top-level
+    "board" key) in this registry and returns its "battery" block, e.g.
+    {"pin": 1, "divider": 2.0}. An inline CONFIG["battery"] dict overrides the
+    preset (explicit wins, same rule as the LoRa pin presets). Returns None when
+    neither is present -> the node has no battery sense, so readings are skipped
+    rather than reporting noise from a floating pin.
+    """
+    name = config.get("board")
+    if not name:
+        for iface in config.get("interfaces", []):
+            if iface.get("board"):
+                name = iface["board"]
+                break
+    preset = config.get("lora_boards", {}).get(name, {}).get("battery") if name else None
+    inline = config.get("battery")
+    if not preset and not inline:
+        return None
+    merged = {}
+    if preset:
+        merged.update(preset)
+    if inline:
+        merged.update(inline)
+    return merged

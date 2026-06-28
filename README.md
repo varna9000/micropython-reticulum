@@ -523,7 +523,7 @@ Modular hardware drivers in `firmware/peripherals/` with a uniform contract:
 | `sds011_sensor` | SDS011 PM2.5 / PM10 UART sensor | Returns particulate matter readings when an incoming message contains `sensor` |
 | `neopixel_led` | WS2812 NeoPixel LED | `red`, `green`, `blue`, `off` |
 | `gpio_control` | Any GPIO pin | `<name> on`, `<name> off`, `<name>?` |
-| `adc_reader` | ADC analog input | `<name>` — returns voltage + raw value |
+| `adc_reader` | ADC analog input (battery, …) | `<name>`, or `sensor` for all channels — returns voltage (×divider) + raw |
 | `camera` | OV2640 (camera firmware required) | Used by `example_camera_node.py` |
 
 ### Wiring example
@@ -543,14 +543,22 @@ bme_sensor.init(i2c)
 # import peripherals.gpio_control as gpio
 # gpio.init({"lamp": (2, "OUT")})
 
-# import peripherals.adc_reader as adc_reader
-# adc_reader.init({"battery": 1})
+# Battery: board-declared. Reads automatically IF the active board's preset in
+# lora_boards.py has a "battery" block. The XIAO ESP32-S3 has no BAT->ADC path
+# (Meshtastic disables battery on it too), so this stays off on that board.
+import peripherals.adc_reader as adc_reader
+from lora_boards import battery_config
+_battery = battery_config(CONFIG)
+if _battery:
+    adc_reader.init({"battery": _battery["pin"]}, dividers={"battery": _battery.get("divider", 1.0)})
 
 # import peripherals.sds011_sensor as sds011_sensor
 # sds011_sensor.init(uart_id=1, tx_pin=43, rx_pin=44)
 
-active_peripherals = [bme_sensor]
+active_peripherals = [bme_sensor] + ([adc_reader] if _battery else [])
 ```
+
+**Battery voltage** is treated as board-fixed wiring: declare it once in the board's preset in `lora_boards.py` as `"battery": {"pin": 1, "divider": 2.0}` (the ADC GPIO and the `vbat = vpin × divider` ratio), and `adc_reader` picks it up automatically — `battery_config(CONFIG)` resolves it and an inline `CONFIG["battery"]` overrides. Boards with no battery→ADC path simply omit the block. **Note:** the Seeed XIAO ESP32-S3 (including the Wio-SX1262 "Meshtastic" kit) has *no* such path — there's no onboard divider, and [Meshtastic itself ships that board with battery monitoring disabled](https://github.com/meshtastic/firmware/blob/master/variants/esp32s3/seeed_xiao_s3/variant.h) (`BATTERY_PIN -1`). So battery stays off unless you solder your own divider (`BAT+` → 2×200 kΩ → `GND`, midpoint to A0/GPIO1) and add the block with `divider: 2.0`.
 
 The SDS011 also needs `sds011_sensor.start()` inside the async event loop (see `run_with_announce()` in the example files) — that schedules a 5-minute duty cycle so the fan only runs during measurement.
 
