@@ -881,9 +881,13 @@ JRESULT jd_mcu_output(
                         pc++;                       /* Step forward chroma pointer every pixel */
                     }
                     yy = *py++;         /* Get Y component */
-                    *pix++ = /*B*/ BYTECLIP(yy + ((int)(1.772 * CVACC) * cb) / CVACC);
-                    *pix++ = /*G*/ BYTECLIP(yy - ((int)(0.344 * CVACC) * cb + (int)(0.714 * CVACC) * cr) / CVACC);
+                    /* Stock ChaN order: R,G,B. The LVGL-wrapper variant this
+                     * file came from emitted B,G,R, which reached
+                     * WebPPictureImportRGB() and swapped red/blue in every
+                     * camera image (pink skies, blue foliage). */
                     *pix++ = /*R*/ BYTECLIP(yy + ((int)(1.402 * CVACC) * cr) / CVACC);
+                    *pix++ = /*G*/ BYTECLIP(yy - ((int)(0.344 * CVACC) * cb + (int)(0.714 * CVACC) * cr) / CVACC);
+                    *pix++ = /*B*/ BYTECLIP(yy + ((int)(1.772 * CVACC) * cb) / CVACC);
                 }
             }
         }

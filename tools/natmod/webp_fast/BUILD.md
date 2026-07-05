@@ -41,7 +41,10 @@ libwebp call produces garbage / crashes.)
   and zero-init `map[]` (a latent upstream bug, hit when the alpha histogram is empty).
 
 `tjpgd/` is ChaN's TJpgDec with the LVGL wrapper stripped (`JD_FORMAT=0` RGB888,
-`JD_USE_SCALE=1`).
+`JD_USE_SCALE=1`). **Note:** the LVGL variant emits pixels in B,G,R order (LVGL's
+color format); this reached `WebPPictureImportRGB()` and swapped red/blue in every
+camera image (pink skies, blue foliage). Fixed in `tjpgd.c` mcu_output() by
+restoring stock ChaN R,G,B store order.
 
 ## Build
 ```sh

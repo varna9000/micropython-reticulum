@@ -31,7 +31,7 @@ CAM_RESOLUTION = "vga"   # 640x480
 CAM_QUALITY = 90         # JPEG capture quality (higher = better/cleaner WebP source)
 CAM_FB_COUNT = 2         # frame buffers; 2 needed so a q90 JPEG doesn't overflow (FB-OVF)
 CAM_FORMAT = "webp"      # "webp" (default) or "jpg"
-CAM_WEBP_QUALITY = 25    # WebP quality 0..100; low q destroys color (amplifies pink cast).
+CAM_WEBP_QUALITY = 40    # WebP quality 0..100; low q smears chroma (washed-out color).
                          # q10 ~5 KB, q25 ~10 KB, q40 ~14 KB (all fit the 16 KB limit).
 CAM_WEBP_SCALE = 0       # downscale during decode: 0/1/2/3 = 1/1, 1/2, 1/4, 1/8
 CAM_WEBP_METHOD = 4      # WebP effort 0..6 (higher = slower/smaller; VGA m4 ~7 s)
@@ -41,7 +41,8 @@ CAM_AE_LEVEL = 0     # auto-exposure brightness bias -2..+2 (lower if overexpose
 CAM_GAINCEILING = 0  # 0..6 (2x..128x); 0 prevents gain amplifying a bright scene
 CAM_BRIGHTNESS = 0   # DSP brightness -2..+2 (cosmetic, does not affect sensor exposure)
 CAM_CONTRAST = 0     # DSP contrast -2..+2 (boost amplifies artifacts before WebP compress)
-CAM_SATURATION = -1  # DSP color saturation -2..+2 (slight reduce mutes OV2640 pink cast)
+CAM_SATURATION = 0   # DSP color saturation -2..+2 (the old -1 was masking the R/B
+                     # channel swap in webp_fast's JPEG decoder, fixed there)
 CAM_WB_MODE = 0      # white balance: 0=auto, 1=sunny, 2=cloudy, 3=office, 4=home
 CAM_WARMUP = 25      # frames on cold init for AEC convergence (subsequent captures reuse)
 CAM_VFLIP = True     # vertical flip
