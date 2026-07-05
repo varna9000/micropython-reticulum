@@ -202,7 +202,7 @@ isn't installed.
 - **Config**: WiFi creds.
 - **How to use**: send `image` from MeshChat / Sideband to get a photo back (delivered via a Link + Resource transfer). Send `help` or `settings` to see the live controls.
 - **Image format & quality**: resolution, WebP quality, downscale, exposure, flash and night mode are all adjustable at runtime by messaging the node — see **[Camera image settings (JPEG & WebP)](docs/CAMERA_WEBP.md)** for every parameter and the size/quality trade-offs.
-- **WebP encoder**: the optional native module `webp_fast.mpy` in `/lib` (built from [`tools/natmod/webp_fast/`](tools/natmod/webp_fast/)). Without it the node simply sends JPEG.
+- **WebP encoder**: the optional native module `webp_fast.mpy` in `/lib` (built from [`tools/natmod/webp_fast/`](tools/natmod/webp_fast/)). Without it the node simply sends JPEG. *Note: builds before July 2026 swapped red/blue in every image (pink skies, blue foliage) — a BGR/RGB mismatch in the JPEG decoder, since fixed; update `/lib/webp_fast_xtensawin.mpy` if your photos look like that.*
 
 For direct (non-LXMF) capture you can also use the peripheral module from the REPL:
 
@@ -336,6 +336,10 @@ The pins are merged in at startup. Any pin set explicitly on the interface overr
 - `syncword`: `0x1424` — Reticulum/RNode-compatible.
 - `dio2_rf_sw`: `True` on Wio-SX1262 (radio drives DIO2 as RF switch internally).
 - `dio3_tcxo_millivolts`: `1800` on Wio-SX1262 (TCXO). `None` to disable (crystal-only modules).
+- `lbt_rssi`: CSMA/listen-before-talk busy threshold in dBm (default `-100`, `None` disables). Every frame TX first probes the channel and defers in short random slots while it's busy — same etiquette as RNode firmware, essential when a repeater shares the channel.
+- `lbt_max_ms`: max LBT wait before transmitting anyway (default `2000`).
+
+The receive path is also hardened against **transparent repeaters** (devices that re-transmit every frame verbatim): duplicate halves of split packets (>254 B) are detected and dropped instead of corrupting reassembly.
 
 ### E32 LoRa interface (EByte E32-900T20D)
 
@@ -505,6 +509,8 @@ Two modes:
 - **Corroboration** — leave `trusted_nodes` empty. The clock is set only once `min_sources` *distinct* peers agree on the time within `tolerance` seconds (the median is applied). No single node can move your clock, so you don't have to trust anyone in particular.
 
 The sync runs **once per power-on**, only while the clock is still unset — it never re-adjusts mid-session. A reboot resets the RTC to 2000, and the node re-syncs from the next qualifying packet. After syncing, both outgoing message timestamps and announce timestamps are correct for the rest of the session.
+
+The moment the clock syncs, the node **automatically re-announces** all its destinations: announces sent before sync carry a year-2000 emission timestamp and are rejected as stale replays by peers that knew the node from a previous boot — without the re-announce, a rebooted node would stay invisible to the mesh until its next periodic announce.
 
 > The ESP32's internal RTC keeps time only while powered — it does not survive a full power cycle. For instant-correct time at boot with no peer audible, add a battery-backed RTC (e.g. DS3231 over I²C).
 
