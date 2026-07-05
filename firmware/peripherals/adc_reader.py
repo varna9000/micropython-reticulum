@@ -39,13 +39,46 @@ def init(adc_map, dividers=None, atten="11db"):
         channels[name] = (adc, float(dividers.get(name, 1.0)))
 
 
-def _read(name, adc, divider):
-    raw = 0
+def init_battery(config):
+    """Configure the 'battery' channel from the active board's preset
+    (lora_boards.battery_config) — the board owns the pin + divider. NO-OP when
+    the board declares no battery (e.g. stock XIAO ESP32-S3), so callers can call
+    this unconditionally and just list this module as a peripheral; process() and
+    battery_voltage() return None when nothing is wired. Returns the params/None."""
+    from lora_boards import battery_config
+    bat = battery_config(config)
+    if bat:
+        init({"battery": bat["pin"]}, dividers={"battery": bat.get("divider", 1.0)})
+    return bat
+
+
+def _raw(adc):
+    s = 0
     for _ in range(_SAMPLES):
-        raw += adc.read_u16()
-    raw //= _SAMPLES
-    voltage = raw * 3.3 / 65535 * divider
-    return "{}: {:.2f}V (raw {})".format(name, voltage, raw)
+        s += adc.read_u16()
+    return s // _SAMPLES
+
+
+def read_voltage(name):
+    """Scaled voltage (float) for one channel, or None if not configured.
+
+    Handy for code that wants the number rather than the formatted string
+    (e.g. the transport router's web dashboard battery gauge)."""
+    ch = channels.get(name)
+    if not ch:
+        return None
+    adc, divider = ch
+    return _raw(adc) * 3.3 / 65535 * divider
+
+
+def battery_voltage():
+    """Battery-channel voltage (float), or None if no battery is configured."""
+    return read_voltage("battery")
+
+
+def _read(name, adc, divider):
+    raw = _raw(adc)
+    return "{}: {:.2f}V (raw {})".format(name, raw * 3.3 / 65535 * divider, raw)
 
 
 def process(content):

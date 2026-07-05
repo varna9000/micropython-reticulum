@@ -122,6 +122,11 @@ def main():
     rns.setup_interfaces()
     gc.collect()
 
+    # Battery gauge (board-declared in lora_boards.py; self-disables if the board
+    # has no divider). The dashboard reads it live via adc_reader.battery_voltage.
+    import peripherals.adc_reader as adc_reader
+    adc_reader.init_battery(CONFIG)
+
     online = [str(i) for i in Transport.interfaces if i.online]
     print("=" * 56)
     print(" µReticulum Transport Router:", NODE_NAME)
@@ -131,6 +136,9 @@ def main():
     print(" Free memory       :", gc.mem_free(), "bytes")
     print(" Persistence       :", "on -> " + str(Transport.persist_path)
           if Transport.persist_path else "off")
+    _vbat = adc_reader.battery_voltage()
+    if _vbat is not None:
+        print(" Battery           : %.2f V" % _vbat)
     if WEB_MONITOR:
         print(" Web monitor       : http://" + ip + ":" + str(WEB_PORT) + "/")
     print(" Bridging LoRa <-> WiFi. Ctrl+C to stop.")
@@ -140,17 +148,21 @@ def main():
     async def status_loop():
         while True:
             await asyncio.sleep(30)
-            print("[router] paths=%d reachable=%d links=%d reverse=%d cache=%d "
-                  "queued=%d | RELAYED ann=%d data=%d link=%d proof=%d | free=%d" % (
-                      len(Transport.path_table),
-                      len(Transport.reachable_destinations),
-                      len(Transport.link_table),
-                      len(Transport.reverse_table),
-                      len(Transport.packet_cache),
-                      len(Transport.announce_table),
-                      Transport.relayed_announces, Transport.relayed_data,
-                      Transport.relayed_links, Transport.relayed_proofs,
-                      gc.mem_free()))
+            line = ("[router] paths=%d reachable=%d links=%d reverse=%d cache=%d "
+                    "queued=%d | RELAYED ann=%d data=%d link=%d proof=%d | free=%d" % (
+                        len(Transport.path_table),
+                        len(Transport.reachable_destinations),
+                        len(Transport.link_table),
+                        len(Transport.reverse_table),
+                        len(Transport.packet_cache),
+                        len(Transport.announce_table),
+                        Transport.relayed_announces, Transport.relayed_data,
+                        Transport.relayed_links, Transport.relayed_proofs,
+                        gc.mem_free()))
+            _vbat = adc_reader.battery_voltage()
+            if _vbat is not None:
+                line += " | batt=%.2fV" % _vbat
+            print(line)
             gc.collect()
 
     # Run the Transport event loop (job_loop + per-interface poll loops) plus
@@ -162,7 +174,9 @@ def main():
         if WEB_MONITOR:
             try:
                 import webmonitor
-                asyncio.create_task(webmonitor.serve(node_name=NODE_NAME, port=WEB_PORT))
+                asyncio.create_task(webmonitor.serve(
+                    node_name=NODE_NAME, port=WEB_PORT,
+                    battery_fn=adc_reader.battery_voltage))
             except Exception as e:
                 print("Web monitor failed:", e)
         await _original_run()

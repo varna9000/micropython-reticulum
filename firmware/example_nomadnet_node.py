@@ -38,24 +38,18 @@ bme_sensor.init(i2c)
 # import peripherals.gpio_control as gpio
 # gpio.init({"lamp": (2, "OUT")})
 
-# Battery sensing is board-declared: it activates ONLY if the active board's
-# preset in lora_boards.py carries a "battery" block. The XIAO ESP32-S3 has none
-# (no BAT->ADC path), so this is a no-op here; a board that does have one reads
-# it with no edits to this file.
+# Battery: board-declared. init_battery() pulls the pin/divider from the board
+# preset (lora_boards.py) and self-disables if the board has no divider (e.g. the
+# XIAO ESP32-S3), so it's safe to list unconditionally — it reports nothing when
+# there's no battery wired.
 import peripherals.adc_reader as adc_reader
-from lora_boards import battery_config
-_battery = battery_config(CONFIG)
-if _battery:
-    adc_reader.init({"battery": _battery["pin"]},
-                    dividers={"battery": _battery.get("divider", 1.0)})
+adc_reader.init_battery(CONFIG)
 
 # import peripherals.sds011_sensor as sds011_sensor
 # sds011_sensor.init(uart_id=1, tx_pin=43, rx_pin=44)  # also add sds011_sensor to active_peripherals
 
 # List all active peripherals here (must match uncommented imports above)
-active_peripherals = [bme_sensor]
-if _battery:
-    active_peripherals.append(adc_reader)
+active_peripherals = [bme_sensor, adc_reader]
 
 gc.collect()
 

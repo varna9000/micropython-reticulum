@@ -20,6 +20,7 @@ from urns import Transport, const
 from urns.log import get_log_ring, log, LOG_NOTICE, LOG_ERROR
 
 _NODE = "uRNS"
+_BATTERY_FN = None      # set by serve(); returns battery volts (float) or None
 
 _PAGE = """<!DOCTYPE html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -47,6 +48,7 @@ async function tick(){
   node.textContent=d.node+'  '+(d.transport_id||'').slice(0,16);
   info.innerHTML='<span class=pill>transport '+(d.transport_enabled?'<span class=on>ON</span>':'<span class=off>OFF</span>')+'</span>'
     +'<span class=pill>free '+((d.free_mem/1024)|0)+' KB</span>'
+    +(d.battery?'<span class=pill>batt <b>'+d.battery.v.toFixed(2)+' V</b> ~'+d.battery.pct+'%</span>':'')
     +d.interfaces.map(i=>'<span class=pill>'+esc(i.name)+' '+(i.online?'<span class=on>&#10003;</span>':'<span class=off>&#10007;</span>')+'</span>').join('');
   const t=d.tables,r=d.relayed;
   tables.innerHTML='<span class=pill>paths '+t.paths+'</span><span class=pill>reachable '+t.reachable+'</span>'
@@ -66,6 +68,20 @@ tick();
 </script></body></html>""".encode()
 
 
+def _lipo_pct(v):
+    """Rough single-cell LiPo state-of-charge (%) from resting voltage — approximate."""
+    pts = ((3.30, 0), (3.60, 10), (3.70, 25), (3.80, 50),
+           (3.90, 65), (4.00, 80), (4.10, 92), (4.20, 100))
+    if v <= pts[0][0]:
+        return 0
+    if v >= pts[-1][0]:
+        return 100
+    for (v0, p0), (v1, p1) in zip(pts, pts[1:]):
+        if v < v1:
+            return int(p0 + (p1 - p0) * (v - v0) / (v1 - v0))
+    return 100
+
+
 def _snapshot():
     T = Transport
     paths = []
@@ -78,6 +94,14 @@ def _snapshot():
                 "via": e[const.IDX_PT_NEXT_HOP].hex()[:8],
                 "iface": str(rif) if rif is not None else "?",
             })
+        except Exception:
+            pass
+    batt = None
+    if _BATTERY_FN:
+        try:
+            v = _BATTERY_FN()
+            if v is not None:
+                batt = {"v": round(v, 2), "pct": _lipo_pct(v)}
         except Exception:
             pass
     return {
@@ -96,6 +120,7 @@ def _snapshot():
             "links": T.relayed_links, "proofs": T.relayed_proofs,
         },
         "paths": paths,
+        "battery": batt,
         "log": list(get_log_ring()),
     }
 
@@ -142,10 +167,14 @@ async def _handle(reader, writer):
     gc.collect()
 
 
-async def serve(node_name="uRNS", host="0.0.0.0", port=80):
-    """Start the HTTP monitor and keep its task alive. Run as an asyncio task."""
-    global _NODE
+async def serve(node_name="uRNS", host="0.0.0.0", port=80, battery_fn=None):
+    """Start the HTTP monitor and keep its task alive. Run as an asyncio task.
+
+    battery_fn: optional callable returning battery volts (float) or None; when
+    given, the value is shown as a gauge in the dashboard header."""
+    global _NODE, _BATTERY_FN
     _NODE = node_name
+    _BATTERY_FN = battery_fn
     try:
         await asyncio.start_server(_handle, host, port)
         log("Web monitor listening on http://<node-ip>:" + str(port) + "/  (LAN, plain HTTP)", LOG_NOTICE)

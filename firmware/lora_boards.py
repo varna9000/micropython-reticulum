@@ -51,9 +51,13 @@ LORA_BOARDS = {
         "reset_pin": 42,
         "dio2_rf_sw": True,
         "dio3_tcxo_millivolts": 1800,
-        # No "battery" block: this board has no BAT->ADC path (Meshtastic ships
-        # it with battery monitoring disabled). Only add one if YOU solder a
-        # divider, e.g.:  "battery": {"pin": 1, "divider": 2.0},  # BAT->A0, x2
+        # Stock XIAO ESP32-S3 has NO BAT->ADC path (Meshtastic ships it with
+        # battery disabled). This board has an ADDED external divider:
+        #   BAT+ -> 220k -> A0 (GPIO1) -> 220k -> GND   (midpoint on A0)
+        # divider calibrated against a multimeter: 2.09 (not the ideal 2.0 — the
+        # 220k pair + the S3 ADC read ~4% low). REMOVE this block on an
+        # un-modified XIAO, or it will report noise from a floating pin.
+        "battery": {"pin": 1, "divider": 2.09},
     },
 
     # Seeed XIAO ESP32-S3 + Wio-SX1262 (header board variant).
