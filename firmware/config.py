@@ -135,6 +135,9 @@ CONFIG = {
         #   sf: 7-12 (higher = longer range, slower)
         #   bw: "125"/"250"/"500" (lower = longer range, slower)
         #   tx_power: -9 to +22 dBm     syncword: 0x1424 (Reticulum/RNode)
+        #   lbt_rssi: CSMA/listen-before-talk busy threshold in dBm; TX defers
+        #             while channel RSSI >= this (default -100, None disables)
+        #   lbt_max_ms: max LBT wait before transmitting anyway (default 2000)
         #
         # Available board presets (see lora_boards.py):
         #   "xiao_esp32s3_sx1262"          XIAO ESP32-S3 + Wio-SX1262 (kit)

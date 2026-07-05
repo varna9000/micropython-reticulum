@@ -6,10 +6,17 @@
 # Upper nibble = random sequence, bit 0 = FLAG_SPLIT.
 # Packets > 254 bytes are split across exactly 2 frames (max 508B).
 # Compatible with RNode firmware and reference Reticulum.
+#
+# CSMA / listen-before-talk: every frame TX is gated on a live-RSSI channel
+# probe with bounded random backoff (see _lbt_wait) — same etiquette as RNode
+# firmware's CSMA. The radio is half-duplex and would otherwise transmit
+# blind into ongoing transmissions (e.g. a repeater still re-transmitting
+# the frame we are replying to).
 
 import os
 import gc
 import time
+from micropython import const
 from . import Interface
 from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
 
@@ -22,6 +29,10 @@ _FRAME_PAYLOAD = const(254)
 
 # Reassembly timeout (seconds)
 _REASM_TIMEOUT = const(15)
+
+# Window (seconds) in which verbatim copies of a just-completed split packet
+# (e.g. from a transparent repeater) are recognised and dropped.
+_REASM_DUP_WINDOW = const(5)
 
 
 class LoRaInterface(Interface):
@@ -67,12 +78,26 @@ class LoRaInterface(Interface):
         self._crc_en = config.get("crc_en", True)
         self._syncword = config.get("syncword", 0x1424)
 
+        # Listen-before-talk (CSMA). Before each frame TX the modem's live
+        # RSSI is probed; while it reads at or above lbt_rssi dBm the send
+        # is deferred in short random slots, up to lbt_max_ms total (then
+        # transmit regardless). Protects request/reply turnarounds (link
+        # proofs, LXMF acks) from colliding with any station we can hear.
+        # Set "lbt_rssi": None to disable.
+        self._lbt_rssi = config.get("lbt_rssi", -100)
+        self._lbt_max_ms = config.get("lbt_max_ms", 2000)
+        self._lbt_waits = 0    # sends that deferred at least one slot
+        self._lbt_forced = 0   # sends forced after waiting the full cap
+
         self._modem = None
 
         # Split-packet reassembly state
         self._reasm_buf = None
         self._reasm_seq = None
         self._reasm_time = 0
+        # Fingerprint of the last completed split packet, to drop verbatim
+        # repeater copies of its halves: (seq, len1, head1, len2, head2, time)
+        self._reasm_done = None
 
         try:
             self._init_modem()
@@ -146,51 +171,161 @@ class LoRaInterface(Interface):
         if self._spi_release:
             self._spi_release()
 
+    def _channel_busy(self):
+        """One live-RSSI probe (SX126x GetRssiInst, opcode 0x15) while the
+        modem sits in continuous RX. Raw value maps to -raw/2 dBm; busy when
+        at or above the lbt_rssi threshold. A failed probe reads as clear so
+        LBT can never block transmission."""
+        try:
+            res = self._modem._cmd("B", 0x15, n_read=2)   # [status, rssi_raw]
+            return res[1] <= (-2 * self._lbt_rssi)
+        except Exception:
+            return False
+
+    def _lbt_wait(self):
+        """Listen-before-talk: while the channel shows RF energy, sleep a
+        random 15-64ms slot and re-probe, bounded by lbt_max_ms (then send
+        anyway so a jammed channel can't stall the node). Random slots keep
+        two waiting nodes from firing simultaneously when the channel clears.
+        Blocks the event loop like send() itself does — bounded and brief."""
+        if self._lbt_rssi is None:
+            return
+        deadline = time.ticks_add(time.ticks_ms(), self._lbt_max_ms)
+        waited = False
+        while True:
+            self._acquire()
+            busy = self._channel_busy()
+            self._release()
+            if not busy:
+                break
+            if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+                self._lbt_forced += 1
+                log("LoRa LBT cap hit, transmitting anyway", LOG_DEBUG)
+                break
+            waited = True
+            time.sleep_ms(15 + (os.urandom(1)[0] % 50))
+        if waited:
+            self._lbt_waits += 1
+
+    def _send_frame(self, frame):
+        """Single physical frame TX, LBT-gated, modem left in continuous RX
+        (the RSSI probe requires RX mode, so this invariant feeds _lbt_wait)."""
+        self._lbt_wait()
+        self._acquire()
+        try:
+            self._modem.send(frame)
+            self._modem.start_recv(continuous=True)
+        finally:
+            self._release()
+
     def process_outgoing(self, data):
         if not self.online or not self._modem:
             return False
 
-        self._acquire()
+        if len(data) > 2 * _FRAME_PAYLOAD:
+            log("LoRa drop: " + str(len(data)) + "B exceeds " + str(2 * _FRAME_PAYLOAD), LOG_DEBUG)
+            return False
+
+        data = self.ifac_sign(data)
+
+        # RNode-compatible header: random seq in upper nibble.
+        # The SX1262 driver sends all bytes faithfully — no FIFO
+        # offset bug.  The old b'\x00' dummy byte was actually
+        # being sent over the air as a valid RNode header (seq=0,
+        # no split).  Now we send a proper header instead.
+        header = os.urandom(1)[0] & _SEQ_MASK
+
         try:
-            if len(data) > 2 * _FRAME_PAYLOAD:
-                log("LoRa drop: " + str(len(data)) + "B exceeds " + str(2 * _FRAME_PAYLOAD), LOG_DEBUG)
-                return False
-
-            data = self.ifac_sign(data)
-
-            # RNode-compatible header: random seq in upper nibble.
-            # The SX1262 driver sends all bytes faithfully — no FIFO
-            # offset bug.  The old b'\x00' dummy byte was actually
-            # being sent over the air as a valid RNode header (seq=0,
-            # no split).  Now we send a proper header instead.
-            header = os.urandom(1)[0] & _SEQ_MASK
-
             if len(data) > _FRAME_PAYLOAD:
-                # Split into 2 frames (RNode protocol)
+                # Split into 2 frames (RNode protocol). LBT gates each frame
+                # separately, so the second half defers while e.g. a repeater
+                # is still re-transmitting the first.
                 header |= _FLAG_SPLIT
                 hdr = bytes([header])
-                self._modem.send(hdr + data[:_FRAME_PAYLOAD])
-                self._modem.send(hdr + data[_FRAME_PAYLOAD:])
+                self._send_frame(hdr + data[:_FRAME_PAYLOAD])
+                self._send_frame(hdr + data[_FRAME_PAYLOAD:])
                 log("LoRa TX " + str(len(data)) + "B split seq=" + hex(header >> 4), LOG_DEBUG)
             else:
                 # Single frame
-                self._modem.send(bytes([header]) + data)
+                self._send_frame(bytes([header]) + data)
                 log("LoRa TX " + str(len(data)) + "B", LOG_DEBUG)
 
-            self._modem.start_recv(continuous=True)
             self.txb += len(data)
             self.tx += 1
             self._last_activity = time.time()
             return True
         except Exception as e:
             log("LoRa send error: " + str(e), LOG_ERROR)
+            self._acquire()
             try:
                 self._modem.start_recv(continuous=True)
             except:
                 pass
-            return False
-        finally:
             self._release()
+            return False
+
+    def _rx_frame(self, raw):
+        """Parse one received LoRa frame (RNode framing: raw[0] = header,
+        upper nibble seq, bit 0 split). Returns a complete packet's payload
+        bytes, or None while a split is pending / the frame is dropped.
+
+        Hardened against transparent repeaters that re-transmit every frame
+        verbatim: without these checks a copied frame 1 (same seq) would be
+        appended as "frame 2", corrupting every split packet — i.e. every
+        Resource part >254B (camera images, large LXMF). Transport dedup
+        can't help because reassembly sits below the packet layer."""
+        if len(raw) < 2:
+            return None
+
+        header = raw[0]
+        payload = raw[1:]
+        if not (header & _FLAG_SPLIT):
+            return payload
+
+        seq = header & _SEQ_MASK
+        now = time.time()
+
+        # Verbatim copy of a half of the split we just completed -> drop.
+        d = self._reasm_done
+        if d and d[0] == seq and now - d[5] < _REASM_DUP_WINDOW:
+            if ((len(payload) == d[1] and payload[:6] == d[2])
+                    or (len(payload) == d[3] and payload[:6] == d[4])):
+                log("LoRa split dup (completed pkt), dropped", LOG_DEBUG)
+                return None
+
+        if self._reasm_buf is None or self._reasm_seq != seq:
+            # First fragment (or new seq replaces stale one)
+            if self._reasm_buf is not None:
+                log("LoRa split seq mismatch, restarting", LOG_DEBUG)
+                self._reasm_buf = None
+                self._reasm_seq = None
+            # Frame 1 of a split is always full-size (254B payload) per the
+            # RNode protocol; anything shorter seen first is a stray second
+            # half (missed frame 1, or a late repeater copy) -> drop.
+            if len(payload) < _FRAME_PAYLOAD:
+                log("LoRa stray split tail dropped (" + str(len(payload)) + "B)", LOG_DEBUG)
+                return None
+            self._reasm_buf = bytearray(payload)
+            self._reasm_seq = seq
+            self._reasm_time = now
+            log("LoRa split frame 1: " + str(len(payload)) + "B seq=" + hex(seq >> 4), LOG_DEBUG)
+            return None
+
+        # Pending reassembly, matching seq. An identical fragment is a
+        # verbatim copy of frame 1 (repeater) -> drop, keep waiting.
+        if len(payload) == len(self._reasm_buf) and payload == self._reasm_buf:
+            log("LoRa split dup frame 1, dropped", LOG_DEBUG)
+            return None
+
+        # Genuine second fragment — complete, and fingerprint both halves.
+        len1 = len(self._reasm_buf)
+        self._reasm_buf.extend(payload)
+        pkt = bytes(self._reasm_buf)
+        self._reasm_done = (seq, len1, pkt[:6], len(payload), bytes(payload[:6]), now)
+        self._reasm_buf = None
+        self._reasm_seq = None
+        log("LoRa split frame 2: " + str(len(payload)) + "B -> " + str(len(pkt)) + "B total", LOG_DEBUG)
+        return pkt
 
     async def poll_loop(self):
         import uasyncio as asyncio
@@ -216,7 +351,9 @@ class LoRaInterface(Interface):
                     _crc_errs = getattr(self._modem, "crc_errors", 0)
                     log("LoRa diag: poll_recv True=" + str(_rx_true_count)
                         + " pkts=" + str(_rx_pkt_count)
-                        + " crc_err=" + str(_crc_errs), LOG_DEBUG)
+                        + " crc_err=" + str(_crc_errs)
+                        + " lbt=" + str(self._lbt_waits)
+                        + "/" + str(self._lbt_forced), LOG_DEBUG)
                     _rx_true_count = 0
                     _rx_pkt_count = 0
                     _last_diag = now
@@ -263,35 +400,7 @@ class LoRaInterface(Interface):
                     # "spurious byte strip" was actually stripping the
                     # RNode header, which happened to work for non-split
                     # packets.)
-                    if len(raw) < 2:
-                        await asyncio.sleep(0.05)
-                        continue
-
-                    header = raw[0]
-                    payload = raw[1:]
-
-                    if header & _FLAG_SPLIT:
-                        # Split packet — reassemble 2 frames
-                        seq = header & _SEQ_MASK
-                        if self._reasm_buf is None or self._reasm_seq != seq:
-                            # First fragment (or new seq replaces stale one)
-                            if self._reasm_buf is not None:
-                                log("LoRa split seq mismatch, restarting", LOG_DEBUG)
-                            self._reasm_buf = bytearray(payload)
-                            self._reasm_seq = seq
-                            self._reasm_time = time.time()
-                            log("LoRa split frame 1: " + str(len(payload)) + "B seq=" + hex(seq >> 4), LOG_DEBUG)
-                            pkt = None
-                        else:
-                            # Second fragment — matching sequence
-                            self._reasm_buf.extend(payload)
-                            pkt = bytes(self._reasm_buf)
-                            self._reasm_buf = None
-                            self._reasm_seq = None
-                            log("LoRa split frame 2: " + str(len(payload)) + "B -> " + str(len(pkt)) + "B total", LOG_DEBUG)
-                    else:
-                        # Non-split packet
-                        pkt = payload
+                    pkt = self._rx_frame(raw)
 
                     if pkt is not None:
                         _rx_pkt_count += 1
