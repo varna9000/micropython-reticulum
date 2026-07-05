@@ -188,6 +188,20 @@ class Link:
                 r.receive_part(packet.data)
             return
 
+        # Keepalives are raw 1-byte probes (0xFF -> reply 0xFE), never
+        # Token-encrypted — handle before decrypt (reference RNS Link).
+        if packet.context == const.CTX_KEEPALIVE:
+            self.last_activity = time.time()
+            if packet.data == b"\xff":
+                from .packet import Packet, LinkDestination
+                Packet(
+                    LinkDestination(self.link_id), b"\xfe",
+                    const.PKT_DATA, context=const.CTX_KEEPALIVE,
+                    create_receipt=False,
+                ).send()
+                log("Link " + self.link_id.hex()[:8] + " keepalive answered", LOG_DEBUG)
+            return
+
         try:
             plaintext = self._token.decrypt(packet.data)
         except Exception as e:
@@ -211,8 +225,6 @@ class Link:
             self._handle_resource_cancel(plaintext)
         elif packet.context == const.CTX_RESOURCE_RCL:
             self._handle_resource_cancel(plaintext)
-        elif packet.context == const.CTX_KEEPALIVE:
-            log("Link " + self.link_id.hex()[:8] + " keepalive", LOG_DEBUG)
         elif packet.context == const.CTX_LINKCLOSE:
             log("Link " + self.link_id.hex()[:8] + " close received", LOG_VERBOSE)
             self.status = Link.CLOSED
@@ -364,9 +376,12 @@ class Link:
             r.handle_request(plaintext)
 
     def _handle_resource_prf(self, proof_data):
-        """Handle resource proof (sender mode). Called from transport."""
+        """Handle resource proof (sender mode). Called from transport.
+        Routed by resource hash so stale transfers don't log mismatches."""
+        rhash = proof_data[:32]
         for r in list(self.outgoing_resources):
-            if r.validate_proof(proof_data):
+            if r.hash == rhash:
+                r.validate_proof(proof_data)
                 return
 
     def _handle_resource_cancel(self, plaintext):
@@ -629,6 +644,12 @@ class OutgoingLink:
                 r.receive_part(packet.data)
             return
 
+        # Keepalive responses (0xFE) are raw, never Token-encrypted — the
+        # peer answers our 0xFF probes; just refresh activity.
+        if packet.context == const.CTX_KEEPALIVE:
+            self.last_activity = time.time()
+            return
+
         try:
             plaintext = self._token.decrypt(packet.data)
         except Exception as e:
@@ -666,8 +687,10 @@ class OutgoingLink:
             r.handle_request(plaintext)
 
     def _handle_resource_prf(self, proof_data):
+        rhash = proof_data[:32]
         for r in list(self.outgoing_resources):
-            if r.validate_proof(proof_data):
+            if r.hash == rhash:
+                r.validate_proof(proof_data)
                 return
 
     def _handle_resource_cancel(self, plaintext):

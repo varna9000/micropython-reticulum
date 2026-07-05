@@ -421,8 +421,9 @@ class LXMRouter:
         """Send an LXMF message to a destination hash.
 
         Resilient delivery chain:
-          1. reuse an already-open link to the peer (DIRECT), else
-          2. send opportunistically if a path is known, else
+          1. reuse a link we previously opened to the peer (DIRECT), else
+          2. send opportunistically if a path is known (auto-upgrades to
+             DIRECT via a fresh OutgoingLink when the payload is too big), else
           3. request a path and defer the send until the route is learned.
 
         Returns the LXMessage when sent/started, True when queued pending a path,
@@ -483,20 +484,17 @@ class LXMRouter:
         return msg
 
     def _find_active_link_for(self, destination_hash):
-        """Return an existing ACTIVE link that already carries traffic for
-        this LXMF peer, or None. Used to reply to incoming link-borne
-        messages without opening a fresh OutLink (which can fail when
-        path_table has no route to the peer yet)."""
+        """Return an ACTIVE OutgoingLink we previously opened to this LXMF
+        peer, or None. Only initiator links qualify: reference LXMF wires
+        delivery callbacks on links it ACCEPTS at its delivery destination,
+        not on links it OPENED — a message sent back over the peer's own
+        link transfers and proves at the Resource layer but is silently
+        discarded by the peer's app (observed with MeshChat image replies)."""
         from .transport import Transport
         from .link import OutgoingLink
         for link in Transport.active_links:
             if link.status != 0x01:  # ACTIVE
                 continue
-            # Peer-initiated link: source_hash stamped on it when its first
-            # LXMF message arrived.
-            if getattr(link, "lxmf_source_hash", None) == destination_hash:
-                return link
-            # OutgoingLink we opened earlier to the same peer destination.
             if isinstance(link, OutgoingLink) and link.destination.hash == destination_hash:
                 return link
         return None
@@ -504,11 +502,10 @@ class LXMRouter:
     def _send_direct(self, message, destination):
         """Send LXMF message via DIRECT link delivery (link + Resource).
 
-        If an active link to the peer already exists (because the peer
-        opened one to us and sent the request over it), reuse it instead of
-        establishing a new OutLink — that path can't be resolved when the
-        peer is only reachable via a transport node we have no path entry
-        for yet.
+        Reuses an OutgoingLink we already hold to the peer, else opens a
+        fresh one (path availability is guaranteed by the has_path/
+        ensure_path gate in send_message). Never sends over a peer-initiated
+        link — see _find_active_link_for.
         """
         from .link import OutgoingLink
         from . import const
@@ -594,15 +591,6 @@ class LXMRouter:
                 reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
                 log("LXMF unverified link message (" + reason + ") from " +
                     message.source_hash.hex()[:8], LOG_NOTICE)
-
-            # Remember which LXMF peer this link carries so we can reuse it
-            # for replies instead of opening a new OutLink (which may fail
-            # when path_table doesn't yet have a route to the peer).
-            from .transport import Transport
-            for l in Transport.active_links:
-                if l.link_id == packet.destination_hash:
-                    l.lxmf_source_hash = message.source_hash
-                    break
 
             # Dedup check
             if message.hash in self.delivered_ids:
