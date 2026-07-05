@@ -387,7 +387,11 @@ class LXMRouter:
             dn = display_name.encode("utf-8") if isinstance(display_name, str) else display_name
             # [display_name, stamp_cost, supported_functionality] — upstream
             # LXMF shape; empty functionality list = no LXMF compression.
-            self.delivery_destination._default_app_data = umsgpack.packb([dn, stamp_cost, []])
+            # set_default_app_data so plain Destination.announce() calls (path
+            # responses, post-clock-sync re-announces) also carry the LXMF
+            # app_data — announce() falls back to default_app_data.
+            self.delivery_destination.set_default_app_data(
+                umsgpack.packb([dn, stamp_cost, []]))
 
         log("LXMF delivery registered: " + self.delivery_destination.hexhash, LOG_NOTICE)
         return self.delivery_destination
