@@ -93,6 +93,7 @@ class Transport:
     time_sync_tolerance = 120    # seconds
     _clock_synced = False
     _time_votes = {}             # source_hex -> clock offset (peer_unix - our_unix)
+    _announce_after_sync = False # set by _apply_clock; job_loop re-announces
 
     _jobs_running = False
     _last_job = 0
@@ -866,6 +867,12 @@ class Transport:
             machine.RTC().datetime((t[0], t[1], t[2], t[6], t[3], t[4], t[5], 0))
             Transport._clock_synced = True
             Transport._time_votes = {}
+            # Everything we announced before this moment carried a year-2000
+            # emission time, so peers who already knew us from a previous boot
+            # dropped those announces as stale replays (emission-freshness
+            # check) — the node is INVISIBLE until its next periodic announce.
+            # Re-announce with real timestamps; serviced from job_loop.
+            Transport._announce_after_sync = True
             stamp = "%04d-%02d-%02d %02d:%02d:%02d UTC" % (
                 t[0], t[1], t[2], t[3], t[4], t[5])
             msg = "Time synced from network: " + stamp
@@ -874,6 +881,24 @@ class Transport:
             log(msg, LOG_NOTICE)
         except Exception as e:
             log("Clock sync failed: " + str(e), LOG_ERROR)
+
+    @staticmethod
+    def _reannounce_local():
+        """Re-announce every registered IN SINGLE destination after the clock
+        syncs. announce() picks up each destination's _default_app_data (LXMF
+        display name etc.), so these are full-fidelity announces; LBT spaces
+        them on air."""
+        from .destination import Destination as _Dest
+        n = 0
+        for d in list(Transport.destinations):
+            if d.direction == _Dest.IN and d.type == _Dest.SINGLE:
+                try:
+                    d.announce()
+                    n += 1
+                except Exception as e:
+                    log("Post-sync re-announce error: " + str(e), LOG_DEBUG)
+        if n:
+            log("Re-announced " + str(n) + " destination(s) after clock sync", LOG_NOTICE)
 
     @staticmethod
     def has_path(destination_hash):
@@ -1427,6 +1452,12 @@ class Transport:
         while Transport._jobs_running:
             try:
                 now = time.time()
+
+                # Clock just synced: re-announce our destinations so the mesh
+                # re-learns us (pre-sync announces were freshness-rejected).
+                if Transport._announce_after_sync:
+                    Transport._announce_after_sync = False
+                    Transport._reannounce_local()
 
                 # Check receipt timeouts
                 timed_out = []
