@@ -97,23 +97,25 @@ LORA_BOARDS = {
     # display you must build the shared machine.SPI object yourself and pass it
     # in via the "spi"/"spi_acquire"/"spi_release" interface keys (bus
     # arbitration), which can't be expressed as a static preset.
-    #
-    # TODO: fill in dio1_pin / busy_pin / reset_pin / miso_pin from your working
-    # T-Deck radio.py — they are not documented in this repo.
-    # "tdeck_v1_sx1262": {
-    #     "spi_bus": 1,
-    #     "sck_pin": 40,
-    #     "mosi_pin": 41, "miso_pin": None,
-    #     "cs_pin": 9,
-    #     "busy_pin": None,
-    #     "dio1_pin": None,
-    #     "reset_pin": None,
-    #     "dio2_rf_sw": True,
-    #     "dio3_tcxo_millivolts": 3300,
-    #     "use_dcdc": True,
-    #     "spi_baudrate": 8_000_000,
-    # },
-    
+    # Pins verified on hardware by the reticulum-tdeck project.
+    "tdeck_v1_sx1262": {
+        "spi_bus": 1,
+        "sck_pin": 40,
+        "mosi_pin": 41,
+        "miso_pin": 38,
+        "cs_pin": 9,
+        "busy_pin": 13,
+        "dio1_pin": 45,
+        "reset_pin": 17,
+        "dio2_rf_sw": True,
+        "dio3_tcxo_millivolts": 3300,
+        "use_dcdc": True,
+        "spi_baudrate": 8_000_000,
+        # BAT_ADC on GPIO4 through the on-board 1:1 divider (vbat = vpin * 2)
+        "battery": {"pin": 4, "divider": 2.0},
+    },
+
+
     # HTIT-WB32LAF ESP32-S3 Heltec V4 + LoRa SX1262 + Oled SSD1315.
     # LoRa has dedicated soldered connection, should be no GPIO conflicts.
     # Pin map https://heltec.org/wp-content/uploads/2025/09/V4-pinmap-1.png
