@@ -199,6 +199,7 @@ class Resource:
         r.window_count = 0  # parts received since last request
         r.last_request_at = 0
         r.request_retries = 0
+        r.progress_callback = None  # callback(resource) — reference RNS signature
         r.sdu = link.sdu
         r.encrypted = None
         r.expected_proof = None
@@ -315,6 +316,14 @@ class Resource:
                 pct = int(self.received_count * 100 / self.total_parts)
                 log("Resource RX " + str(self.received_count) + "/" + str(self.total_parts) +
                     " (" + str(pct) + "%) " + self.hash.hex()[:8], LOG_DEBUG)
+
+                if self.progress_callback:
+                    # callback(resource) — reference RNS signature; use
+                    # get_progress()/received_count/total_parts on it.
+                    try:
+                        self.progress_callback(self)
+                    except Exception:
+                        pass
 
                 if self.received_count == self.total_parts:
                     self.assemble()

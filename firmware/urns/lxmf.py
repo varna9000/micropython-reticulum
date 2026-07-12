@@ -356,6 +356,7 @@ class LXMRouter:
 
         self._delivery_callback = None
         self._announce_callback = None
+        self._progress_callback = None
 
         self.peers = {}  # hash -> {name, timestamp, identity}
         self.delivered_ids = {}  # message_hash -> timestamp (dedup)
@@ -403,6 +404,13 @@ class LXMRouter:
     def register_announce_callback(self, callback):
         """Register callback for peer announces: callback(destination_hash, display_name)"""
         self._announce_callback = callback
+
+    def register_progress_callback(self, callback):
+        """Register callback for incoming resource transfer progress:
+        callback(resource) — reference RNS Resource progress_callback
+        signature; read resource.get_progress() or received_count/
+        total_parts on it."""
+        self._progress_callback = callback
 
     def announce(self):
         """Announce our LXMF delivery destination"""
@@ -574,7 +582,13 @@ class LXMRouter:
         """Called when a link is established to our delivery destination."""
         link.set_packet_callback(self._link_packet_received)
         link.resource_concluded_callback = self._handle_resource_concluded
+        if self._progress_callback:
+            link.resource_started_callback = self._on_resource_started
         log("LXMF link established: " + link.link_id.hex()[:8], LOG_DEBUG)
+
+    def _on_resource_started(self, resource):
+        """Wire the router's progress callback into a just-accepted resource."""
+        resource.progress_callback = self._progress_callback
 
     def _link_packet_received(self, plaintext, packet):
         """Handle single-packet LXMF message received on a link (CTX_NONE)."""
