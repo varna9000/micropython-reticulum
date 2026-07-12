@@ -6,7 +6,11 @@ import os
 import sys
 import time
 from . import const
-from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_EXTREME, LOG_NOTICE, LOG_WARNING
+from .log import log, loglevel, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_EXTREME, LOG_NOTICE, LOG_WARNING
+
+# Evaluated at import: skips per-packet log-string building on the hot path.
+# A runtime set_loglevel() change won't re-enable these two gated logs.
+_log_debug = loglevel >= LOG_DEBUG
 
 # ESP32 MicroPython counts seconds from 2000-01-01; convert to/from Unix epoch.
 _EPOCH_OFFSET = 946684800 if sys.platform == "esp32" else 0
@@ -40,7 +44,8 @@ class Transport:
     announce_handlers = []   # callables(dest_hash, app_data, packet) — local observers
     pending_links = []
     active_links = []
-    packet_hashlist = []
+    packet_hashlist = set()       # current dedup window (reference RNS shape)
+    packet_hashlist_prev = set()  # previous window, rotated in when current fills
     receipts = []
     announce_table = {}
     destination_table = {}
@@ -173,7 +178,8 @@ class Transport:
             packet.sent = True
             packet.sent_at = time.time()
 
-            log("TX " + str(len(raw)) + "B type=" + str(packet.packet_type) + " ifaces=" + str(len(Transport.interfaces)), LOG_DEBUG)
+            if _log_debug:
+                log("TX " + str(len(raw)) + "B type=" + str(packet.packet_type) + " ifaces=" + str(len(Transport.interfaces)), LOG_DEBUG)
 
             # Directed egress: when we know a multi-hop transport path to the
             # destination, transmit ONLY on that path's interface instead of
@@ -225,11 +231,16 @@ class Transport:
     @staticmethod
     def _cache_packet_hash(packet):
         packet_hash = packet.get_hash()
-        if packet_hash in Transport.packet_hashlist:
+        if (packet_hash in Transport.packet_hashlist
+                or packet_hash in Transport.packet_hashlist_prev):
             return
+        # Rotate like reference RNS: when the current window fills it becomes
+        # the previous one and a fresh set starts — O(1) membership with an
+        # effective window of 1-2x MAX_PACKET_HASHLIST hashes.
         if len(Transport.packet_hashlist) >= const.MAX_PACKET_HASHLIST:
-            Transport.packet_hashlist.pop(0)
-        Transport.packet_hashlist.append(packet_hash)
+            Transport.packet_hashlist_prev = Transport.packet_hashlist
+            Transport.packet_hashlist = set()
+        Transport.packet_hashlist.add(packet_hash)
 
     @staticmethod
     def transmit(interface, raw):
@@ -287,7 +298,8 @@ class Transport:
             return packet.hops <= 1
 
         # Deduplicate by route-independent hash.
-        if packet.packet_hash not in Transport.packet_hashlist:
+        if (packet.packet_hash not in Transport.packet_hashlist
+                and packet.packet_hash not in Transport.packet_hashlist_prev):
             return True
         # Already seen: let SINGLE announces through so re-announces and replayed
         # cached announces can refresh paths (should_add decides the no-op).
@@ -778,7 +790,8 @@ class Transport:
             if Transport._should_remember(packet):
                 Transport._cache_packet_hash(packet)
 
-            log("Inbound: type=" + str(packet.packet_type) + " dest=" + packet.destination_hash.hex(), LOG_DEBUG)
+            if _log_debug:
+                log("Inbound: type=" + str(packet.packet_type) + " dest=" + packet.destination_hash.hex(), LOG_DEBUG)
 
             # Directed transit: are we the next hop for a DATA/LINKREQUEST in
             # transport, or an in-link packet we relay? (Consumes the packet so

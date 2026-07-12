@@ -267,7 +267,8 @@ def reset_transport():
     T.active_links = []
     T.pending_links = []
     T.receipts = []
-    T.packet_hashlist = []
+    T.packet_hashlist = set()
+    T.packet_hashlist_prev = set()
     T.path_table = {}
     T.reverse_table = {}
     T.link_table = {}

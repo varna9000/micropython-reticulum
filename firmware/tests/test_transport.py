@@ -199,7 +199,7 @@ def test_filter_plain_hop_cap():
 def test_filter_resource_bypasses_dedup():
     reset_transport()
     p = _mkpkt(build_data_hdr1(DEST, context=const.CTX_RESOURCE))
-    Transport.packet_hashlist.append(p.packet_hash)      # pretend seen
+    Transport._cache_packet_hash(p)                      # pretend seen
     assert Transport.packet_filter(p) is True            # resource ctx still passes
 
 
@@ -208,7 +208,7 @@ def test_filter_dedups_data():
     raw = build_data_hdr1(DEST)
     p = _mkpkt(raw)
     assert Transport.packet_filter(p) is True
-    Transport.packet_hashlist.append(p.packet_hash)
+    Transport._cache_packet_hash(p)
     assert Transport.packet_filter(_mkpkt(raw)) is False
 
 
