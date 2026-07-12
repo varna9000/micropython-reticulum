@@ -90,6 +90,7 @@ class LoRaInterface(Interface):
         self._lbt_forced = 0   # sends forced after waiting the full cap
 
         self._modem = None
+        self.on_status = config.get("on_status", None)  # callback(online: bool)
 
         # Split-packet reassembly state
         self._reasm_buf = None
@@ -99,15 +100,42 @@ class LoRaInterface(Interface):
         # repeater copies of its halves: (seq, len1, head1, len2, head2, time)
         self._reasm_done = None
 
-        try:
-            self._init_modem()
-            self.online = True
-            log("LoRa " + self.name + " on " + str(self._freq_khz) + "kHz"
-                + " SF" + str(self._sf) + " BW" + str(self._bw)
-                + " TX" + str(self._tx_power) + "dBm", LOG_NOTICE)
-        except Exception as e:
-            log("LoRa modem init failed: " + str(e), LOG_ERROR)
-            self.online = False
+        self._init_with_retry()
+
+    def _reset_hw(self):
+        """Hardware-reset the SX1262 via the RESET pin."""
+        from machine import Pin
+        rst = Pin(self._reset_pin, Pin.OUT)
+        rst.value(0)
+        time.sleep_ms(20)
+        rst.value(1)
+        time.sleep_ms(50)
+
+    def _init_with_retry(self, max_attempts=3):
+        """Try _init_modem() up to max_attempts times with HW reset between
+        attempts — required on boards where the radio shares the SPI bus
+        (e.g. T-Deck: SX1262 + display on SPI1)."""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if attempt > 1:
+                    self._reset_hw()
+                    time.sleep_ms(200 * attempt)
+                self._init_modem()
+                self.online = True
+                log("LoRa " + self.name + " on " + str(self._freq_khz) + "kHz"
+                    + " SF" + str(self._sf) + " BW" + str(self._bw)
+                    + " TX" + str(self._tx_power) + "dBm", LOG_NOTICE)
+                if self.on_status:
+                    try:
+                        self.on_status(True)
+                    except:
+                        pass
+                return
+            except Exception as e:
+                log("LoRa modem init attempt " + str(attempt) + "/" + str(max_attempts)
+                    + " failed: " + str(e), LOG_ERROR)
+                self._modem = None
+        self.online = False
 
     def _init_modem(self):
         from machine import SPI, Pin
@@ -329,8 +357,41 @@ class LoRaInterface(Interface):
 
     async def poll_loop(self):
         import uasyncio as asyncio
+        from ..log import loglevel
+        _log_debug = loglevel >= LOG_DEBUG
 
         log("LoRa poll loop started for " + self.name, LOG_NOTICE)
+
+        # If init failed, retry with increasing backoff before giving up
+        # (shared-SPI boards may need several resets after a cold boot).
+        if not self.online:
+            _retry_delays = [2, 5, 10, 20, 30]
+            for i, delay in enumerate(_retry_delays):
+                log("LoRa offline, retry " + str(i + 1) + "/" + str(len(_retry_delays))
+                    + " in " + str(delay) + "s", LOG_NOTICE)
+                await asyncio.sleep(delay)
+                try:
+                    self._acquire()
+                    self._reset_hw()
+                    time.sleep_ms(500)
+                    self._init_modem()
+                    self._release()
+                    self.online = True
+                    log("LoRa " + self.name + " recovered on retry " + str(i + 1), LOG_NOTICE)
+                    if self.on_status:
+                        try:
+                            self.on_status(True)
+                        except:
+                            pass
+                    break
+                except Exception as e:
+                    self._release()
+                    self._modem = None
+                    log("LoRa retry " + str(i + 1) + " failed: " + str(e), LOG_ERROR)
+
+            if not self.online:
+                log("LoRa poll loop EXITED — all retries exhausted for " + self.name, LOG_ERROR)
+                return
 
         _last_gc = time.time()
         _last_diag = time.time()
@@ -341,19 +402,21 @@ class LoRaInterface(Interface):
             try:
                 now = time.time()
 
-                # Periodic GC
-                if now - _last_gc >= 10:
+                # Periodic GC (30s: more frequent collection causes audible
+                # pauses during voice recording on the T-Deck)
+                if now - _last_gc >= 30:
                     gc.collect()
                     _last_gc = now
 
                 # Periodic diagnostics
-                if now - _last_diag >= 10:
-                    _crc_errs = getattr(self._modem, "crc_errors", 0)
-                    log("LoRa diag: poll_recv True=" + str(_rx_true_count)
-                        + " pkts=" + str(_rx_pkt_count)
-                        + " crc_err=" + str(_crc_errs)
-                        + " lbt=" + str(self._lbt_waits)
-                        + "/" + str(self._lbt_forced), LOG_DEBUG)
+                if now - _last_diag >= 30:
+                    if _log_debug:
+                        _crc_errs = getattr(self._modem, "crc_errors", 0)
+                        log("LoRa diag: poll_recv True=" + str(_rx_true_count)
+                            + " pkts=" + str(_rx_pkt_count)
+                            + " crc_err=" + str(_crc_errs)
+                            + " lbt=" + str(self._lbt_waits)
+                            + "/" + str(self._lbt_forced), LOG_DEBUG)
                     _rx_true_count = 0
                     _rx_pkt_count = 0
                     _last_diag = now
@@ -385,9 +448,10 @@ class LoRaInterface(Interface):
                         self.snr = rx.snr
 
                     raw = bytes(rx)
-                    log("LoRa RX raw " + str(len(raw)) + "B"
-                        + " RSSI=" + str(getattr(rx, "rssi", "?"))
-                        + " SNR=" + str(getattr(rx, "snr", "?")), LOG_DEBUG)
+                    if _log_debug:
+                        log("LoRa RX raw " + str(len(raw)) + "B"
+                            + " RSSI=" + str(getattr(rx, "rssi", "?"))
+                            + " SNR=" + str(getattr(rx, "snr", "?")), LOG_DEBUG)
 
                     if hasattr(rx, "valid_crc") and not rx.valid_crc:
                         log("LoRa CRC fail, discarding", LOG_DEBUG)
@@ -404,9 +468,10 @@ class LoRaInterface(Interface):
 
                     if pkt is not None:
                         _rx_pkt_count += 1
-                        log("LoRa recv " + str(len(pkt)) + "B"
-                            + " RSSI=" + str(self.rssi)
-                            + " SNR=" + str(self.snr), LOG_DEBUG)
+                        if _log_debug:
+                            log("LoRa recv " + str(len(pkt)) + "B"
+                                + " RSSI=" + str(self.rssi)
+                                + " SNR=" + str(self.snr), LOG_DEBUG)
                         self.process_incoming(pkt)
                         gc.collect()
 
