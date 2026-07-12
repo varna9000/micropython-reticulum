@@ -519,6 +519,15 @@ class Link:
         return "<Link:" + self.link_id.hex()[:8] + " " + states.get(self.status, "?") + ">"
 
 
+# pending_requests entry indices (OutgoingLink.request)
+_PR_STATE   = 0
+_PR_SENT_AT = 1
+_PR_TIMEOUT = 2
+_PR_RESP_CB = 3
+_PR_FAIL_CB = 4
+_PR_PROG_CB = 5
+
+
 class OutgoingLink:
     """Client-side link — initiates ECDH handshake to a remote destination."""
 
@@ -528,6 +537,15 @@ class OutgoingLink:
     # Per-hop establishment timeout, same rationale as Link above.
     ESTABLISHMENT_BASE    = 35  # seconds
     ESTABLISHMENT_PER_HOP = 20  # seconds per hop
+
+    # Pending request states: SENT waits for a response packet or resource
+    # advertisement (request timeout applies); RECEIVING means the response
+    # is arriving as a resource — its own retry/cancel machinery governs
+    # failure, so the request timeout is suspended.
+    REQ_SENT      = 0x00
+    REQ_RECEIVING = 0x01
+    REQUEST_TIMEOUT_BASE    = 30  # seconds, + per-hop below
+    REQUEST_TIMEOUT_PER_HOP = 15
 
     def __init__(self, destination, established_callback=None, closed_callback=None):
         from .identity import Identity
@@ -545,6 +563,7 @@ class OutgoingLink:
         self.type = const.DEST_LINK
         self.incoming_resources = []
         self.outgoing_resources = []
+        self.pending_requests = {}  # request_id -> [state, sent_at, timeout, resp_cb, fail_cb, prog_cb]
         self.resource_concluded_callback = None
         self.resource_started_callback = None
         self.remote_identified_callback = None
@@ -685,6 +704,101 @@ class OutgoingLink:
         )
         packet.send()
 
+    def request(self, path, data=None, response_callback=None,
+                failed_callback=None, progress_callback=None, timeout=None):
+        """Send a request over this link (reference RNS Link.request parity).
+
+        Returns the request_id (bytes) or None if the request could not be
+        sent. On success response_callback(request_id, response_data) fires;
+        on timeout or failure failed_callback(request_id) fires. Responses
+        larger than one packet arrive as a Resource and are dispatched
+        transparently. The request payload itself must fit in one packet.
+        """
+        from .identity import Identity
+        from . import umsgpack
+
+        if self.status != OutgoingLink.ACTIVE:
+            return None
+
+        path_hash = Identity.truncated_hash(path.encode("utf-8"))
+        packed = umsgpack.packb([time.time(), path_hash, data])
+        if len(packed) > self.sdu:
+            log("Link request too large: " + str(len(packed)) + "B > " + str(self.sdu) + "B sdu", LOG_ERROR)
+            return None
+
+        if timeout is None:
+            from .transport import Transport
+            hops = max(1, Transport.hops_to(self.destination.hash))
+            timeout = OutgoingLink.REQUEST_TIMEOUT_BASE + OutgoingLink.REQUEST_TIMEOUT_PER_HOP * hops
+
+        ciphertext = self._token.encrypt(packed)
+        from .packet import Packet, LinkDestination
+        packet = Packet(
+            LinkDestination(self.link_id), ciphertext,
+            const.PKT_DATA, context=const.CTX_REQUEST, create_receipt=False,
+        )
+        if packet.send() is False:
+            return None
+
+        # Same id the responder derives from the received packet — the
+        # hashable part is transport-invariant (see Packet.get_hashable_part).
+        request_id = packet.getTruncatedHash()
+        self.pending_requests[request_id] = [
+            OutgoingLink.REQ_SENT, time.time(), timeout,
+            response_callback, failed_callback, progress_callback,
+        ]
+        log("OutLink " + self.link_id.hex()[:8] + " request " + path
+            + " id=" + request_id.hex()[:8], LOG_VERBOSE)
+        return request_id
+
+    def _handle_response(self, plaintext):
+        """Handle a single-packet response to one of our requests."""
+        from . import umsgpack
+        try:
+            unpacked = umsgpack.unpackb(plaintext)
+        except Exception as e:
+            log("OutLink response unpack error: " + str(e), LOG_DEBUG)
+            return
+        if not isinstance(unpacked, list) or len(unpacked) < 2:
+            return
+        self._dispatch_response(unpacked[0], unpacked[1])
+
+    def _dispatch_response(self, request_id, response_data):
+        entry = self.pending_requests.pop(request_id, None)
+        if entry is None:
+            return
+        log("OutLink " + self.link_id.hex()[:8] + " response id=" + request_id.hex()[:8], LOG_VERBOSE)
+        if entry[_PR_RESP_CB]:
+            try:
+                entry[_PR_RESP_CB](request_id, response_data)
+            except Exception as e:
+                log("Response callback error: " + str(e), LOG_ERROR)
+
+    def _fail_request(self, request_id, reason=""):
+        entry = self.pending_requests.pop(request_id, None)
+        if entry is None:
+            return
+        if reason:
+            log("OutLink request " + request_id.hex()[:8] + " failed: " + reason, LOG_VERBOSE)
+        if entry[_PR_FAIL_CB]:
+            try:
+                entry[_PR_FAIL_CB](request_id)
+            except Exception as e:
+                log("Request failed callback error: " + str(e), LOG_ERROR)
+
+    def _fail_rejected_response(self, adv_data):
+        """A resource advertisement could not be accepted (too large,
+        multi-segment, unparseable). If it carried the request_id of one of
+        our pending requests, fail it now — the response can never arrive."""
+        from . import umsgpack
+        try:
+            adv = umsgpack.unpackb(adv_data)
+            request_id = adv.get("q") if isinstance(adv, dict) else None
+        except Exception:
+            return
+        if request_id:
+            self._fail_request(request_id, "response rejected")
+
     def receive(self, packet):
         """Handle incoming data on this link."""
         if packet.context == const.CTX_RESOURCE:
@@ -709,6 +823,8 @@ class OutgoingLink:
 
         if packet.context == const.CTX_RESOURCE_ADV:
             self._handle_resource_adv(plaintext)
+        elif packet.context == const.CTX_RESPONSE:
+            self._handle_response(plaintext)
         elif packet.context == const.CTX_RESOURCE_REQ:
             self._handle_resource_req(plaintext)
         elif packet.context == const.CTX_RESOURCE_ICL or packet.context == const.CTX_RESOURCE_RCL:
@@ -730,7 +846,18 @@ class OutgoingLink:
         if len(self.incoming_resources) >= const.MAX_INCOMING_RESOURCES:
             return
         r = Resource.accept(plaintext, self)
-        if r and self.resource_started_callback:
+        if r is None:
+            self._fail_rejected_response(plaintext)
+            return
+        if r.request_id and r.request_id in self.pending_requests:
+            # Response to one of our requests arriving as a resource: from
+            # here the resource retry machinery governs failure, so suspend
+            # the request timeout and route progress to the requester.
+            entry = self.pending_requests[r.request_id]
+            entry[_PR_STATE] = OutgoingLink.REQ_RECEIVING
+            if entry[_PR_PROG_CB]:
+                r.progress_callback = entry[_PR_PROG_CB]
+        elif self.resource_started_callback:
             try:
                 self.resource_started_callback(r)
             except Exception as e:
@@ -776,6 +903,24 @@ class OutgoingLink:
             self.incoming_resources.remove(resource)
         if resource in self.outgoing_resources:
             self.outgoing_resources.remove(resource)
+        # Response to one of our requests — dispatch it instead of the
+        # generic resource callback.
+        rid = resource.request_id
+        if rid and rid in self.pending_requests:
+            from .resource import COMPLETE
+            if resource.status == COMPLETE:
+                from . import umsgpack
+                try:
+                    unpacked = umsgpack.unpackb(resource.data)
+                except Exception:
+                    unpacked = None
+                if isinstance(unpacked, list) and len(unpacked) >= 2:
+                    self._dispatch_response(rid, unpacked[1])
+                else:
+                    self._fail_request(rid, "malformed response")
+            else:
+                self._fail_request(rid, "response transfer failed")
+            return
         if self.resource_concluded_callback:
             try:
                 self.resource_concluded_callback(resource)
@@ -794,6 +939,20 @@ class OutgoingLink:
         # Check resource request timeouts (retry if no parts arrived)
         for r in self.incoming_resources:
             r.check_request_timeout()
+        # Expire requests still waiting for a response packet/advertisement.
+        # RECEIVING entries are governed by the resource retry machinery.
+        if self.pending_requests:
+            now = time.time()
+            expired = None
+            for rid in self.pending_requests:
+                e = self.pending_requests[rid]
+                if e[_PR_STATE] == OutgoingLink.REQ_SENT and now - e[_PR_SENT_AT] > e[_PR_TIMEOUT]:
+                    if expired is None:
+                        expired = []
+                    expired.append(rid)
+            if expired:
+                for rid in expired:
+                    self._fail_request(rid, "timeout")
         if time.time() - self.last_activity > 720:  # STALE_GRACE
             log("OutLink " + self.link_id.hex()[:8] + " stale, closing", LOG_VERBOSE)
             self._close()
@@ -817,6 +976,11 @@ class OutgoingLink:
         if self.status != OutgoingLink.CLOSED:
             self.status = OutgoingLink.CLOSED
             log("OutLink " + self.link_id.hex()[:8] + " closed", LOG_VERBOSE)
+            # Fail in-flight requests first so requesters see the failure
+            # before the link-closed notification.
+            if self.pending_requests:
+                for rid in list(self.pending_requests):
+                    self._fail_request(rid, "link closed")
             if self.closed_callback:
                 try:
                     self.closed_callback(self)
