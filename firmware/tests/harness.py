@@ -35,6 +35,7 @@ class Identity:
 
     validate_result = True        # tests flip this to simulate bad announces
     known = {}                    # dest_hash -> app_data (for recall)
+    app_data = {}                 # dest_hash -> announce app_data (recall_app_data)
 
     @staticmethod
     def full_hash(data):
@@ -58,7 +59,7 @@ class Identity:
 
     @staticmethod
     def recall_app_data(dest_hash):
-        return None
+        return Identity.app_data.get(dest_hash)
 
 
 # --------------------------------------------------------------------------
@@ -262,6 +263,7 @@ def reset_transport():
     T = Transport
     T.interfaces = []
     T.destinations = []
+    T.announce_handlers = []
     T.active_links = []
     T.pending_links = []
     T.receipts = []
@@ -288,3 +290,4 @@ def reset_transport():
     set_identity()
     Identity.validate_result = True
     Identity.known = {}
+    Identity.app_data = {}

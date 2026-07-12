@@ -8,6 +8,10 @@ update in real time. Useful for operating a transport router.
   GET /      -> HTML dashboard (auto-refreshes every 2 s via /api)
   GET /api   -> JSON snapshot of the node's state
 
+Path-table rows show a peer's announced display name (LXMF/NomadNet app_data)
+next to its hash in the destination and via columns. Names live in RAM only
+and are relearned from announces after a reboot.
+
 Usage (from the router example, inside the asyncio loop):
   import uasyncio as asyncio, webmonitor
   asyncio.create_task(webmonitor.serve(node_name="my-router", port=80))
@@ -16,11 +20,43 @@ Then open  http://<node-ip>/  from any device on the same network.
 """
 import gc
 import uasyncio as asyncio
-from urns import Transport, const
+from urns.transport import Transport
+from urns.identity import Identity
+from urns import const
 from urns.log import get_log_ring, log, LOG_NOTICE, LOG_ERROR
 
 _NODE = "uRNS"
 _BATTERY_FN = None      # set by serve(); returns battery volts (float) or None
+
+# Announced display names, RAM only — relearned from live announces after a
+# reboot (never persisted). Keyed by BOTH the announced destination hash and
+# the announcer's identity hash: path-table `via` entries hold a relay's
+# identity hash, so this is what lets the via column resolve to a name.
+_NAMES = {}             # hash (bytes16) -> display name (str)
+_MAX_NAMES = 64
+
+
+def _note_name(h, name):
+    if h not in _NAMES and len(_NAMES) >= _MAX_NAMES:
+        _NAMES.pop(next(iter(_NAMES)), None)
+    _NAMES[h] = name
+
+
+def _on_announce(dest, app_data, packet):
+    """Transport announce hook: cache the announced display name (LXMF msgpack
+    [name, ...] or legacy raw utf-8, e.g. NomadNet node names)."""
+    from urns.lxmf import LXMRouter
+    name = LXMRouter._parse_display_name(app_data) if app_data else None
+    if not name:
+        return
+    _note_name(dest, name[:32])
+    try:
+        # Announce data starts with the 64-byte public key -> identity hash.
+        _note_name(Identity.truncated_hash(
+            packet.data[:const.KEYSIZE // 8]), name[:32])
+    except Exception:
+        pass
+
 
 _PAGE = """<!DOCTYPE html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -42,6 +78,7 @@ th{color:#6fce6f}b{color:#7fff7f}.dim{color:#5a6e5a}
 <h3>Live log <span class=dim>(newest at bottom)</span></h3><div class=box id=log></div>
 <script>
 function esc(s){return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
+function nh(n,h){return n?'<b>'+esc(n)+'</b> <span class=dim>'+h+'</span>':h}
 async function tick(){
  try{
   const d=await (await fetch('/api',{cache:'no-store'})).json();
@@ -57,7 +94,7 @@ async function tick(){
    +'<b>RELAYED</b> <span class=pill>announces '+r.announces+'</span><span class=pill>data '+r.data+'</span>'
    +'<span class=pill>links '+r.links+'</span><span class=pill>proofs '+r.proofs+'</span>';
   paths.innerHTML=d.paths.length?('<table><tr><th>destination</th><th>hops</th><th>via</th><th>interface</th></tr>'
-   +d.paths.map(p=>'<tr><td>'+p.dest.slice(0,20)+'</td><td>'+p.hops+'</td><td>'+p.via+'</td><td>'+esc(p.iface)+'</td></tr>').join('')+'</table>'):'<span class=dim>(none yet)</span>';
+   +d.paths.map(p=>'<tr><td>'+nh(p.dname,p.dest.slice(0,20))+'</td><td>'+p.hops+'</td><td>'+nh(p.vname,p.via)+'</td><td>'+esc(p.iface)+'</td></tr>').join('')+'</table>'):'<span class=dim>(none yet)</span>';
   const atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-30;
   log.innerHTML=d.log.map(l=>{const c=l.indexOf('[ERR')>0||l.indexOf('[CRIT')>0?'err':l.indexOf('[WARN')>0?'warn':'note';return '<span class='+c+'>'+esc(l)+'</span>';}).join('\\n');
   if(atBottom)log.scrollTop=log.scrollHeight;
@@ -88,12 +125,20 @@ def _snapshot():
     for dest, e in list(T.path_table.items())[:48]:
         try:
             rif = e[const.IDX_PT_RECV_IF]
-            paths.append({
+            via = e[const.IDX_PT_NEXT_HOP]
+            p = {
                 "dest": dest.hex(),
                 "hops": e[const.IDX_PT_HOPS],
-                "via": e[const.IDX_PT_NEXT_HOP].hex()[:8],
+                "via": via.hex()[:8],
                 "iface": str(rif) if rif is not None else "?",
-            })
+            }
+            n = _NAMES.get(dest)
+            if n:
+                p["dname"] = n
+            n = _NAMES.get(via)
+            if n:
+                p["vname"] = n
+            paths.append(p)
         except Exception:
             pass
     batt = None
@@ -175,6 +220,7 @@ async def serve(node_name="uRNS", host="0.0.0.0", port=80, battery_fn=None):
     global _NODE, _BATTERY_FN
     _NODE = node_name
     _BATTERY_FN = battery_fn
+    Transport.register_announce_handler(_on_announce)
     try:
         await asyncio.start_server(_handle, host, port)
         log("Web monitor listening on http://<node-ip>:" + str(port) + "/  (LAN, plain HTTP)", LOG_NOTICE)

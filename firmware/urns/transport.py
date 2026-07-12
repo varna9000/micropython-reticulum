@@ -37,6 +37,7 @@ class Transport:
     identity = None
     interfaces = []
     destinations = []
+    announce_handlers = []   # callables(dest_hash, app_data, packet) — local observers
     pending_links = []
     active_links = []
     packet_hashlist = []
@@ -1260,6 +1261,19 @@ class Transport:
             log("load_path_table error: " + str(e), LOG_ERROR)
 
     @staticmethod
+    def register_announce_handler(handler):
+        """Register a callable(dest_hash, app_data, packet) fired for every
+        valid announce that installs/refreshes a path (all aspects). Local
+        observers only (e.g. the web monitor's name cache) — nothing on wire."""
+        if handler not in Transport.announce_handlers:
+            Transport.announce_handlers.append(handler)
+
+    @staticmethod
+    def deregister_announce_handler(handler):
+        if handler in Transport.announce_handlers:
+            Transport.announce_handlers.remove(handler)
+
+    @staticmethod
     def _handle_announce(packet):
         from .identity import Identity
         import gc; gc.collect()
@@ -1371,6 +1385,11 @@ class Transport:
                     d._announce_handler(dest, app_data, packet)
                 except Exception as e:
                     log("Announce handler error: " + str(e), LOG_ERROR)
+        for h in Transport.announce_handlers:
+            try:
+                h(dest, app_data, packet)
+            except Exception as e:
+                log("Announce handler error: " + str(e), LOG_ERROR)
 
     @staticmethod
     def _handle_linkrequest(packet):

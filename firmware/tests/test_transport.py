@@ -602,6 +602,43 @@ def test_persistence_roundtrip():
     assert Transport.get_cached(e[const.IDX_PT_ANNOUNCE]) is not None
 
 
+def test_announce_handler_registry():
+    # register_announce_handler: fires per new emission with (dest, app_data,
+    # packet); dedups registration; a raising handler doesn't break processing.
+    reset_transport()
+    iface = MockInterface("a")
+    Transport.interfaces = [iface]
+
+    calls = []
+
+    def h(dest, app_data, pkt):
+        calls.append((dest, app_data, pkt.hops))
+
+    Transport.register_announce_handler(h)
+    Transport.register_announce_handler(h)          # no duplicate entry
+    assert Transport.announce_handlers == [h]
+
+    Identity.app_data[DEST] = b"Alice"
+    Transport.inbound(build_announce_hdr1(DEST, data=build_announce_data(emitted=1000)), iface)
+    assert calls == [(DEST, b"Alice", 1)]
+
+    # Duplicate emission is ignored -> handler must NOT fire again.
+    Transport.inbound(build_announce_hdr1(DEST, data=build_announce_data(emitted=1000)), iface)
+    assert len(calls) == 1
+
+    # A handler that raises must not break announce processing or later handlers.
+    def boom(dest, app_data, pkt):
+        raise RuntimeError("boom")
+
+    Transport.announce_handlers.insert(0, boom)
+    Transport.inbound(build_announce_hdr1(DEST, data=build_announce_data(emitted=2000)), iface)
+    assert len(calls) == 2
+    assert DEST in Transport.path_table
+
+    Transport.deregister_announce_handler(h)
+    assert Transport.announce_handlers == [boom]
+
+
 # ------------------------------- runner ----------------------------------
 def _run():
     import traceback
