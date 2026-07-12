@@ -83,8 +83,12 @@ class LoRaInterface(Interface):
         # is deferred in short random slots, up to lbt_max_ms total (then
         # transmit regardless). Protects request/reply turnarounds (link
         # proofs, LXMF acks) from colliding with any station we can hear.
-        # Set "lbt_rssi": None to disable.
-        self._lbt_rssi = config.get("lbt_rssi", -100)
+        # "auto" (default) measures the board's own noise floor after init
+        # and sets the threshold 6dB above it — boards with strong self-EMI
+        # (e.g. T-Deck: ~-98dBm floor from MCU/PSRAM/backlight) read a fixed
+        # -100dBm threshold as permanently busy, stalling every TX at the
+        # cap. A number fixes the threshold in dBm; None disables LBT.
+        self._lbt_rssi = config.get("lbt_rssi", "auto")
         self._lbt_max_ms = config.get("lbt_max_ms", 2000)
         self._lbt_waits = 0    # sends that deferred at least one slot
         self._lbt_forced = 0   # sends forced after waiting the full cap
@@ -111,6 +115,31 @@ class LoRaInterface(Interface):
         rst.value(1)
         time.sleep_ms(50)
 
+    def _calibrate_lbt(self):
+        """Resolve "auto" lbt_rssi: sample the local noise floor (modem in
+        continuous RX, nothing transmitting yet) and set the busy threshold
+        6dB above it. Runs once after a successful modem init; caller holds
+        the SPI bus at that point. Falls back to -90dBm on probe failure."""
+        if self._lbt_rssi != "auto":
+            return
+        try:
+            vals = []
+            for _ in range(40):
+                r = self._modem._cmd("B", 0x15, n_read=2)   # GetRssiInst
+                vals.append(r[1])
+                time.sleep_ms(10)
+            vals.sort()
+            floor_dbm = -vals[len(vals) // 2] / 2   # median; raw = -2*dBm
+            thr = floor_dbm + 6
+            if thr > -60:
+                thr = -60   # sanity clamp: never require a -54dBm carrier
+            self._lbt_rssi = thr
+            log("LoRa LBT noise floor %.1fdBm, busy threshold %.1fdBm"
+                % (floor_dbm, thr), LOG_NOTICE)
+        except Exception as e:
+            self._lbt_rssi = -90
+            log("LoRa LBT calibration failed (" + str(e) + "), threshold -90dBm", LOG_NOTICE)
+
     def _init_with_retry(self, max_attempts=3):
         """Try _init_modem() up to max_attempts times with HW reset between
         attempts — required on boards where the radio shares the SPI bus
@@ -122,6 +151,7 @@ class LoRaInterface(Interface):
                     time.sleep_ms(200 * attempt)
                 self._init_modem()
                 self.online = True
+                self._calibrate_lbt()
                 log("LoRa " + self.name + " on " + str(self._freq_khz) + "kHz"
                     + " SF" + str(self._sf) + " BW" + str(self._bw)
                     + " TX" + str(self._tx_power) + "dBm", LOG_NOTICE)
@@ -216,8 +246,8 @@ class LoRaInterface(Interface):
         anyway so a jammed channel can't stall the node). Random slots keep
         two waiting nodes from firing simultaneously when the channel clears.
         Blocks the event loop like send() itself does — bounded and brief."""
-        if self._lbt_rssi is None:
-            return
+        if not isinstance(self._lbt_rssi, (int, float)):
+            return   # disabled (None) or "auto" not yet calibrated
         deadline = time.ticks_add(time.ticks_ms(), self._lbt_max_ms)
         waited = False
         while True:
@@ -375,6 +405,7 @@ class LoRaInterface(Interface):
                     self._reset_hw()
                     time.sleep_ms(500)
                     self._init_modem()
+                    self._calibrate_lbt()
                     self._release()
                     self.online = True
                     log("LoRa " + self.name + " recovered on retry " + str(i + 1), LOG_NOTICE)

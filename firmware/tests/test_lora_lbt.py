@@ -50,12 +50,31 @@ class FakeModem:
 
 
 def make_iface(modem=None, **cfg):
-    base = {"name": "test"}
+    # Fixed numeric threshold by default: these tests exercise the LBT
+    # mechanics. The "auto" default (floor calibration) has its own tests.
+    base = {"name": "test", "lbt_rssi": -100}
     base.update(cfg)
     iface = LoRaInterface(base)          # offline: no machine.SPI on host
     iface._modem = modem or FakeModem()
     iface.online = True
     return iface
+
+
+def test_auto_threshold_calibrates_from_floor():
+    m = FakeModem(default_raw=196)       # -98 dBm: a noisy board's own floor
+    i = make_iface(m, lbt_rssi="auto")
+    i._calibrate_lbt()
+    assert i._lbt_rssi == -92.0          # floor + 6dB
+    # The same floor now probes clear instead of permanently busy
+    assert i.process_outgoing(b"x" * 10) is True
+    assert i._lbt_waits == 0 and i._lbt_forced == 0
+
+
+def test_auto_uncalibrated_skips_lbt():
+    m = FakeModem(default_raw=100)       # would read busy if LBT were active
+    i = make_iface(m, lbt_rssi="auto")   # init failed on host -> never calibrated
+    assert i.process_outgoing(b"x" * 10) is True
+    assert m.probes == 0
 
 
 def test_clear_channel_sends_immediately():
