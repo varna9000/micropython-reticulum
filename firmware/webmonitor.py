@@ -33,18 +33,69 @@ _BATTERY_FN = None      # set by serve(); returns battery volts (float) or None
 # the announcer's identity hash: path-table `via` entries hold a relay's
 # identity hash, so this is what lets the via column resolve to a name.
 _NAMES = {}             # hash (bytes16) -> display name (str)
+_PROTOS = {}            # dest hash (bytes16) -> protocol label (str)
 _MAX_NAMES = 64
+
+# App fingerprints: a destination hash is H(name_hash + identity_hash) and
+# every announce carries name_hash = H("app.aspects")[:10] in cleartext, so
+# known protocols are identified without any decryption. Unknown apps show
+# as "?" + the name_hash hex prefix (still groups them). Aspect sources:
+# LXMF/NomadNet reference, LXST Call.py ("lxst","call","endpoint"),
+# MeshChat meshchat.py ("call","audio").
+_NH_LEN = const.NAME_HASH_LENGTH // 8
+_PROTO_TABLE = {}
+for _n, _l in (("lxmf.delivery", "lxmf"),
+               ("lxmf.propagation", "lxmf-pn"),
+               ("nomadnetwork.node", "nomad"),
+               ("lxst.call.endpoint", "voice-lxst"),
+               ("call.audio", "voice-mc"),
+               ("urns.probe", "probe")):
+    _PROTO_TABLE[Identity.full_hash(_n.encode("utf-8"))[:_NH_LEN]] = _l
+del _n, _l
+
+
+def _put(cache, h, v):
+    if h not in cache and len(cache) >= _MAX_NAMES:
+        cache.pop(next(iter(cache)), None)
+    cache[h] = v
 
 
 def _note_name(h, name):
-    if h not in _NAMES and len(_NAMES) >= _MAX_NAMES:
-        _NAMES.pop(next(iter(_NAMES)), None)
-    _NAMES[h] = name
+    _put(_NAMES, h, name)
+
+
+def _classify(dest):
+    """Protocol label for a destination hash. Live announces fill _PROTOS via
+    _on_announce; after a reboot the cache is empty, so unlabeled entries are
+    recomputed from the persisted identity: H(candidate_name_hash + id_hash)
+    must equal the destination hash. Result (or a definitive miss) is cached."""
+    p = _PROTOS.get(dest)
+    if p is not None:
+        return p
+    known = getattr(Identity, "known_destinations", None)
+    data = known.get(dest) if known else None
+    if data and data[2]:
+        id_hash = Identity.truncated_hash(data[2])
+        label = "?"
+        for nh in _PROTO_TABLE:
+            if Identity.full_hash(nh + id_hash)[:const.TRUNCATED_HASHLENGTH // 8] == dest:
+                label = _PROTO_TABLE[nh]
+                break
+        _put(_PROTOS, dest, label)
+        return label
+    return None
 
 
 def _on_announce(dest, app_data, packet):
-    """Transport announce hook: cache the announced display name (LXMF msgpack
-    [name, ...] or legacy raw utf-8, e.g. NomadNet node names)."""
+    """Transport announce hook: cache the protocol label (from the announce's
+    name_hash) and the announced display name (LXMF msgpack [name, ...] or
+    legacy raw utf-8, e.g. NomadNet node names)."""
+    try:
+        ks = const.KEYSIZE // 8
+        nh = bytes(packet.data[ks:ks + _NH_LEN])
+        _put(_PROTOS, dest, _PROTO_TABLE.get(nh) or "?" + nh.hex()[:6])
+    except Exception:
+        pass
     from urns.lxmf import LXMRouter
     name = LXMRouter._parse_display_name(app_data) if app_data else None
     if not name:
@@ -93,8 +144,8 @@ async function tick(){
    +'<span class=pill>cache '+t.cache+'</span><span class=pill>queued '+t.queued+'</span><br>'
    +'<b>RELAYED</b> <span class=pill>announces '+r.announces+'</span><span class=pill>data '+r.data+'</span>'
    +'<span class=pill>links '+r.links+'</span><span class=pill>proofs '+r.proofs+'</span>';
-  paths.innerHTML=d.paths.length?('<table><tr><th>destination</th><th>hops</th><th>via</th><th>interface</th></tr>'
-   +d.paths.map(p=>'<tr><td>'+nh(p.dname,p.dest.slice(0,20))+'</td><td>'+p.hops+'</td><td>'+nh(p.vname,p.via)+'</td><td>'+esc(p.iface)+'</td></tr>').join('')+'</table>'):'<span class=dim>(none yet)</span>';
+  paths.innerHTML=d.paths.length?('<table><tr><th>destination</th><th>app</th><th>hops</th><th>via</th><th>interface</th></tr>'
+   +d.paths.map(p=>'<tr><td>'+nh(p.dname,p.dest.slice(0,20))+'</td><td>'+(p.proto?'<span class=pill>'+esc(p.proto)+'</span>':'')+'</td><td>'+p.hops+'</td><td>'+nh(p.vname,p.via)+'</td><td>'+esc(p.iface)+'</td></tr>').join('')+'</table>'):'<span class=dim>(none yet)</span>';
   const atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-30;
   log.innerHTML=d.log.map(l=>{const c=l.indexOf('[ERR')>0||l.indexOf('[CRIT')>0?'err':l.indexOf('[WARN')>0?'warn':'note';return '<span class='+c+'>'+esc(l)+'</span>';}).join('\\n');
   if(atBottom)log.scrollTop=log.scrollHeight;
@@ -138,6 +189,9 @@ def _snapshot():
             n = _NAMES.get(via)
             if n:
                 p["vname"] = n
+            pr = _classify(dest)
+            if pr:
+                p["proto"] = pr
             paths.append(p)
         except Exception:
             pass
