@@ -9,8 +9,11 @@ update in real time. Useful for operating a transport router.
   GET /api   -> JSON snapshot of the node's state
 
 Path-table rows show a peer's announced display name (LXMF/NomadNet app_data)
-next to its hash in the destination and via columns. Names live in RAM only
-and are relearned from announces after a reboot.
+next to its hash in the destination and via columns, plus a protocol pill
+per destination (lxmf, lxmf-pn, nomad, voice-lxst, voice-mc, probe, or a
+"?hex" tag for unknown apps) derived from the announce's name_hash. Names
+live in RAM only and are relearned from announces after a reboot; protocol
+labels are additionally backfilled from persisted identities.
 
 Usage (from the router example, inside the asyncio loop):
   import uasyncio as asyncio, webmonitor
