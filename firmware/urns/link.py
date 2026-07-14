@@ -491,6 +491,15 @@ class Link:
         for r in self.incoming_resources:
             r.check_request_timeout()
 
+        # Sender-side watchdog for outgoing resources: re-advertise while the
+        # advertisement goes unanswered, and fail transfers that exceed the
+        # overall timeout — otherwise a stall wedges the link forever and
+        # later DIRECT sends reuse the dead link and stick too.
+        for r in list(self.outgoing_resources):
+            r.check_adv_timeout()
+            if r.is_timed_out():
+                r.cancel()
+
         # Check stale grace period
         if now - self.last_activity > Link.STALE_GRACE:
             log("Link " + self.link_id.hex()[:8] + " stale, closing", LOG_VERBOSE)
@@ -939,6 +948,14 @@ class OutgoingLink:
         # Check resource request timeouts (retry if no parts arrived)
         for r in self.incoming_resources:
             r.check_request_timeout()
+        # Sender-side watchdog for outgoing resources: re-advertise while the
+        # advertisement goes unanswered, and fail transfers that exceed the
+        # overall timeout — otherwise a stalled voice/image transfer hangs
+        # forever and wedges the link that later DIRECT sends reuse.
+        for r in list(self.outgoing_resources):
+            r.check_adv_timeout()
+            if r.is_timed_out():
+                r.cancel()
         # Expire requests still waiting for a response packet/advertisement.
         # RECEIVING entries are governed by the resource retry machinery.
         if self.pending_requests:

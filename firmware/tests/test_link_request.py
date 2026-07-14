@@ -262,6 +262,79 @@ def test_close_fails_pending():
     assert ol.request("/y", timeout=5) is None
 
 
+def test_outgoing_resource_timeout_frees_link():
+    """check_keepalive() must cancel timed-out OUTGOING resources. Without it a
+    stalled voice/image transfer hangs forever and wedges the link, so every
+    later DIRECT send reuses the dead link and sticks on '>'."""
+    _, ol = _rig()
+
+    class _Res:
+        def __init__(self, timed_out):
+            self._to = timed_out
+            self.cancelled = False
+
+        def check_adv_timeout(self):
+            pass
+
+        def is_timed_out(self):
+            return self._to
+
+        def cancel(self):
+            self.cancelled = True
+            ol.outgoing_resources.remove(self)   # mimic _conclude()
+
+    live = _Res(False)
+    stalled = _Res(True)
+    ol.outgoing_resources.extend([live, stalled])
+
+    ol.check_keepalive()
+
+    assert stalled.cancelled and stalled not in ol.outgoing_resources
+    assert not live.cancelled and live in ol.outgoing_resources
+
+
+def test_outgoing_resource_readvertises_until_answered():
+    """A sender-side resource whose advertisement goes unanswered must
+    re-advertise (up to MAX_ADV_RETRIES) and then fail — one lost ADV must not
+    leave the transfer stillborn (receiver retry machinery never engages
+    without an accepted advertisement)."""
+    _, ol = _rig()
+    R = resource_mod.Resource
+    res = object.__new__(R)
+    res.link = ol
+    res.status = resource_mod.ADVERTISED
+    res.is_initiator = True
+    res.hash = b"\x77" * 32
+    res.adv_retries = 0
+    res.last_adv_at = 0          # long past the retry interval
+    res.created_at = time.time()  # not timed out overall
+    advertised = []
+    res.advertise = lambda: advertised.append(1) or setattr(res, "last_adv_at", time.time())
+    concluded = []
+    res._conclude = lambda: concluded.append(1)
+
+    # Four keepalive rounds with an expired interval -> four re-advertisements
+    for _ in range(resource_mod.MAX_ADV_RETRIES):
+        res.last_adv_at = 0
+        res.check_adv_timeout()
+    assert len(advertised) == resource_mod.MAX_ADV_RETRIES
+
+    # Fifth unanswered round -> gives up: FAILED + concluded
+    res.last_adv_at = 0
+    res.check_adv_timeout()
+    assert res.status == resource_mod.FAILED and concluded == [1]
+
+    # A resource already TRANSFERRING must never re-advertise
+    res2 = object.__new__(R)
+    res2.link = ol
+    res2.status = resource_mod.TRANSFERRING
+    res2.adv_retries = 0
+    res2.last_adv_at = 0
+    res2.advertise = lambda: advertised.append("bad")
+    res2.check_adv_timeout()
+    assert "bad" not in advertised
+
+
 def _run():
     import traceback
     tests = [(n, f) for n, f in sorted(globals().items())

@@ -21,6 +21,7 @@ HASHMAP_IS_NOT_EXHAUSTED = 0x00
 MAX_RESOURCE_SIZE = 16384  # 16KB — ESP32 memory safe
 REQUEST_RETRY_INTERVAL = 10  # seconds between request retries
 MAX_REQUEST_RETRIES = 5
+ADV_RETRY_INTERVAL = 15  # (sender) seconds without a part request -> re-advertise
 
 # Resource flags
 FLAG_ENCRYPTED = 0x01
@@ -60,6 +61,8 @@ class Resource:
         self.data = data
         self.total_data_size = len(data)
         self.retries = 0
+        self.adv_retries = 0
+        self.last_adv_at = 0
 
         # Generate random hash
         self.random_hash = Identity.get_random_hash()[:RANDOM_HASH_SIZE]
@@ -233,7 +236,30 @@ class Resource:
         adv_packed = umsgpack.packb(adv)
         self.link.send(adv_packed, const.CTX_RESOURCE_ADV)
         self.status = ADVERTISED
+        self.last_adv_at = time.time()
         log("Resource advertised: " + self.hash.hex()[:8], LOG_DEBUG)
+
+    def check_adv_timeout(self):
+        """(Sender) Re-advertise while no part request has arrived. The single
+        initial advertisement rides right behind the link proof — over LoRa
+        it's a 2-frame split sent while the peer's radio may still be turning
+        around from TX, so losing it is common. Without a retry the transfer
+        is stillborn: the receiver never learns the resource exists, so its
+        own retry machinery never engages. Gives up (cancel -> FAILED) after
+        MAX_ADV_RETRIES so the sender fails in ~75s instead of the 120s cap."""
+        if self.status != ADVERTISED:
+            return
+        if time.time() - self.last_adv_at < ADV_RETRY_INTERVAL:
+            return
+        if self.adv_retries >= MAX_ADV_RETRIES:
+            log("Resource adv unanswered after " + str(MAX_ADV_RETRIES) +
+                " retries: " + self.hash.hex()[:8], LOG_ERROR)
+            self.cancel()
+            return
+        self.adv_retries += 1
+        log("Resource adv retry " + str(self.adv_retries) + "/" +
+            str(MAX_ADV_RETRIES) + " for " + self.hash.hex()[:8], LOG_NOTICE)
+        self.advertise()
 
     def request_next(self):
         """(Receiver) Request next window of missing parts."""
