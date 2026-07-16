@@ -11,6 +11,8 @@ from .destination import Destination
 from .packet import Packet, PacketReceipt
 from .transport import Transport
 from .link import Link
+from .channel import Channel, MessageBase
+from .buffer import Buffer, RawChannelReader, RawChannelWriter, StreamDataMessage
 from . import lxmf
 from . import bz2dec
 from .reticulum import Reticulum

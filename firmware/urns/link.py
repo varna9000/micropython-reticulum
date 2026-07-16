@@ -27,6 +27,16 @@ def _parse_signalling(data):
     return mtu, mode
 
 
+def _link_mdu(mtu):
+    """Max plaintext a single link packet can carry after Token encryption
+    (reference RNS Link.update_mdu): floor((mtu-IFAC-HEADER_MIN-TOKEN)/16)*16-1.
+    = 431 at MTU 500. Channel MDU is this minus its 6-byte envelope header."""
+    import math
+    return (math.floor((mtu - const.IFAC_MIN_SIZE - const.HEADER_MINSIZE
+                        - const.TOKEN_OVERHEAD) / const.AES128_BLOCKSIZE)
+            * const.AES128_BLOCKSIZE) - 1
+
+
 class Link:
     PENDING = 0x00
     ACTIVE  = 0x01
@@ -556,7 +566,8 @@ class OutgoingLink:
     REQUEST_TIMEOUT_BASE    = 30  # seconds, + per-hop below
     REQUEST_TIMEOUT_PER_HOP = 15
 
-    def __init__(self, destination, established_callback=None, closed_callback=None):
+    def __init__(self, destination, established_callback=None, closed_callback=None,
+                 sign_proofs=False):
         from .identity import Identity
         from .crypto import X25519PrivateKey
         import gc, os
@@ -569,6 +580,7 @@ class OutgoingLink:
         self.activated_at = None
         self.last_activity = time.time()
         self.request_time = time.time()
+        self.rtt = 0                 # measured at handshake (validate_proof)
         self.type = const.DEST_LINK
         self.incoming_resources = []
         self.outgoing_resources = []
@@ -578,6 +590,9 @@ class OutgoingLink:
         self.remote_identified_callback = None
         self.packet_callback = None
         self.remote_identity = None
+        # Channel (rnsh etc.) — created lazily via get_channel(). Keepalive.
+        self._channel = None
+        self._last_keepalive = time.time()
 
         from .transport import Transport
         self.establishment_timeout = (OutgoingLink.ESTABLISHMENT_BASE
@@ -590,13 +605,25 @@ class OutgoingLink:
         gc.collect()
         self._pub_bytes = self._prv.public_key().public_bytes()
 
-        # Random bytes for Ed25519 "public key" slot — only used in link_id hash.
-        # Server doesn't verify client's Ed25519. Saves ~2s vs real keygen.
-        self._sig_pub_bytes = os.urandom(32)
+        # Ed25519 keypair for the link. Normally the server never verifies the
+        # client's Ed25519, so we fill the request's sig-pub slot with random
+        # bytes (only used in the link_id hash) and skip ~2s of keygen. But a
+        # Channel ACKs data by PROVING packets, which the peer validates against
+        # this sig-pub — so when sign_proofs is set (rnsh) we generate a REAL
+        # ephemeral keypair and keep the private key for prove_packet().
+        if sign_proofs:
+            from .crypto import Ed25519PrivateKey
+            self._sig_prv = Ed25519PrivateKey.generate()
+            gc.collect()
+            self._sig_pub_bytes = self._sig_prv.public_key().public_bytes()
+        else:
+            self._sig_prv = None
+            self._sig_pub_bytes = os.urandom(32)
 
         # Signalling bytes (our MTU, AES-256-CBC)
         self.mtu = const.MTU
         self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
+        self.mdu = _link_mdu(self.mtu)
         sig_bytes = _signalling_bytes(const.MTU, MODE_AES256_CBC)
 
         # Build and send link request
@@ -663,6 +690,7 @@ class OutgoingLink:
             if peer_mtu > 0:
                 self.mtu = min(self.mtu, peer_mtu)
                 self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
+                self.mdu = _link_mdu(self.mtu)
 
         # ECDH key exchange
         peer_pub = X25519PublicKey.from_public_bytes(peer_ecdh_pub_bytes)
@@ -681,6 +709,9 @@ class OutgoingLink:
         # Send RTT to complete handshake (server marks link ACTIVE on receiving this)
         from . import umsgpack
         rtt = time.time() - self.request_time
+        # Coarse establishment-time RTT (includes path/relay latency): a safe
+        # over-estimate used to size Channel windows/timeouts and keepalive.
+        self.rtt = rtt
         rtt_data = umsgpack.packb(rtt)
         self.send(rtt_data, const.CTX_LRRTT)
 
@@ -688,6 +719,7 @@ class OutgoingLink:
         self.status = OutgoingLink.ACTIVE
         self.activated_at = time.time()
         self.last_activity = time.time()
+        self._last_keepalive = time.time()
 
         # Move from pending to active
         from .transport import Transport
@@ -712,6 +744,67 @@ class OutgoingLink:
             const.PKT_DATA, context=context, create_receipt=False,
         )
         packet.send()
+
+    # --- Channel (rnsh etc.) ------------------------------------------------
+
+    def get_channel(self):
+        """Return this link's Channel (reliable ordered message stream),
+        creating it on first use. rnsh and RNS.Buffer ride on this."""
+        if self._channel is None:
+            from .channel import Channel, LinkChannelOutlet
+            self._channel = Channel(LinkChannelOutlet(self))
+        return self._channel
+
+    def _handle_channel(self, plaintext, packet):
+        """Deliver a CHANNEL packet to the channel. Prove it first so the peer's
+        Channel gets its ACK and advances its window (reference Link.receive)."""
+        if self._channel is None:
+            log("OutLink " + self.link_id.hex()[:8] + " channel data, no channel", LOG_DEBUG)
+            return
+        self.prove_packet(packet)
+        self._channel._receive(plaintext)
+
+    def prove_packet(self, packet):
+        """Explicitly prove a received packet (the Channel ACK): sign its hash
+        with our ephemeral link key. The peer validates the signature against
+        the sig-pub we put in the link request. No-op unless sign_proofs=True."""
+        if self._sig_prv is None:
+            log("OutLink " + self.link_id.hex()[:8] + " cannot prove (no sig key)", LOG_DEBUG)
+            return
+        signature = self._sig_prv.sign(packet.packet_hash)
+        proof_data = packet.packet_hash + signature
+        from .packet import Packet, LinkDestination
+        Packet(LinkDestination(self.link_id), proof_data,
+               const.PKT_PROOF, create_receipt=False).send()
+
+    def identify(self, identity):
+        """Identify this initiator to the peer (reference Link.identify): send
+        our public key + a signature over link_id||pubkey, Token-encrypted.
+        rnsh listeners use the identified identity for authorization."""
+        if self.status != OutgoingLink.ACTIVE:
+            return
+        pub = identity.get_public_key()
+        signature = identity.sign(self.link_id + pub)
+        self.send(pub + signature, const.CTX_LINKIDENTIFY)
+        log("OutLink " + self.link_id.hex()[:8] + " identified as " + identity.hexhash[:8], LOG_VERBOSE)
+
+    def _keepalive_interval(self):
+        """Seconds between idle keepalives. The peer (non-initiator) stales us
+        if it hears nothing for ~2x its own rtt-scaled keepalive: ~10s on a fast
+        link, ~720s on LoRa. Our establishment-rtt is a coarse over-estimate, so
+        we pick per-regime instead of scaling it (scaling would overshoot the
+        fast peer's stale window and get us dropped): 5s fast, 300s slow."""
+        return 300 if (self.rtt and self.rtt >= 1.45) else 5
+
+    def _send_keepalive(self):
+        from .packet import Packet, LinkDestination
+        try:
+            Packet(LinkDestination(self.link_id), b"\xff",
+                   const.PKT_DATA, context=const.CTX_KEEPALIVE,
+                   create_receipt=False).send()
+            log("OutLink " + self.link_id.hex()[:8] + " keepalive sent", LOG_DEBUG)
+        except Exception as e:
+            log("OutLink keepalive send error: " + str(e), LOG_DEBUG)
 
     def request(self, path, data=None, response_callback=None,
                 failed_callback=None, progress_callback=None, timeout=None):
@@ -838,6 +931,8 @@ class OutgoingLink:
             self._handle_resource_req(plaintext)
         elif packet.context == const.CTX_RESOURCE_ICL or packet.context == const.CTX_RESOURCE_RCL:
             self._handle_resource_cancel(plaintext)
+        elif packet.context == const.CTX_CHANNEL:
+            self._handle_channel(plaintext, packet)
         elif packet.context == const.CTX_LINKCLOSE:
             log("OutLink " + self.link_id.hex()[:8] + " close received", LOG_VERBOSE)
             self._close()
@@ -956,6 +1051,15 @@ class OutgoingLink:
             r.check_adv_timeout()
             if r.is_timed_out():
                 r.cancel()
+        # Initiator keepalive: the peer stales the link if it hears nothing for
+        # a while, so send a 0xFF probe when idle (it replies 0xFE, refreshing
+        # last_activity). Only the initiator sends these (reference RNS).
+        now = time.time()
+        kival = self._keepalive_interval()
+        if (now - self.last_activity >= kival
+                and now - self._last_keepalive >= kival):
+            self._send_keepalive()
+            self._last_keepalive = now
         # Expire requests still waiting for a response packet/advertisement.
         # RECEIVING entries are governed by the resource retry machinery.
         if self.pending_requests:
@@ -1004,6 +1108,12 @@ class OutgoingLink:
                 except:
                     pass
         # Break circular refs (MicroPython GC can't collect cycles)
+        if self._channel is not None:
+            try:
+                self._channel.shutdown()
+            except Exception:
+                pass
+            self._channel = None
         self.destination = None
         self.established_callback = None
         self.closed_callback = None

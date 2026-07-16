@@ -53,6 +53,10 @@ def _mklink():
     ol.request_time = time.time()
     ol.activated_at = time.time()
     ol.establishment_timeout = 60
+    ol.rtt = 0
+    ol.mdu = 431
+    ol._channel = None
+    ol._last_keepalive = time.time()
     return ol
 
 
