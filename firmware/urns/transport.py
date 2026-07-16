@@ -1318,23 +1318,40 @@ class Transport:
             for d in Transport.destinations
         )
 
-        # should_add: install/replace a path only for a better hop count, an
-        # expired path, or a strictly newer announce emission (replay/echo/loop
-        # rejection). Note: a node that loses its clock on reboot re-announces
-        # with a smaller emission and is ignored until the path expires or it
-        # re-syncs time — acceptable, and self-healing.
+        # should_add: shortest path wins and is sticky (reference-RNS-like).
+        #   - fewer hops  -> ALWAYS adopt. A shorter path is better even if its
+        #     announce is OLDER. Field case: the 1-hop TCP copy of c4756060 arrives
+        #     with a stale emission (the peer replays a cached announce) while fresh
+        #     3-hop LoRa copies keep coming — an emission gate wrongly rejects the
+        #     shorter path and pins routing to the lossy LoRa route.
+        #   - equal hops  -> adopt a strictly newer emission (freshness / same-cost
+        #     swap; also rejects echoes/loops of the same emission).
+        #   - more  hops  -> adopt ONLY if the current (shorter) path has expired.
+        #     Do NOT let a longer path displace a shorter one merely for being a
+        #     newer announce, or the two flip-flop every announce cycle.
         should_add = False
+        entry = None
         if not is_self:
             entry = Transport.path_table.get(dest)
             if entry is None:
                 should_add = True
-            elif packet.hops <= entry[const.IDX_PT_HOPS]:
+            elif packet.hops < entry[const.IDX_PT_HOPS]:
+                should_add = True
+            elif packet.hops == entry[const.IDX_PT_HOPS]:
                 should_add = emitted > entry[const.IDX_PT_EMITTED]
             else:
-                should_add = (emitted > entry[const.IDX_PT_EMITTED]
-                              or now >= entry[const.IDX_PT_EXPIRES])
+                should_add = now >= entry[const.IDX_PT_EXPIRES]
 
         if not should_add:
+            # Keep-alive: a re-confirming announce for the SAME next hop at no-worse
+            # hops refreshes the path's expiry, so a still-valid route is not culled
+            # merely because the origin's announces carry a stale/constant emission
+            # (e.g. a peer replaying a cached announce, as c4756060's 1-hop TCP peer
+            # does). The route itself is unchanged.
+            if (entry is not None and received_from == entry[const.IDX_PT_NEXT_HOP]
+                    and packet.hops <= entry[const.IDX_PT_HOPS]):
+                entry[const.IDX_PT_TIMESTAMP] = now
+                entry[const.IDX_PT_EXPIRES] = now + const.PATH_EXPIRY
             log("Announce " + dest.hex()[:8] + " ignored (dup/worse/older)", LOG_DEBUG)
             return
 

@@ -150,6 +150,87 @@ def test_should_add_newer_emission_replaces():
     assert Transport.path_table[DEST][const.IDX_PT_EMITTED] == 2000
 
 
+def test_should_add_better_hops_same_emission_replaces():
+    # Regression (LoRa-vs-TCP path stick): a SHORTER path for the SAME announce
+    # emission MUST displace a longer one already installed. Field case: a 1-hop
+    # TCP copy of an announce first heard over a 3-hop LoRa loop was rejected
+    # because both share an emission timestamp, pinning the route to lossy LoRa.
+    reset_transport()
+    iface = MockInterface("lora")
+    Transport.interfaces = [iface]
+    # Learn it the long way first: via a relay at 3 hops (on-wire 2 -> +1).
+    Transport.inbound(build_announce_hdr2(RELAY, DEST,
+                      data=build_announce_data(emitted=1000), hops=2), iface)
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 3
+    assert Transport.path_table[DEST][const.IDX_PT_NEXT_HOP] == RELAY
+    # Same emission arrives via a SHORTER path (direct, 1 hop) -> must replace.
+    Transport.inbound(build_announce_hdr1(DEST,
+                      data=build_announce_data(emitted=1000)), iface)
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 1
+    assert Transport.path_table[DEST][const.IDX_PT_NEXT_HOP] == DEST
+
+
+def test_should_add_better_hops_stale_emission_adopts():
+    # Field case (c4756060): a strictly SHORTER path must be adopted even when its
+    # announce is OLDER. The peer replays a cached (stale-emission) 1-hop copy while
+    # fresh copies keep arriving over the longer route; an emission gate wrongly
+    # pinned routing to the lossy 3-hop path. A shorter path always wins.
+    reset_transport()
+    iface = MockInterface("lora")
+    Transport.interfaces = [iface]
+    Transport.inbound(build_announce_hdr2(RELAY, DEST,
+                      data=build_announce_data(emitted=2000), hops=2), iface)
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 3
+    # Fewer hops but an OLDER emission (1000 < 2000) -> STILL adopt (shorter wins).
+    Transport.inbound(build_announce_hdr1(DEST,
+                      data=build_announce_data(emitted=1000)), iface)
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 1
+    assert Transport.path_table[DEST][const.IDX_PT_NEXT_HOP] == DEST
+
+
+def test_should_add_longer_path_no_flipflop():
+    # Once a shorter path is installed, a LONGER path must NOT displace it just for
+    # carrying a newer emission (that flip-flops the route every announce cycle).
+    # Only expiry of the shorter path lets a longer one back in (failover).
+    reset_transport()
+    iface = MockInterface("lora")
+    Transport.interfaces = [iface]
+    Transport.inbound(build_announce_hdr1(DEST,
+                      data=build_announce_data(emitted=1000)), iface)   # short, 1 hop
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 1
+    # Longer (3-hop) path, NEWER emission -> rejected while the short path is valid.
+    Transport.inbound(build_announce_hdr2(RELAY, DEST,
+                      data=build_announce_data(emitted=5000), hops=2), iface)
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 1
+    assert Transport.path_table[DEST][const.IDX_PT_NEXT_HOP] == DEST
+    # Force-expire the short path -> the longer path is now accepted (failover).
+    Transport.path_table[DEST][const.IDX_PT_EXPIRES] = 0
+    Transport.inbound(build_announce_hdr2(RELAY, DEST,
+                      data=build_announce_data(emitted=6000), hops=2), iface)
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 3
+
+
+def test_should_add_reconfirm_refreshes_expiry():
+    # Keep-alive: a re-confirming announce for the SAME next hop (even with an
+    # unchanged/stale emission) refreshes expiry, so a valid route isn't culled
+    # when the peer replays a constant-emission cached announce (c4756060's TCP peer).
+    reset_transport()
+    iface = MockInterface("lora")
+    Transport.interfaces = [iface]
+    Transport.inbound(build_announce_hdr2(RELAY, DEST,
+                      data=build_announce_data(emitted=1000), hops=2), iface)
+    e = Transport.path_table[DEST]
+    assert e[const.IDX_PT_HOPS] == 3
+    e[const.IDX_PT_EXPIRES] = 1.0                    # pretend it's about to expire
+    Transport.packet_hashlist.clear()                # let the same announce be seen again
+    Transport.inbound(build_announce_hdr2(RELAY, DEST,
+                      data=build_announce_data(emitted=1000), hops=2), iface)
+    e = Transport.path_table[DEST]
+    assert e[const.IDX_PT_HOPS] == 3                 # route unchanged
+    assert e[const.IDX_PT_NEXT_HOP] == RELAY
+    assert e[const.IDX_PT_EXPIRES] > 1.0             # expiry refreshed (kept alive)
+
+
 def test_duplicate_announce_no_restorm():
     reset_transport()
     iface = MockInterface("lora")
