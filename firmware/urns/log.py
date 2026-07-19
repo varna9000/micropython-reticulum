@@ -31,6 +31,19 @@ def get_log_ring():
     return _LOG_RING
 
 
+def sl(level):
+    """True if `level` would be logged right now (reference RNS: RNS.sl()).
+
+    Call this to gate expensive log-string building on hot paths. It reads the
+    module global at call time, so a runtime set_loglevel() takes effect —
+    unlike a cached `loglevel >= LOG_DEBUG` snapshot taken at import, which
+    freezes before config raises the level. Import it directly (`from .log
+    import sl`): `urns.log` as a package attribute is the log *function*, not
+    this module, because urns/__init__.py re-exports it.
+    """
+    return loglevel >= level
+
+
 def log(msg, level=LOG_NOTICE):
     if loglevel >= level:
         try:

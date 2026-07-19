@@ -6,17 +6,13 @@ import os
 import sys
 import time
 from . import const
-from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_EXTREME, LOG_NOTICE, LOG_WARNING
-from . import log as _logmod
+from .log import log, sl, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_EXTREME, LOG_NOTICE, LOG_WARNING
 
-
-def _log_debug():
-    """Hot-path gate that skips per-packet log-string building. Reads the log
-    module's CURRENT level: the old import-time `_log_debug = loglevel >= ...`
-    snapshot froze before the config raised the level, so the per-packet
-    Inbound/TX debug lines never printed — which turned real routing bugs
-    (e.g. the HDR_2 direct-path drop) into silent, undiagnosable failures."""
-    return _logmod.loglevel >= LOG_DEBUG
+# Hot-path debug gate: sl() reads the CURRENT loglevel, unlike an import-time
+# snapshot, which froze before config raised the level and silently suppressed
+# the per-packet Inbound/TX lines (turning real routing bugs into undiagnosable
+# ones). Imported as a function: `urns.log` as a package attribute is the log
+# function, not the module, so a module-attribute lookup would fail at runtime.
 
 # ESP32 MicroPython counts seconds from 2000-01-01; convert to/from Unix epoch.
 _EPOCH_OFFSET = 946684800 if sys.platform == "esp32" else 0
@@ -184,7 +180,7 @@ class Transport:
             packet.sent = True
             packet.sent_at = time.time()
 
-            if _log_debug():
+            if sl(LOG_DEBUG):
                 log("TX " + str(len(raw)) + "B type=" + str(packet.packet_type) + " ifaces=" + str(len(Transport.interfaces)), LOG_DEBUG)
 
             # Directed egress: when we know a multi-hop transport path to the
@@ -796,7 +792,7 @@ class Transport:
             if Transport._should_remember(packet):
                 Transport._cache_packet_hash(packet)
 
-            if _log_debug():
+            if sl(LOG_DEBUG):
                 log("Inbound: type=" + str(packet.packet_type) + " dest=" + packet.destination_hash.hex(), LOG_DEBUG)
 
             # Directed transit: are we the next hop for a DATA/LINKREQUEST in

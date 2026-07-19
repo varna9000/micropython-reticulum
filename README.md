@@ -630,6 +630,17 @@ Tested and confirmed working with:
 - **RNode** (SX1276 / SX1278) — bidirectional LoRa, full split-packet support for the complete 500-byte MTU. Tested with Heltec Wireless Stick Lite V1 on 868 MHz.
 - **RNS transport servers** — TCP client connectivity to remote transport hubs, automatic path learning from announces
 
+Protocol behaviour tracks **reference RNS 1.3.9**. Its link and resource
+safeguards are implemented here (see the *Resource and link safeguards* block
+under [Protocol details](#protocol-details)); the parts of that release that do
+not apply to an MCU port — `BackboneInterface` flap-blocking, interface
+discovery, and the `rnsh` utility — are out of scope.
+
+> **If you run an `rnsh` listener** (any platform), update it to RNS 1.3.9: that
+> release patches a critical vulnerability where a command could be started on a
+> session that never completed identity authorisation. This port contains no
+> listener, so it is not affected — but a listener elsewhere on your mesh is.
+
 ---
 
 ## Performance on ESP32-S3
@@ -774,6 +785,40 @@ looks alive while nothing ever delivers.
   through (establishment timeout: lost LR or proof) or the resource transfer fails,
   the delivery is re-attempted on a fresh link, 3 attempts total — matching
   reference LXMF's retry behavior.
+
+</details>
+
+<details>
+<summary><b>Resource and link safeguards (parity with RNS 1.3.9)</b></summary>
+
+A link peer is untrusted input: it can send a malformed resource advertisement,
+re-identify mid-session, or vanish mid-transfer. Reference RNS 1.3.9 tightened
+these paths, and this port implements the equivalents — with an MCU's much
+smaller margin for error in mind.
+
+- **Advertisement validation** — every advertisement is parsed *and* validated
+  inside one guarded block: msgpack errors, missing fields, wrong types,
+  negative or absurd sizes are rejected before anything is allocated. On a
+  desktop an unchecked size claim wastes memory; on an ESP32 it is an immediate
+  out-of-memory. An advertisement that cannot be processed at all tears the link
+  down rather than leaving it looping on bad input.
+- **Pre-send link check** — a resource verifies its link is still `ACTIVE`
+  before every advertisement, part, request and proof. A closing link nulls its
+  resources' references, so an unguarded watchdog send would raise inside the
+  event loop.
+- **Cancellation signalling** — cancelling tells the peer: `RESOURCE_ICL` from
+  the sender, `RESOURCE_RCL` from the receiver (the receiver-side signal is new
+  in 1.3.9). Without it the far end keeps re-advertising or re-requesting until
+  its own timeout — minutes of wasted airtime on half-duplex LoRa. A cancel that
+  arrives *from* the peer is never echoed back.
+- **Identity binds once** — a second `identify` on an established link is
+  ignored, so anything authorising on the identified identity cannot have its
+  authorisation subject swapped mid-session.
+- **HDLC frame validation** (TCP interface) — frames shorter than a packet
+  header, or that overflowed the buffer mid-flight, are dropped instead of
+  handed to routing as truncated packets.
+
+Covered by `firmware/tests/test_resource_safeguards.py`.
 
 </details>
 

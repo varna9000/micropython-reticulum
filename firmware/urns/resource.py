@@ -29,6 +29,9 @@ FLAG_COMPRESSED = 0x02
 FLAG_IS_RESPONSE = 0x10
 
 # States
+# Link.ACTIVE / OutgoingLink.ACTIVE — both link classes use the same value.
+_LINK_ACTIVE = 0x01
+
 NONE = 0x00
 ADVERTISED = 0x01
 TRANSFERRING = 0x02
@@ -149,23 +152,38 @@ class Resource:
         r.retries = 0
         r.data = None
 
+        # Parse AND validate in one guarded block. A malformed or hostile
+        # advertisement — bad msgpack, missing fields, wrong types, absurd sizes
+        # — must never raise into the link receive path and must never drive an
+        # allocation: on an MCU an unchecked size claim is an immediate
+        # out-of-memory. Reference RNS 1.3.9 added equivalent safeguards
+        # (typed unpack limits + a transfer-size ceiling).
         try:
             adv = umsgpack.unpackb(adv_data)
+            r.total_size = adv["t"]       # encrypted (transfer) size
+            r.total_data_size = adv["d"]  # original data size
+            r.total_parts = adv["n"]
+            r.hash = adv["h"]
+            r.random_hash = adv["r"]
+            r.original_hash = adv["o"]
+            r.segment_index = adv["i"]
+            r.total_segments = adv["l"]
+            r.request_id = adv["q"]
+            r.flags = adv["f"]
+            hashmap_raw = adv["m"]
+            if not (isinstance(r.total_size, int) and isinstance(r.total_data_size, int)
+                    and isinstance(r.total_parts, int) and isinstance(r.segment_index, int)
+                    and isinstance(r.total_segments, int)):
+                raise ValueError("non-integer size field")
+            if not (isinstance(r.hash, bytes) and isinstance(hashmap_raw, bytes)):
+                raise ValueError("non-binary hash field")
+            if r.total_size < 0 or r.total_data_size < 0 or r.total_parts < 0:
+                raise ValueError("negative size")
+            if r.total_size > MAX_RESOURCE_SIZE * 2:
+                raise ValueError("transfer size " + str(r.total_size))
         except Exception as e:
-            log("Resource adv unpack failed: " + str(e), LOG_ERROR)
+            log("Resource adv invalid, dropping: " + str(e), LOG_ERROR)
             return None
-
-        r.total_size = adv["t"]     # encrypted size
-        r.total_data_size = adv["d"]  # original data size
-        r.total_parts = adv["n"]
-        r.hash = adv["h"]
-        r.random_hash = adv["r"]
-        r.original_hash = adv["o"]
-        r.segment_index = adv["i"]
-        r.total_segments = adv["l"]
-        r.request_id = adv["q"]
-        r.flags = adv["f"]
-        hashmap_raw = adv["m"]
 
         # Reject what we can't assemble. Multi-segment transfers are what
         # upstream RNS uses for data above its single-segment limit — chaining
@@ -218,8 +236,28 @@ class Resource:
         r.request_next()
         return r
 
+    def _link_ok(self):
+        """True while this resource's link can still carry packets.
+
+        A closing link nulls its resources' `link` reference and empties its
+        resource tables, so a later send — a watchdog re-advertisement, a part
+        request retry, a proof — would raise inside the event loop. Reference
+        RNS 1.3.9 added the same pre-send guard (ensure_link); here it also
+        stops a doomed transfer from burning LoRa airtime it can never use.
+        """
+        link = self.link
+        if link is None or getattr(link, "status", None) != _LINK_ACTIVE:
+            if self.status < COMPLETE:
+                log("Resource " + self.hash.hex()[:8] + " link no longer active, cancelling",
+                    LOG_VERBOSE)
+                self.cancel()
+            return False
+        return True
+
     def advertise(self):
         """Send resource advertisement to the remote side."""
+        if not self._link_ok():
+            return
         adv = {
             "t": len(self.encrypted),
             "d": self.total_data_size,
@@ -264,6 +302,8 @@ class Resource:
     def request_next(self):
         """(Receiver) Request next window of missing parts."""
         if self.status not in (TRANSFERRING,):
+            return
+        if not self._link_ok():
             return
 
         # Find missing parts starting from consecutive
@@ -523,12 +563,39 @@ class Resource:
         log("Resource TX " + str(served) + "/" + str(self.total_parts) +
             " (" + str(pct) + "%) " + self.hash.hex()[:8] + suffix, LOG_DEBUG)
 
-    def cancel(self):
-        """Cancel this resource transfer."""
+    def cancel(self, signal=True):
+        """Cancel this resource transfer.
+
+        `signal` tells the peer to stop as well: RESOURCE_ICL when we are the
+        sender, RESOURCE_RCL when we are the receiver (reference RNS 1.3.9 added
+        the receiver-side RCL). Without it the far end keeps re-advertising or
+        re-requesting until its own timeout expires — minutes of wasted airtime
+        on a half-duplex LoRa channel for a transfer that is already dead. Pass
+        False when cancelling *because* the peer just signalled us, so the
+        signal does not bounce back.
+        """
         if self.status < COMPLETE:
             self.status = FAILED
+            if signal:
+                self._signal_cancel()
             log("Resource cancelled: " + self.hash.hex()[:8], LOG_DEBUG)
             self._conclude()
+
+    def _signal_cancel(self):
+        """Best-effort 'stop sending' to the peer. Never raises: cancellation
+        must complete locally even when the link is already gone."""
+        link = self.link
+        if link is None or getattr(link, "status", None) != _LINK_ACTIVE:
+            return
+        try:
+            from .packet import Packet, LinkDestination
+            context = const.CTX_RESOURCE_ICL if self.is_initiator else const.CTX_RESOURCE_RCL
+            Packet(
+                LinkDestination(link.link_id), link._token.encrypt(self.hash),
+                const.PKT_DATA, context=context, create_receipt=False,
+            ).send()
+        except Exception as e:
+            log("Resource cancel signal failed: " + str(e), LOG_DEBUG)
 
     def is_timed_out(self):
         return time.time() - self.created_at > TIMEOUT

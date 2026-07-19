@@ -298,6 +298,16 @@ class Link:
         identity.load_public_key(public_key)
 
         if identity.validate(signature, signed_data):
+            # Bind the peer identity ONCE per link. A second identify must not
+            # silently re-bind it: anything that authorises on the identified
+            # identity (rnsh listeners, NomadNet request handlers) would see its
+            # authorisation subject change underneath an established session.
+            # Reference RNS 1.3.9 hardened this the same way.
+            if self.remote_identity is not None:
+                if self.remote_identity.hash != identity.hash:
+                    log("Link " + self.link_id.hex()[:8] + " ignoring re-identify as "
+                        + identity.hexhash[:8], LOG_NOTICE)
+                return
             self.remote_identity = identity
             log("Link " + self.link_id.hex()[:8] + " identified as " + identity.hexhash[:8], LOG_VERBOSE)
             if self.remote_identified_callback:
@@ -392,7 +402,16 @@ class Link:
         if len(self.incoming_resources) >= const.MAX_INCOMING_RESOURCES:
             log("Link " + self.link_id.hex()[:8] + " too many incoming resources", LOG_DEBUG)
             return
-        r = Resource.accept(plaintext, self)
+        try:
+            r = Resource.accept(plaintext, self)
+        except Exception as e:
+            # An advertisement that cannot even be processed means the peer is
+            # broken or hostile. Reference RNS 1.3.9 tears the link down rather
+            # than leaving it half-usable and looping on the same bad input.
+            log("Link " + self.link_id.hex()[:8] + " invalid resource advertisement: "
+                + str(e), LOG_ERROR)
+            self.teardown()
+            return
         if r and self.resource_started_callback:
             try:
                 self.resource_started_callback(r)
@@ -415,14 +434,15 @@ class Link:
 
     def _handle_resource_cancel(self, plaintext):
         """Handle resource cancel from remote side."""
-        # plaintext = resource hash
+        # plaintext = resource hash. signal=False: the peer initiated this
+        # cancellation, so echoing a cancel back at it is pure wasted airtime.
         for r in list(self.incoming_resources):
             if r.hash == plaintext:
-                r.cancel()
+                r.cancel(signal=False)
                 return
         for r in list(self.outgoing_resources):
             if r.hash == plaintext:
-                r.cancel()
+                r.cancel(signal=False)
                 return
 
     def register_incoming_resource(self, resource):
@@ -517,6 +537,8 @@ class Link:
 
     def teardown(self):
         """Close this link."""
+        if self.status == Link.CLOSED:
+            return
         if self.status != Link.CLOSED:
             self.status = Link.CLOSED
             log("Link " + self.link_id.hex()[:8] + " torn down", LOG_VERBOSE)
@@ -556,6 +578,14 @@ class OutgoingLink:
     # Per-hop establishment timeout, same rationale as Link above.
     ESTABLISHMENT_BASE    = 35  # seconds
     ESTABLISHMENT_PER_HOP = 20  # seconds per hop
+
+    # Inert LRRTT defaults at class level, so a link object constructed without
+    # __init__ (host tests, any object.__new__ path) still has well-defined
+    # state: nothing buffered, nothing to resend.
+    _lrrtt_data      = None
+    _lrrtt_confirmed = True
+    _lrrtt_resends   = 0
+    _lrrtt_last      = 0
 
     # Pending request states: SENT waits for a response packet or resource
     # advertisement (request timeout applies); RECEIVING means the response
@@ -981,7 +1011,15 @@ class OutgoingLink:
         from .resource import Resource, MAX_RESOURCE_SIZE
         if len(self.incoming_resources) >= const.MAX_INCOMING_RESOURCES:
             return
-        r = Resource.accept(plaintext, self)
+        try:
+            r = Resource.accept(plaintext, self)
+        except Exception as e:
+            # See Link._handle_resource_adv: unprocessable advertisement -> the
+            # peer is broken or hostile, so close rather than loop on it.
+            log("OutLink " + self.link_id.hex()[:8] + " invalid resource advertisement: "
+                + str(e), LOG_ERROR)
+            self.teardown()
+            return
         if r is None:
             self._fail_rejected_response(plaintext)
             return
@@ -1019,13 +1057,15 @@ class OutgoingLink:
                 return
 
     def _handle_resource_cancel(self, plaintext):
+        # signal=False: the peer initiated this cancellation, so echoing a
+        # cancel back at it is pure wasted airtime.
         for r in list(self.incoming_resources):
             if r.hash == plaintext:
-                r.cancel()
+                r.cancel(signal=False)
                 return
         for r in list(self.outgoing_resources):
             if r.hash == plaintext:
-                r.cancel()
+                r.cancel(signal=False)
                 return
 
     def register_incoming_resource(self, resource):

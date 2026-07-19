@@ -7,6 +7,7 @@ from . import Interface
 from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
 
 # HDLC framing constants (inlined to keep module self-contained)
+MIN_FRAME_LEN = 19   # == const.HEADER_MINSIZE; shorter cannot be a packet
 FLAG     = 0x7E
 ESC      = 0x7D
 ESC_MASK = 0x20
@@ -46,6 +47,7 @@ class TCPClientInterface(Interface):
         self._in_frame = False
         self._escape = False
         self._buffer = bytearray()
+        self._frame_overflow = False
         self._recv_buf = bytearray(512)
         self._recv_mv = memoryview(self._recv_buf)
         self._reconnect_count = 0
@@ -74,6 +76,7 @@ class TCPClientInterface(Interface):
         self._in_frame = False
         self._escape = False
         self._buffer = bytearray()
+        self._frame_overflow = False
         self.online = True
         self._reconnect_count = 0
         log("TCP connected to " + self.target_host + ":" + str(self.target_port), LOG_NOTICE)
@@ -156,20 +159,33 @@ class TCPClientInterface(Interface):
             self._in_frame = False
             if len(self._buffer) > 0:
                 raw = bytes(self._buffer)
-                if len(raw) >= 18:
-                    log("TCP RX " + str(len(raw)) + "B flags=0x" + ("%02x" % raw[0]) + " dest=" + raw[2:18].hex(), LOG_DEBUG)
+                # Validate before handing anything to the transport layer. A
+                # frame shorter than a header cannot be a packet, and one that
+                # overflowed HW_MTU was truncated mid-flight — delivering it
+                # feeds a corrupt packet into routing (reference RNS 1.3.9
+                # added the same length checks to its HDLC reader).
+                if self._frame_overflow:
+                    log("TCP oversized HDLC frame dropped (>" + str(self.HW_MTU) + "B)", LOG_DEBUG)
+                elif len(raw) <= MIN_FRAME_LEN:
+                    log("TCP undersized HDLC frame dropped (" + str(len(raw)) + "B)", LOG_DEBUG)
                 else:
-                    log("TCP RX " + str(len(raw)) + "B", LOG_DEBUG)
-                self.process_incoming(raw)
+                    log("TCP RX " + str(len(raw)) + "B flags=0x" + ("%02x" % raw[0]) + " dest=" + raw[2:18].hex(), LOG_DEBUG)
+                    self.process_incoming(raw)
                 self._buffer = bytearray()
+            self._frame_overflow = False
 
         elif byte == FLAG:
             self._in_frame = True
             self._buffer = bytearray()
             self._escape = False
+            self._frame_overflow = False
 
-        elif self._in_frame and len(self._buffer) < self.HW_MTU:
-            if byte == ESC:
+        elif self._in_frame:
+            if len(self._buffer) >= self.HW_MTU:
+                # Stop buffering, but remember the frame is spoiled so the
+                # closing FLAG discards it instead of delivering the prefix.
+                self._frame_overflow = True
+            elif byte == ESC:
                 self._escape = True
             else:
                 if self._escape:
