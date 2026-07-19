@@ -558,11 +558,34 @@ class LXMRouter:
 
         def on_closed(link):
             if message.state < LXMessage.SENT:
+                if self._retry_direct(message, destination):
+                    return
                 message.state = LXMessage.FAILED
                 log("LXMF DIRECT link closed before delivery", LOG_ERROR)
 
         OutgoingLink(destination, established_callback=on_established, closed_callback=on_closed)
         log("LXMF DIRECT delivery initiated to " + message.destination_hash.hex()[:8], LOG_NOTICE)
+
+    def _retry_direct(self, message, destination):
+        """Bounded re-attempt of a DIRECT delivery whose link died before the
+        message got through, or whose resource transfer failed. On a congested
+        half-duplex hop the establishment packets (LR, proof, LRRTT) can be
+        lost to the relay's own transmissions; reference LXMF retries failed
+        outbounds, and without this a single lost packet permanently fails the
+        delivery. Counts attempts on the message: 3 total."""
+        attempts = getattr(message, "direct_attempts", 0) + 1
+        if attempts >= 3:
+            return False
+        message.direct_attempts = attempts
+        log("LXMF DIRECT retry " + str(attempts + 1) + "/3 to "
+            + message.destination_hash.hex()[:8], LOG_NOTICE)
+        try:
+            message.state = LXMessage.SENDING
+            self._send_direct(message, destination)
+            return True
+        except Exception as e:
+            log("LXMF DIRECT retry error: " + str(e), LOG_ERROR)
+            return False
 
     def _direct_resource_concluded(self, resource, message, link, owns_link=True):
         """Called when outgoing DIRECT Resource transfer completes."""
@@ -571,8 +594,19 @@ class LXMRouter:
             message.state = LXMessage.DELIVERED
             log("LXMF DIRECT delivered: " + message.destination_hash.hex()[:8], LOG_NOTICE)
         else:
+            # Retry on a FRESH link: an unanswered advertisement usually means
+            # the peer's side of this link never became established. Mark the
+            # message FAILED before teardown so the link's closed-callback
+            # doesn't also schedule a retry, and grab the destination before
+            # _close() nulls it; _retry_direct resets the state on re-send.
+            destination = link.destination
             message.state = LXMessage.FAILED
+            if owns_link:
+                link.teardown()
+            if destination is not None and self._retry_direct(message, destination):
+                return
             log("LXMF DIRECT resource failed", LOG_ERROR)
+            return
         # Only teardown links we opened ourselves — if we reused a peer-
         # initiated link, tearing it down would close their channel.
         if owns_link:

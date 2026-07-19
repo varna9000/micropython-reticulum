@@ -751,6 +751,33 @@ Each link consumes ~350 bytes of RAM. Up to 4 concurrent links are supported (`M
 </details>
 
 <details>
+<summary><b>Outbound link establishment on half-duplex LoRa (LRRTT resend + delivery retry)</b></summary>
+
+Reference RNS marks a responder link *established* — and starts accepting resource
+transfers on it — **only** when the initiator's RTT packet (LRRTT) arrives. That
+packet is sent exactly once, and on a half-duplex LoRa mesh it is unusually easy to
+lose: a node typically opens its reply link seconds after proving an inbound
+message, while the relay upstream is still transmitting the sibling link's traffic —
+its radio is deaf mid-TX and the LRRTT dies. The failure is silent and deceptive:
+the half-established peer still answers keepalives (raw 1-byte frames, processed
+regardless of link state) but discards every resource advertisement, so the link
+looks alive while nothing ever delivers.
+
+µReticulum hardens both layers on the initiator side:
+
+- **LRRTT resend** (`link.py`) — the RTT payload is kept and re-sent (up to 4×,
+  every 4 s) until the peer sends *anything that decrypts*, which proves its side
+  of the link completed establishment (each resend re-encrypts with a fresh IV, so
+  transport dedup never drops it; a peer that was already established just re-fires
+  its idempotent established-callback).
+- **DIRECT delivery retry** (`lxmf.py`) — if the link dies before the message got
+  through (establishment timeout: lost LR or proof) or the resource transfer fails,
+  the delivery is re-attempted on a fresh link, 3 attempts total — matching
+  reference LXMF's retry behavior.
+
+</details>
+
+<details>
 <summary><b>SX1262 LoRa — RNode split-packet protocol</b></summary>
 
 The LoRa interface implements the same split-packet framing as [RNode firmware](https://github.com/markqvist/RNode_Firmware), enabling transparent interop with RNode devices and support for Reticulum's full 500-byte MTU over LoRa's 255-byte frame limit.

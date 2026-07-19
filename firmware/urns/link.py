@@ -593,6 +593,11 @@ class OutgoingLink:
         # Channel (rnsh etc.) — created lazily via get_channel(). Keepalive.
         self._channel = None
         self._last_keepalive = time.time()
+        # LRRTT delivery tracking (see validate_proof / check_keepalive).
+        self._lrrtt_data = None
+        self._lrrtt_confirmed = False
+        self._lrrtt_resends = 0
+        self._lrrtt_last = 0
 
         from .transport import Transport
         self.establishment_timeout = (OutgoingLink.ESTABLISHMENT_BASE
@@ -715,6 +720,23 @@ class OutgoingLink:
         rtt_data = umsgpack.packb(rtt)
         self.send(rtt_data, const.CTX_LRRTT)
 
+        # The LRRTT is the peer's ONLY trigger to mark the link established
+        # (reference RNS fires link_established solely on receiving it), yet it
+        # is a single fire-and-forget packet on a half-duplex medium. When this
+        # link is a reply to a message we just proved, the relay upstream is
+        # typically still transmitting the sibling link's traffic on LoRa the
+        # moment we answer the proof — its radio is deaf and the LRRTT dies.
+        # The peer then answers raw keepalives (status-independent) but
+        # silently ignores every resource advertisement (ACCEPT_NONE until
+        # link_established), so the link looks alive while nothing delivers.
+        # Keep the RTT payload for resend until the peer proves establishment
+        # by sending anything that decrypts (it only encrypts to us after
+        # processing our LRRTT).
+        self._lrrtt_data = rtt_data
+        self._lrrtt_confirmed = False
+        self._lrrtt_resends = 0
+        self._lrrtt_last = time.time()
+
         # Mark active
         self.status = OutgoingLink.ACTIVE
         self.activated_at = time.time()
@@ -787,6 +809,14 @@ class OutgoingLink:
         signature = identity.sign(self.link_id + pub)
         self.send(pub + signature, const.CTX_LINKIDENTIFY)
         log("OutLink " + self.link_id.hex()[:8] + " identified as " + identity.hexhash[:8], LOG_VERBOSE)
+
+    def _confirm_lrrtt(self):
+        """Mark the LRRTT as delivered: the peer sent something Token-encrypted
+        (or a resource part), which it only does once its side of the link is
+        established — i.e. our LRRTT was processed. Stops the resend loop."""
+        if not self._lrrtt_confirmed:
+            self._lrrtt_confirmed = True
+            self._lrrtt_data = None
 
     def _keepalive_interval(self):
         """Seconds between idle keepalives. The peer (non-initiator) stales us
@@ -905,6 +935,7 @@ class OutgoingLink:
         """Handle incoming data on this link."""
         if packet.context == const.CTX_RESOURCE:
             self.last_activity = time.time()
+            self._confirm_lrrtt()
             for r in self.incoming_resources:
                 r.receive_part(packet.data)
             return
@@ -922,6 +953,7 @@ class OutgoingLink:
             return
 
         self.last_activity = time.time()
+        self._confirm_lrrtt()
 
         if packet.context == const.CTX_RESOURCE_ADV:
             self._handle_resource_adv(plaintext)
@@ -1051,6 +1083,21 @@ class OutgoingLink:
             r.check_adv_timeout()
             if r.is_timed_out():
                 r.cancel()
+        # LRRTT resend: until the peer sends anything we can decrypt, its side
+        # of the link may still be half-established (LRRTT lost on air — the
+        # relay's radio is deaf while it transmits). A reference peer in that
+        # state answers raw keepalives but silently drops every resource
+        # advertisement, so without this the link wedges. Re-sending is safe:
+        # each send re-encrypts (fresh IV, no dedup drop) and a peer that is
+        # already established just re-fires its idempotent established-callback.
+        if (self._lrrtt_data is not None and not self._lrrtt_confirmed
+                and self._lrrtt_resends < 4
+                and time.time() - self._lrrtt_last >= 4):
+            self.send(self._lrrtt_data, const.CTX_LRRTT)
+            self._lrrtt_resends += 1
+            self._lrrtt_last = time.time()
+            log("OutLink " + self.link_id.hex()[:8] + " LRRTT resend "
+                + str(self._lrrtt_resends) + "/4", LOG_DEBUG)
         # Initiator keepalive: the peer stales the link if it hears nothing for
         # a while, so send a 0xFF probe when idle (it replies 0xFE, refreshing
         # last_activity). Only the initiator sends these (reference RNS).
