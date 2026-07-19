@@ -720,6 +720,117 @@ def test_announce_handler_registry():
     assert Transport.announce_handlers == [boom]
 
 
+# ------------- HDR_2 transport-header insertion (hop-count rule) -----------
+# Reference RNS Transport.outbound inserts transport headers ONLY when
+# hops > 1. At hops == 1 the destination is reachable directly on the next-hop
+# interface, so the packet must stay HDR_1 -- even though the path entry's
+# next_hop is a transport node's identity rather than the destination itself.
+# That is the case for EVERY destination behind a shared instance (rnsh,
+# nomadnet behind rnsd). Wrapping such a send addresses it "via <transport>";
+# the shared instance passes it to its local client with the header attached,
+# and the client drops it, because it only accepts a LINKREQUEST whose
+# transport_id is None or matches its OWN (ephemeral) transport identity.
+# Result: no LRPROOF, nothing logged. Two earlier attempts at this rule used
+# "next_hop != destination_hash", which is wrong for exactly this case.
+
+class _StubDest:
+    type = const.DEST_SINGLE
+
+    def __init__(self, h):
+        self.hash = h
+        self.hexhash = h.hex()
+
+
+def _set_path(dest, next_hop, hops):
+    reset_transport()
+    Transport.path_table[dest] = [0, next_hop, hops, 0, None, b"", 0]
+
+
+def test_pack_stays_hdr1_at_one_hop_via_transport_node():
+    # rnsh behind rnsd: hops == 1 but next_hop is the instance, not the dest.
+    _set_path(DEST, RELAY, 1)
+    p = packet.Packet(_StubDest(DEST), b"\x11" * 67, const.PKT_LINKREQUEST)
+    p.pack()
+    assert p.header_type == const.HDR_1, "hops==1 must not be wrapped in HDR_2"
+    assert p.transport_id is None
+    assert (p.raw[0] >> 6) & 0x01 == 0
+    # HDR_1 layout: flags+hops+dest(16)+context, no 16-byte transport_id.
+    assert p.raw[2:18] == DEST
+    assert len(p.raw) == 2 + 16 + 1 + 67
+
+
+def test_pack_wraps_hdr2_beyond_one_hop():
+    _set_path(DEST, RELAY, 2)
+    p = packet.Packet(_StubDest(DEST), b"\x11" * 67, const.PKT_LINKREQUEST)
+    p.pack()
+    assert p.header_type == const.HDR_2
+    assert p.transport_id == RELAY
+    # The TRANSPORT type bit must be set alongside HDR_2, as reference RNS does.
+    assert (p.raw[0] >> 4) & 0x01 == 1, "TRANSPORT bit must accompany HDR_2"
+    assert p.raw[2:18] == RELAY and p.raw[18:34] == DEST
+    assert len(p.raw) == 2 + 16 + 16 + 1 + 67
+
+
+def test_pack_stays_hdr1_with_no_path():
+    _set_path(DEST, RELAY, 2)
+    del Transport.path_table[DEST]
+    p = packet.Packet(_StubDest(DEST), b"\x11" * 67, const.PKT_LINKREQUEST)
+    p.pack()
+    assert p.header_type == const.HDR_1 and p.transport_id is None
+
+
+def _mk_tcp_iface():
+    import importlib
+    tcp = importlib.import_module("urns.interfaces.tcp")
+
+    class _Sock:
+        def __init__(self):
+            self.sent = b""
+
+        def settimeout(self, t):
+            pass
+
+        def sendall(self, d):
+            self.sent += d
+
+    iface = object.__new__(tcp.TCPClientInterface)
+    iface.online = True
+    iface._socket = _Sock()
+    iface.ifac_signing_key = None
+    iface.txb = 0
+    iface.tx = 0
+    iface._last_activity = 0
+    iface.name = "tcp-test"
+    return iface
+
+
+def _hdr1_linkrequest():
+    # flags: HDR_1, BROADCAST, SINGLE, PKT_LINKREQUEST
+    return bytes([0x02, 0]) + DEST + bytes([0x00]) + b"\x11" * 67
+
+
+def test_tcp_egress_does_not_wrap_at_one_hop():
+    # The router strips a relayed request to HDR_1 for the final hop; the TCP
+    # interface must not put the transport header straight back on.
+    _set_path(DEST, RELAY, 1)
+    iface = _mk_tcp_iface()
+    raw = _hdr1_linkrequest()
+    assert iface.process_outgoing(raw) is True
+    body = iface._socket.sent[1:-1]          # strip HDLC flags
+    assert body == raw, "hops==1 must go out unmodified as HDR_1"
+
+
+def test_tcp_egress_wraps_beyond_one_hop():
+    _set_path(DEST, RELAY, 2)
+    iface = _mk_tcp_iface()
+    raw = _hdr1_linkrequest()
+    assert iface.process_outgoing(raw) is True
+    body = iface._socket.sent[1:-1]
+    assert len(body) == len(raw) + 16
+    assert (body[0] >> 6) & 0x01 == 1 and (body[0] >> 4) & 0x01 == 1
+    assert body[2:18] == RELAY and body[18:34] == DEST
+
+
 # ------------------------------- runner ----------------------------------
 def _run():
     import traceback

@@ -117,16 +117,41 @@ class TCPClientInterface(Interface):
             return False
 
         try:
-            # Wrap HDR_1 packets as HDR_2 TRANSPORT when the destination
-            # hash is in path_table (known via announce). Only TCP needs
-            # this — broadcast interfaces (UDP, LoRa) send HDR_1 directly.
+            # Wrap HDR_1 packets as HDR_2 TRANSPORT when the destination is
+            # more than one hop away. Only TCP needs this — broadcast
+            # interfaces (UDP, LoRa) send HDR_1 directly.
             # Link-addressed packets (link_id as dest) are NOT wrapped —
             # the transport server routes these via its link_table.
+            #
+            # The hop check is load-bearing, and mirrors reference RNS
+            # Transport.outbound: transport headers are inserted only when
+            # hops > 1. A destination one hop away is reachable directly on
+            # this interface, so it must go out as plain HDR_1 — even though
+            # its path entry's next_hop is a transport node's identity rather
+            # than the destination itself. That is the case for EVERY
+            # destination behind a shared instance (rnsh, nomadnet et al.
+            # behind rnsd), which is exactly when this used to misfire.
+            #
+            # Wrapping such a send addresses it "via <transport>"; the shared
+            # instance hands it to its local client with the transport header
+            # still attached (stripping is gated on the local_hops_delta
+            # privacy feature, which is off by default), and the client drops
+            # it, because Transport.inbound only accepts a LINKREQUEST whose
+            # transport_id is None or equals its OWN transport identity — and
+            # a shared-instance client generates an ephemeral identity that
+            # never matches the instance's. Result: the link request dies
+            # silently, no LRPROOF, nothing logged at default verbosity.
+            #
+            # (Reference RNS also upgrades at hops == 1 when the sending node
+            # is ITSELF a shared-instance client, to push the packet through
+            # its own instance. urns is always standalone —
+            # Reticulum.is_connected_to_shared_instance is hardcoded False —
+            # so that case does not apply here.)
             if len(data) >= 19 and (data[0] & 0x40) == 0x00 and (data[0] & 0x03) != 0x01:
                 from ..transport import Transport
                 from .. import const
                 _entry = Transport.path_table.get(data[2:18])
-                if _entry:
+                if _entry and _entry[const.IDX_PT_HOPS] > 1:
                     # Set HDR_2 (bit 6) + TRANSPORT (bit 4), keep other bits
                     transport_id = _entry[const.IDX_PT_NEXT_HOP]
                     data = bytes([data[0] | 0x50]) + data[1:2] + transport_id + data[2:]

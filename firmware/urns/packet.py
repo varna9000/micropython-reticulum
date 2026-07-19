@@ -117,20 +117,36 @@ class Packet:
 
         # Auto-upgrade to HDR_2 if destination is reachable via a transport
         # node (learned from HDR_2 announces stored in Transport.path_table).
-        # ONLY for genuinely multi-hop paths: a direct-range destination's path
-        # entry stores the destination itself as next_hop, and wrapping such a
-        # packet in HDR_2 addresses it "via transport <destination>" — every
-        # correct receiver (reference RNS and urns alike) then drops it as
-        # transit traffic for another relay, because transport_id never matches
-        # the receiver's IDENTITY hash. Direct sends must stay HDR_1.
+        # The criterion is HOP COUNT, exactly as reference RNS Transport.outbound:
+        # insert transport headers only when hops > 1. At hops == 1 the
+        # destination is reachable directly on the next-hop interface, so the
+        # packet must go out as plain HDR_1 — even though the path entry's
+        # next_hop is a transport node's identity rather than the destination
+        # itself (which is the case for every destination sitting behind a
+        # shared instance, e.g. rnsh/nomadnet behind rnsd).
+        #
+        # Wrapping a hops == 1 send in HDR_2 addresses it "via <transport>";
+        # the shared instance then hands it to its local client with the
+        # transport header still attached (stripping is gated on the
+        # local_hops_delta privacy feature, off by default), and the client
+        # drops it, because Transport.inbound only accepts a LINKREQUEST whose
+        # transport_id is None or equals its OWN transport identity — and a
+        # shared-instance client generates an ephemeral identity that never
+        # matches the instance's. The link request dies silently: no LRPROOF,
+        # nothing logged at default verbosity.
+        #
+        # (Reference RNS has one extra case that does not apply here: a node
+        # that is itself a shared-instance client also upgrades at hops == 1,
+        # to push the packet through its instance. urns is always standalone —
+        # Reticulum.is_connected_to_shared_instance is hardcoded False.)
         if (self.header_type == const.HDR_1
                 and self.transport_id is None
                 and self.packet_type in (const.PKT_DATA, const.PKT_LINKREQUEST)):
             from .transport import Transport
             _entry = Transport.path_table.get(self.destination_hash)
-            if (_entry is not None
-                    and _entry[const.IDX_PT_NEXT_HOP] != self.destination_hash):
+            if _entry is not None and _entry[const.IDX_PT_HOPS] > 1:
                 self.header_type = const.HDR_2
+                self.transport_type = const.TRANSPORT_TRANSPORT
                 self.transport_id = _entry[const.IDX_PT_NEXT_HOP]
                 self.flags = self._get_packed_flags()
 
