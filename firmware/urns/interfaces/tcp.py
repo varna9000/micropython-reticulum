@@ -29,6 +29,9 @@ def hdlc_escape(data):
 
 
 class TCPClientInterface(Interface):
+    # Exactly one peer on the far end, so an announce received here must not be
+    # echoed back to it (see Transport._rebroadcast_announce).
+    POINT_TO_POINT = True
     HW_MTU = 16384
     CONNECT_TIMEOUT = 5
     RECONNECT_WAIT = 5

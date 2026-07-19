@@ -370,7 +370,8 @@ class Transport:
             Transport.announce_table.pop(oldest, None)
         # [ts, retransmit_tmo, retries, recv_from, hops, raw, lcl_rbrd, blk_rbrd, attchd_if]
         Transport.announce_table[dest] = [now, now + jitter, 0, received_from,
-                                          packet.hops, packet.raw, 0, False, None]
+                                          packet.hops, packet.raw, 0, False, None,
+                                          packet.receiving_interface]
 
     @staticmethod
     def _service_announce_table():
@@ -418,11 +419,24 @@ class Transport:
         # HDR_2 form) so receivers treat them as a path reply, not a fresh announce.
         if entry[const.IDX_AT_BLK_RBRD] and len(new_raw) > 34:
             new_raw = new_raw[:34] + bytes([const.CTX_PATH_RESPONSE]) + new_raw[35:]
+        recv_if = entry[const.IDX_AT_RECV_IF] if len(entry) > const.IDX_AT_RECV_IF else None
         sent_on = []
         for interface in Transport.interfaces:
             if not interface.online or not getattr(interface, "OUT", True):
                 continue
             if attached_if is not None and interface is not attached_if:
+                continue
+            # Split horizon on point-to-point links: never echo an announce back
+            # to the single peer it came from. That peer already has it, and if
+            # the destination is LOCAL to it, our echo teaches it a bogus route
+            # to its own destination via us — which it can adopt whenever its
+            # own path entry is dropped, after which it forwards traffic for
+            # that destination to us instead of delivering it locally, and the
+            # traffic dies here as a duplicate. Shared media (LoRa, UDP) still
+            # get the rebroadcast: there, peers out of the originator's range
+            # depend on us to relay it.
+            if (interface is recv_if
+                    and getattr(interface, "POINT_TO_POINT", False)):
                 continue
             if not Transport._announce_airtime_ok(interface, len(new_raw)):
                 log("Announce airtime cap hit on " + str(interface), LOG_DEBUG)

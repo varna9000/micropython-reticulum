@@ -171,3 +171,4 @@ IDX_AT_RAW            = const(5)
 IDX_AT_LCL_RBRD       = const(6)
 IDX_AT_BLK_RBRD       = const(7)
 IDX_AT_ATTCHD_IF      = const(8)
+IDX_AT_RECV_IF        = const(9)     # interface the announce arrived on
