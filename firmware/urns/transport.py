@@ -6,11 +6,17 @@ import os
 import sys
 import time
 from . import const
-from .log import log, loglevel, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_EXTREME, LOG_NOTICE, LOG_WARNING
+from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_EXTREME, LOG_NOTICE, LOG_WARNING
+from . import log as _logmod
 
-# Evaluated at import: skips per-packet log-string building on the hot path.
-# A runtime set_loglevel() change won't re-enable these two gated logs.
-_log_debug = loglevel >= LOG_DEBUG
+
+def _log_debug():
+    """Hot-path gate that skips per-packet log-string building. Reads the log
+    module's CURRENT level: the old import-time `_log_debug = loglevel >= ...`
+    snapshot froze before the config raised the level, so the per-packet
+    Inbound/TX debug lines never printed — which turned real routing bugs
+    (e.g. the HDR_2 direct-path drop) into silent, undiagnosable failures."""
+    return _logmod.loglevel >= LOG_DEBUG
 
 # ESP32 MicroPython counts seconds from 2000-01-01; convert to/from Unix epoch.
 _EPOCH_OFFSET = 946684800 if sys.platform == "esp32" else 0
@@ -178,7 +184,7 @@ class Transport:
             packet.sent = True
             packet.sent_at = time.time()
 
-            if _log_debug:
+            if _log_debug():
                 log("TX " + str(len(raw)) + "B type=" + str(packet.packet_type) + " ifaces=" + str(len(Transport.interfaces)), LOG_DEBUG)
 
             # Directed egress: when we know a multi-hop transport path to the
@@ -790,7 +796,7 @@ class Transport:
             if Transport._should_remember(packet):
                 Transport._cache_packet_hash(packet)
 
-            if _log_debug:
+            if _log_debug():
                 log("Inbound: type=" + str(packet.packet_type) + " dest=" + packet.destination_hash.hex(), LOG_DEBUG)
 
             # Directed transit: are we the next hop for a DATA/LINKREQUEST in

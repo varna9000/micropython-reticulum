@@ -117,12 +117,19 @@ class Packet:
 
         # Auto-upgrade to HDR_2 if destination is reachable via a transport
         # node (learned from HDR_2 announces stored in Transport.path_table).
+        # ONLY for genuinely multi-hop paths: a direct-range destination's path
+        # entry stores the destination itself as next_hop, and wrapping such a
+        # packet in HDR_2 addresses it "via transport <destination>" — every
+        # correct receiver (reference RNS and urns alike) then drops it as
+        # transit traffic for another relay, because transport_id never matches
+        # the receiver's IDENTITY hash. Direct sends must stay HDR_1.
         if (self.header_type == const.HDR_1
                 and self.transport_id is None
                 and self.packet_type in (const.PKT_DATA, const.PKT_LINKREQUEST)):
             from .transport import Transport
             _entry = Transport.path_table.get(self.destination_hash)
-            if _entry is not None:
+            if (_entry is not None
+                    and _entry[const.IDX_PT_NEXT_HOP] != self.destination_hash):
                 self.header_type = const.HDR_2
                 self.transport_id = _entry[const.IDX_PT_NEXT_HOP]
                 self.flags = self._get_packed_flags()

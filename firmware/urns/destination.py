@@ -260,6 +260,13 @@ class Destination:
                     log("Link creation failed: " + str(e), LOG_ERROR)
         else:
             plaintext = self.decrypt(packet.data)
+            if plaintext is None:
+                # Never fail silently: an addressed packet that reached this
+                # destination but won't decrypt is the single most useful
+                # debugging signal there is (stale identity, ratchet mismatch,
+                # corrupt payload). Reference RNS logs this too.
+                log("Decrypt failed for packet to " + self.hash.hex()[:8]
+                    + " (" + str(len(packet.data)) + "B)", LOG_DEBUG)
             if plaintext is not None:
                 packet.destination = self
                 packet.ratchet_id = self.latest_ratchet_id
