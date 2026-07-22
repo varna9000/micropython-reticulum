@@ -350,6 +350,24 @@ class PacketReceipt:
     def validate_proof_packet(self, proof_packet):
         return self.validate_proof(proof_packet.data, proof_packet)
 
+    def _proof_identity(self):
+        """Identity whose signature proves this packet's delivery.
+
+        Plain destinations carry it directly. For a packet sent OVER a link,
+        self.destination is the link object itself, which has no identity —
+        the responder signs explicit proofs with the *link destination's*
+        identity key (reference RNS: responder Link.sign == destination
+        identity), so resolve one level deeper. Without this, every Channel
+        ACK from a reference peer was discarded unexamined and the sender
+        resent forever."""
+        ident = getattr(self.destination, 'identity', None)
+        if ident is not None:
+            return ident
+        inner = getattr(self.destination, 'destination', None)
+        if inner is not None:
+            return getattr(inner, 'identity', None)
+        return None
+
     def validate_proof(self, proof, proof_packet=None):
         from .identity import Identity
         EXPL_LENGTH = Identity.HASHLENGTH // 8 + Identity.SIGLENGTH // 8
@@ -358,8 +376,9 @@ class PacketReceipt:
         if len(proof) == EXPL_LENGTH:
             proof_hash = proof[:Identity.HASHLENGTH // 8]
             signature = proof[Identity.HASHLENGTH // 8:]
-            if proof_hash == self.hash and hasattr(self.destination, 'identity') and self.destination.identity:
-                if self.destination.identity.validate(signature, self.hash):
+            _ident = self._proof_identity() if proof_hash == self.hash else None
+            if _ident is not None:
+                if _ident.validate(signature, self.hash):
                     self.status = PacketReceipt.DELIVERED
                     self.proved = True
                     self.concluded_at = time.time()
@@ -372,10 +391,11 @@ class PacketReceipt:
                     return True
             return False
         elif len(proof) == IMPL_LENGTH:
-            if not hasattr(self.destination, 'identity') or not self.destination.identity:
+            _ident = self._proof_identity()
+            if _ident is None:
                 return False
             signature = proof[:Identity.SIGLENGTH // 8]
-            if self.destination.identity.validate(signature, self.hash):
+            if _ident.validate(signature, self.hash):
                 self.status = PacketReceipt.DELIVERED
                 self.proved = True
                 self.concluded_at = time.time()

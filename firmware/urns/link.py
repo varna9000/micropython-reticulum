@@ -586,6 +586,7 @@ class OutgoingLink:
     _lrrtt_confirmed = True
     _lrrtt_resends   = 0
     _lrrtt_last      = 0
+    _lrrtt_wait      = 10
 
     # Pending request states: SENT waits for a response packet or resource
     # advertisement (request timeout applies); RECEIVING means the response
@@ -628,6 +629,7 @@ class OutgoingLink:
         self._lrrtt_confirmed = False
         self._lrrtt_resends = 0
         self._lrrtt_last = 0
+        self._lrrtt_wait = 10
 
         from .transport import Transport
         self.establishment_timeout = (OutgoingLink.ESTABLISHMENT_BASE
@@ -766,6 +768,10 @@ class OutgoingLink:
         self._lrrtt_confirmed = False
         self._lrrtt_resends = 0
         self._lrrtt_last = time.time()
+        # First resend no sooner than 10s (or 2x the measured rtt on slow
+        # paths): give the peer's first encrypted reply time to confirm us,
+        # so reference listeners never see a duplicate (see job note below).
+        self._lrrtt_wait = max(10, 2 * (self.rtt or 0))
 
         # Mark active
         self.status = OutgoingLink.ACTIVE
@@ -1127,17 +1133,27 @@ class OutgoingLink:
         # of the link may still be half-established (LRRTT lost on air — the
         # relay's radio is deaf while it transmits). A reference peer in that
         # state answers raw keepalives but silently drops every resource
-        # advertisement, so without this the link wedges. Re-sending is safe:
-        # each send re-encrypts (fresh IV, no dedup drop) and a peer that is
-        # already established just re-fires its idempotent established-callback.
+        # advertisement, so without this the link wedges over LoRa.
+        #
+        # The resend must NOT be eager: reference rtt_packet() is NOT
+        # idempotent — every received LRRTT copy re-fires link_established,
+        # and an rnsh listener spawns a session per firing; the duplicate
+        # sessions then protocol-error and tear the link down just as the
+        # real one starts (observed live against rnsh 0.1.7 / RNS 1.4.0 over
+        # TCP, where nothing is lost and every copy arrives). So wait out
+        # the peer's first encrypted reply before the first resend — on a
+        # healthy path that reply confirms us long before the timer — and
+        # back off exponentially. A lost LRRTT over LoRa still recovers at
+        # +10/+30/+70s, inside the per-hop establishment window.
         if (self._lrrtt_data is not None and not self._lrrtt_confirmed
-                and self._lrrtt_resends < 4
-                and time.time() - self._lrrtt_last >= 4):
+                and self._lrrtt_resends < 3
+                and time.time() - self._lrrtt_last >= self._lrrtt_wait):
             self.send(self._lrrtt_data, const.CTX_LRRTT)
             self._lrrtt_resends += 1
             self._lrrtt_last = time.time()
+            self._lrrtt_wait *= 2
             log("OutLink " + self.link_id.hex()[:8] + " LRRTT resend "
-                + str(self._lrrtt_resends) + "/4", LOG_DEBUG)
+                + str(self._lrrtt_resends) + "/3", LOG_DEBUG)
         # Initiator keepalive: the peer stales the link if it hears nothing for
         # a while, so send a 0xFF probe when idle (it replies 0xFE, refreshing
         # last_activity). Only the initiator sends these (reference RNS).
