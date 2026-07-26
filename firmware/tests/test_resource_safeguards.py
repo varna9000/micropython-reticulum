@@ -369,6 +369,156 @@ def test_hdlc_frame_length_validation():
           "delivered %d" % len(delivered))
 
 
+# ---------------- request/response size limits (RNS 1.4.1) ------------------
+def _mk_inbound_link(max_request_size=None):
+    """Inbound (peer-initiated) link whose destination carries an app limit."""
+    L = link.Link
+    lk = object.__new__(L)
+    lk.status = L.ACTIVE
+    lk.link_id = LINK_ID
+    lk.hash = LINK_ID
+    lk._token = _PassToken()
+    lk.mtu = 500
+    lk.sdu = 465
+    lk.mdu = 431
+    lk.last_activity = time.time()
+    lk.last_outbound = time.time()
+    lk.incoming_resources = []
+    lk.outgoing_resources = []
+    lk.resource_started_callback = None
+    lk.resource_concluded_callback = None
+    handled = []
+    dest = types.SimpleNamespace(hash=DEST, hexhash=DEST.hex(),
+                                 max_request_size=max_request_size,
+                                 request_handlers={})
+    lk.destination = dest
+    return lk, dest, handled
+
+
+def test_max_request_size_rejects_oversized_request():
+    reset_transport()
+    Transport.interfaces.append(MockInterface("m"))
+    lk, dest, _ = _mk_inbound_link(max_request_size=64)
+    seen = []
+    path_hash = Identity.truncated_hash(b"/big")
+    dest.request_handlers[path_hash] = {"path": "/big", "allow": 1,   # ALLOW_ALL
+                                        "generator": lambda **kw: seen.append(1)}
+    pkt = types.SimpleNamespace(getTruncatedHash=lambda: b"\x01" * 16)
+
+    big = umsgpack.packb([time.time(), path_hash, b"x" * 200])
+    lk._handle_request(big, pkt)
+    check(seen == [], "oversized request never reaches the handler")
+
+    small = umsgpack.packb([time.time(), path_hash, b"x"])
+    check(len(small) <= 64, "control request is inside the limit",
+          "%d B" % len(small))
+    lk._handle_request(small, pkt)
+    check(len(seen) == 1, "request inside the limit is handled")
+
+
+def test_max_request_size_unset_accepts_anything():
+    reset_transport()
+    Transport.interfaces.append(MockInterface("m"))
+    lk, dest, _ = _mk_inbound_link(max_request_size=None)
+    seen = []
+    path_hash = Identity.truncated_hash(b"/any")
+    dest.request_handlers[path_hash] = {"path": "/any", "allow": 1,   # ALLOW_ALL
+                                        "generator": lambda **kw: seen.append(1)}
+    pkt = types.SimpleNamespace(getTruncatedHash=lambda: b"\x02" * 16)
+    lk._handle_request(umsgpack.packb([time.time(), path_hash, b"x" * 400]), pkt)
+    check(len(seen) == 1, "no limit set -> request handled as before")
+
+
+def test_request_resource_over_limit_cancelled():
+    # A request arriving as a resource is capped too, and cancelling before any
+    # part transfers sends the receiver-side RCL so the sender stops at once.
+    reset_transport()
+    mi = MockInterface("m")
+    Transport.interfaces.append(mi)
+    lk, dest, _ = _mk_inbound_link(max_request_size=100)
+    r = _mkresource(lk, False)
+    r.request_id = b"\x09" * 16
+    r.flags = 0                      # request, not response
+    r.total_data_size = 5000
+    mi.sent = []
+    allowed = lk._request_resource_allowed(r)
+    check(not allowed, "oversized request resource rejected")
+    check(r.status == resource_mod.FAILED, "rejected resource marked failed")
+    check(len(mi.sent) == 1 and mi.sent[0][18] == const.CTX_RESOURCE_RCL,
+          "receiver-side RCL signalled to the sender")
+
+
+def test_delivery_resource_not_capped_by_request_limit():
+    # An LXMF delivery carries no request_id and must not be judged by the
+    # request limit — otherwise setting one would break normal messaging.
+    reset_transport()
+    Transport.interfaces.append(MockInterface("m"))
+    lk, dest, _ = _mk_inbound_link(max_request_size=100)
+    r = _mkresource(lk, False)
+    r.request_id = None
+    r.flags = 0
+    r.total_data_size = 5000
+    check(lk._request_resource_allowed(r), "plain delivery passes the request limit")
+
+
+def test_max_response_size_fails_oversized_single_packet():
+    mi, ol = _rig()
+    ok, failed = [], []
+    ol.pending_requests[b"\x03" * 16] = [
+        link.OutgoingLink.REQ_SENT, time.time(), 30,
+        lambda rid, data: ok.append(data), lambda rid: failed.append(rid), None,
+        16,                                   # max_response_size
+    ]
+    ol._dispatch_response(b"\x03" * 16, b"y" * 100)
+    check(ok == [], "oversized response not delivered to the callback")
+    check(failed == [b"\x03" * 16], "requester told the response failed")
+    check(b"\x03" * 16 not in ol.pending_requests, "pending request cleared")
+
+
+def test_max_response_size_allows_within_limit():
+    mi, ol = _rig()
+    ok = []
+    ol.pending_requests[b"\x04" * 16] = [
+        link.OutgoingLink.REQ_SENT, time.time(), 30,
+        lambda rid, data: ok.append(data), None, None, 1024,
+    ]
+    ol._dispatch_response(b"\x04" * 16, b"y" * 100)
+    check(ok == [b"y" * 100], "response inside the limit is delivered")
+
+
+def _real_destination_class():
+    """harness injects a FAKE urns.destination, so load the real module under a
+    side name. The dotted name keeps __package__ == "urns", so its relative
+    imports still resolve, and the fake other tests rely on stays in place."""
+    import importlib.util
+    import os
+    fw = os.path.dirname(os.path.dirname(os.path.abspath(harness.__file__)))
+    spec = importlib.util.spec_from_file_location(
+        "urns._destination_real", os.path.join(fw, "urns", "destination.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.Destination
+
+
+def test_destination_max_request_size_validation():
+    d = object.__new__(_real_destination_class())
+    d.max_request_size = None
+    d.set_max_request_size(2048)
+    check(d.max_request_size == 2048, "limit stored")
+    d.set_max_request_size(None)
+    check(d.max_request_size is None, "None clears the limit")
+    try:
+        d.set_max_request_size(-1)
+        check(False, "negative limit rejected")
+    except ValueError:
+        check(True, "negative limit rejected")
+    try:
+        d.set_max_request_size("lots")
+        check(False, "non-numeric limit rejected")
+    except TypeError:
+        check(True, "non-numeric limit rejected")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

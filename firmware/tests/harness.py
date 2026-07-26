@@ -76,6 +76,9 @@ class Destination:
     PROVE_NONE = 0x21
     PROVE_APP = 0x22
     PROVE_ALL = 0x23
+    ALLOW_NONE = 0x00
+    ALLOW_ALL = 0x01
+    ALLOW_LIST = 0x02
 
 
 def _install_shims():

@@ -336,6 +336,14 @@ class Link:
 
         from . import umsgpack
 
+        # App-level size cap, checked before unpacking so an oversized request
+        # never becomes a Python object graph (RNS 1.4.1 max_request_size).
+        limit = getattr(self.destination, "max_request_size", None)
+        if limit is not None and len(plaintext) > limit:
+            log("Link " + self.link_id.hex()[:8] + " request of " + str(len(plaintext))
+                + "B exceeds limit " + str(limit) + ", ignoring", LOG_DEBUG)
+            return
+
         try:
             request_data = umsgpack.unpackb(plaintext)
         except Exception as e:
@@ -416,11 +424,33 @@ class Link:
                 + str(e), LOG_ERROR)
             self.teardown()
             return
+        if r is not None and not self._request_resource_allowed(r):
+            return
         if r and self.resource_started_callback:
             try:
                 self.resource_started_callback(r)
             except Exception as e:
                 log("Resource started callback error: " + str(e), LOG_ERROR)
+
+    def _request_resource_allowed(self, resource):
+        """Enforce the destination's max_request_size on a request arriving as a
+        resource. Cancelling here costs nothing: no part has transferred yet,
+        and the RCL tells the sender to stop instead of retrying for minutes.
+        Only request resources are capped — an LXMF delivery carries no
+        request_id, and a response is the requester's business, not ours."""
+        from .resource import FLAG_IS_RESPONSE
+        limit = getattr(self.destination, "max_request_size", None)
+        if limit is None:
+            return True
+        if not resource.request_id or (resource.flags & FLAG_IS_RESPONSE):
+            return True
+        if resource.total_data_size <= limit:
+            return True
+        log("Link " + self.link_id.hex()[:8] + " request resource of "
+            + str(resource.total_data_size) + "B exceeds limit " + str(limit)
+            + ", rejecting", LOG_DEBUG)
+        resource.cancel()
+        return False
 
     def _handle_resource_req(self, plaintext):
         """Handle resource part request (sender mode)."""
@@ -583,6 +613,7 @@ _PR_TIMEOUT = 2
 _PR_RESP_CB = 3
 _PR_FAIL_CB = 4
 _PR_PROG_CB = 5
+_PR_MAX_RESP = 6
 
 
 class OutgoingLink:
@@ -904,7 +935,8 @@ class OutgoingLink:
             log("OutLink keepalive send error: " + str(e), LOG_DEBUG)
 
     def request(self, path, data=None, response_callback=None,
-                failed_callback=None, progress_callback=None, timeout=None):
+                failed_callback=None, progress_callback=None, timeout=None,
+                max_response_size=None):
         """Send a request over this link (reference RNS Link.request parity).
 
         Returns the request_id (bytes) or None if the request could not be
@@ -912,6 +944,11 @@ class OutgoingLink:
         on timeout or failure failed_callback(request_id) fires. Responses
         larger than one packet arrive as a Resource and are dispatched
         transparently. The request payload itself must fit in one packet.
+
+        max_response_size caps what we will accept back, in bytes (RNS 1.4.1).
+        An oversized response fails the request through failed_callback instead
+        of being buffered — the remote decides that size, and on an MCU it is
+        not a number to take on trust.
         """
         from .identity import Identity
         from . import umsgpack
@@ -945,6 +982,7 @@ class OutgoingLink:
         self.pending_requests[request_id] = [
             OutgoingLink.REQ_SENT, time.time(), timeout,
             response_callback, failed_callback, progress_callback,
+            max_response_size,
         ]
         log("OutLink " + self.link_id.hex()[:8] + " request " + path
             + " id=" + request_id.hex()[:8], LOG_VERBOSE)
@@ -963,9 +1001,17 @@ class OutgoingLink:
         self._dispatch_response(unpacked[0], unpacked[1])
 
     def _dispatch_response(self, request_id, response_data):
-        entry = self.pending_requests.pop(request_id, None)
+        entry = self.pending_requests.get(request_id)
         if entry is None:
             return
+        limit = entry[_PR_MAX_RESP]
+        if limit is not None:
+            size = len(response_data) if hasattr(response_data, "__len__") else 0
+            if size > limit:
+                self._fail_request(request_id, "response of " + str(size)
+                                   + "B exceeds limit " + str(limit))
+                return
+        self.pending_requests.pop(request_id, None)
         log("OutLink " + self.link_id.hex()[:8] + " response id=" + request_id.hex()[:8], LOG_VERBOSE)
         if entry[_PR_RESP_CB]:
             try:
@@ -1065,6 +1111,16 @@ class OutgoingLink:
             # here the resource retry machinery governs failure, so suspend
             # the request timeout and route progress to the requester.
             entry = self.pending_requests[r.request_id]
+            limit = entry[_PR_MAX_RESP]
+            if limit is not None and r.total_data_size > limit:
+                # Cancel before a single part transfers; the RCL stops the
+                # sender rather than leaving it retrying against a peer that
+                # will never request parts.
+                r.cancel()
+                self._fail_request(r.request_id, "response resource of "
+                                   + str(r.total_data_size) + "B exceeds limit "
+                                   + str(limit))
+                return
             entry[_PR_STATE] = OutgoingLink.REQ_RECEIVING
             if entry[_PR_PROG_CB]:
                 r.progress_callback = entry[_PR_PROG_CB]
