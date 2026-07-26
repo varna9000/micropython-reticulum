@@ -1058,7 +1058,13 @@ class OutgoingLink:
             return
         limit = entry[_PR_MAX_RESP]
         if limit is not None:
-            size = len(response_data) if hasattr(response_data, "__len__") else 0
+            # len() in a try, NOT hasattr(x, "__len__"): MicroPython implements
+            # dunders as C slots, so hasattr is False even for bytes and the
+            # check would silently pass everything.
+            try:
+                size = len(response_data)
+            except TypeError:
+                size = 0
             if size > limit:
                 self._fail_request(request_id, "response of " + str(size)
                                    + "B exceeds limit " + str(limit))
