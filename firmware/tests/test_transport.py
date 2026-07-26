@@ -231,6 +231,65 @@ def test_should_add_reconfirm_refreshes_expiry():
     assert e[const.IDX_PT_EXPIRES] > 1.0             # expiry refreshed (kept alive)
 
 
+# ------------- interface gravity (RNS 1.4.1) -------------------------------
+def _announce_both(dest, first_if, second_if, emitted=1000, hops1=0, hops2=0):
+    """Same announce (same emission) heard over two interfaces."""
+    data = build_announce_data(emitted=emitted)
+    Transport.inbound(build_announce_hdr1(dest, data=data, hops=hops1), first_if)
+    Transport.inbound(build_announce_hdr1(dest, data=data, hops=hops2), second_if)
+
+
+def test_gravity_moves_path_to_preferred_interface():
+    """Same announce, same hop count, two interfaces: without gravity whichever
+    copy won the race keeps the path forever. Gravity lets a node say it would
+    rather reach this destination over WiFi than LoRa."""
+    reset_transport()
+    lora = MockInterface("lora", gravity=0)
+    wifi = MockInterface("wifi", gravity=5)
+    Transport.interfaces = [lora, wifi]
+    _announce_both(DEST, lora, wifi)
+    assert Transport.path_table[DEST][const.IDX_PT_RECV_IF] is wifi
+
+
+def test_gravity_does_not_move_path_downhill():
+    reset_transport()
+    lora = MockInterface("lora", gravity=0)
+    wifi = MockInterface("wifi", gravity=5)
+    Transport.interfaces = [lora, wifi]
+    _announce_both(DEST, wifi, lora)          # preferred one heard first
+    assert Transport.path_table[DEST][const.IDX_PT_RECV_IF] is wifi
+
+
+def test_gravity_tie_keeps_first_path():
+    reset_transport()
+    a = MockInterface("a", gravity=3)
+    b = MockInterface("b", gravity=3)
+    Transport.interfaces = [a, b]
+    _announce_both(DEST, a, b)
+    assert Transport.path_table[DEST][const.IDX_PT_RECV_IF] is a
+
+
+def test_gravity_never_beats_hop_count():
+    # Affinity breaks ties; it does not buy a longer path. A 2-hop copy on the
+    # preferred interface must not displace the 1-hop path already installed.
+    reset_transport()
+    lora = MockInterface("lora", gravity=0)
+    wifi = MockInterface("wifi", gravity=9)
+    Transport.interfaces = [lora, wifi]
+    _announce_both(DEST, lora, wifi, hops1=0, hops2=1)
+    assert Transport.path_table[DEST][const.IDX_PT_RECV_IF] is lora
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 1
+
+
+def test_gravity_absent_attribute_is_neutral():
+    # Path entries restored from flash can carry a None interface.
+    reset_transport()
+    lora = MockInterface("lora", gravity=0)
+    Transport.interfaces = [lora]
+    assert Transport._gravity_of(None) == 0
+    assert Transport._gravity_of(lora) == 0
+
+
 def test_duplicate_announce_no_restorm():
     reset_transport()
     iface = MockInterface("lora")

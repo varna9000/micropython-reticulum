@@ -334,6 +334,15 @@ class Transport:
         return True
 
     @staticmethod
+    def _gravity_of(interface):
+        """Pathing affinity of an interface, neutral when unknown. Restored
+        path-table entries can carry a None interface, so this must tolerate it."""
+        try:
+            return int(getattr(interface, "gravity", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
     def _announce_emitted(packet):
         """Emission timebase of an announce: the last 5 bytes of its 10-byte
         random_hash (big-endian seconds). Used for freshness/replay rejection."""
@@ -1396,6 +1405,18 @@ class Transport:
                 should_add = True
             elif packet.hops == entry[const.IDX_PT_HOPS]:
                 should_add = emitted > entry[const.IDX_PT_EMITTED]
+                if not should_add and emitted == entry[const.IDX_PT_EMITTED]:
+                    # Same announce, same cost, reached us over a second
+                    # interface: let pathing affinity break the tie (RNS 1.4.1
+                    # interface gravity). Without this the first copy to arrive
+                    # keeps the path — which on a mixed node means whichever of
+                    # LoRa/WiFi happened to win the race, forever.
+                    should_add = Transport._gravity_of(packet.receiving_interface) \
+                        > Transport._gravity_of(entry[const.IDX_PT_RECV_IF])
+                    if should_add:
+                        log("Path " + dest.hex()[:8] + " moving to "
+                            + str(packet.receiving_interface) + " (higher gravity)",
+                            LOG_VERBOSE)
             else:
                 should_add = now >= entry[const.IDX_PT_EXPIRES]
 

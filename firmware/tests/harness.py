@@ -159,7 +159,7 @@ class MockInterface:
     """Captures every raw it is asked to transmit (process_outgoing)."""
 
     def __init__(self, name="mock", online=True, mode=None, hw_mtu=500,
-                 bitrate=10000, out=True, in_=True):
+                 bitrate=10000, out=True, in_=True, gravity=0):
         self.name = name
         self.online = online
         self.OUT = out
@@ -167,6 +167,7 @@ class MockInterface:
         self.HW_MTU = hw_mtu
         self.bitrate = bitrate
         self.mode = mode
+        self.gravity = gravity
         # IFAC disabled so Transport._ifac_validate passes packets through.
         self.ifac_signing_key = None
         self.ifac_key = None

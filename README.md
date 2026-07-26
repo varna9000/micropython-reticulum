@@ -449,6 +449,20 @@ CONFIG = {
 
 Routing state lives in RAM-bounded tables: `path_table` (dest → next-hop + interface + hop count), `reverse_table` (proof return), `link_table` (link/resource transit), plus a small cache of recent announces.
 
+**Choosing between equal paths** — when the same announce reaches a node over two interfaces at the same hop count, whichever copy arrived first would otherwise keep the path forever. Set `gravity` on an interface to express a preference (RNS 1.4.1 semantics: higher wins, `0` is neutral, negatives discouraged). `default_gravity` at the top level applies to every interface that does not set its own.
+
+```python
+CONFIG = {
+    "default_gravity": 0,
+    "interfaces": [
+        { "type": "TCPClientInterface", "gravity": 5,  ... },   # prefer IP when both work
+        { "type": "LoRaInterface",      "gravity": 0,  ... },   # fall back to radio
+    ],
+}
+```
+
+Gravity only breaks ties. It never buys a longer path — a shorter route always wins first, regardless of preference.
+
 **Resilience** (built for an open, long-running mesh): routing tables expire and are **purged when an interface drops** (WiFi-flap recovery); per-source announce rate-limiting and hard table caps prevent runaway memory; optional **strict link-proof validation** (native-gated Ed25519, ~17 ms); **blackholing** of misbehaving identities; and the **path table persists to flash** so a reboot isn't a mesh blackout.
 
 **Watching it work**: every forward logs a `Relay …` line at `NOTICE` and bumps a counter, so you can follow relay activity in the console. The router example also serves a plain-HTTP dashboard on the LAN ([`webmonitor.py`](firmware/webmonitor.py)) showing live `RELAYED ann/data/link/proof` counts, the path table, and the log stream. Path-table rows are labeled with the peer's announced display name **and the protocol behind each destination hash** — `lxmf` (messaging peer), `lxmf-pn` (propagation node), `nomad` (NomadNet pages), `voice-lxst` / `voice-mc` (LXST and MeshChat call endpoints), `probe`, or a `?hex` tag for unknown apps. Classification reads the `name_hash` every announce carries (no decryption involved) and survives reboots by recomputing labels from persisted identities.
