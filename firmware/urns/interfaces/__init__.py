@@ -13,11 +13,17 @@ class Interface:
     MODE_BOUNDARY = 0x05
     MODE_GATEWAY = 0x06
 
+    # Pathing affinity (RNS 1.4.1). When the same announce reaches us over two
+    # interfaces at the same hop count, the one with higher gravity wins the
+    # path. Positive raises affinity, negative lowers it; 0 is neutral.
+    DEFAULT_GRAVITY = 0
+
     def __init__(self, name="Interface"):
         self.name = name
         self.online = False
         self.enabled = True
         self.mode = Interface.MODE_FULL
+        self.gravity = Interface.DEFAULT_GRAVITY
         self.bitrate = 0
         self.mtu = 500
         # Directed-routing attributes (used by Transport relay forwarding).

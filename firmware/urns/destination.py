@@ -89,6 +89,7 @@ class Destination:
         self.packet_callback = None
         self.proof_requested_callback = None
         self.request_handlers = {}
+        self.max_request_size = None    # see set_max_request_size()
         self._announce_handler = None
 
         if identity is None and direction == Destination.IN and type != Destination.PLAIN:
@@ -247,6 +248,23 @@ class Destination:
             "allow": allow,
         }
         log("Registered request handler for " + path, LOG_VERBOSE)
+
+    def set_max_request_size(self, max_request_size):
+        """Cap the request size this destination's handlers will accept, in
+        bytes (RNS 1.4.1 API). None means no app limit — the stack's own
+        MAX_RESOURCE_SIZE ceiling still applies. Worth setting well below that
+        on a node whose free heap is measured in tens of KB: a 16 KB request is
+        accepted and buffered before any handler sees it."""
+        if max_request_size is None:
+            self.max_request_size = None
+            return
+        try:
+            max_request_size = int(max_request_size)
+        except (TypeError, ValueError):
+            raise TypeError("Invalid maximum request size")
+        if max_request_size < 0:
+            raise ValueError("Maximum request size cannot be negative")
+        self.max_request_size = max_request_size
 
     def receive(self, packet):
         if packet.packet_type == const.PKT_LINKREQUEST:

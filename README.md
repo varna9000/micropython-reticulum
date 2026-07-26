@@ -449,6 +449,20 @@ CONFIG = {
 
 Routing state lives in RAM-bounded tables: `path_table` (dest → next-hop + interface + hop count), `reverse_table` (proof return), `link_table` (link/resource transit), plus a small cache of recent announces.
 
+**Choosing between equal paths** — when the same announce reaches a node over two interfaces at the same hop count, whichever copy arrived first would otherwise keep the path forever. Set `gravity` on an interface to express a preference (RNS 1.4.1 semantics: higher wins, `0` is neutral, negatives discouraged). `default_gravity` at the top level applies to every interface that does not set its own.
+
+```python
+CONFIG = {
+    "default_gravity": 0,
+    "interfaces": [
+        { "type": "TCPClientInterface", "gravity": 5,  ... },   # prefer IP when both work
+        { "type": "LoRaInterface",      "gravity": 0,  ... },   # fall back to radio
+    ],
+}
+```
+
+Gravity only breaks ties. It never buys a longer path — a shorter route always wins first, regardless of preference.
+
 **Resilience** (built for an open, long-running mesh): routing tables expire and are **purged when an interface drops** (WiFi-flap recovery); per-source announce rate-limiting and hard table caps prevent runaway memory; optional **strict link-proof validation** (native-gated Ed25519, ~17 ms); **blackholing** of misbehaving identities; and the **path table persists to flash** so a reboot isn't a mesh blackout.
 
 **Watching it work**: every forward logs a `Relay …` line at `NOTICE` and bumps a counter, so you can follow relay activity in the console. The router example also serves a plain-HTTP dashboard on the LAN ([`webmonitor.py`](firmware/webmonitor.py)) showing live `RELAYED ann/data/link/proof` counts, the path table, and the log stream. Path-table rows are labeled with the peer's announced display name **and the protocol behind each destination hash** — `lxmf` (messaging peer), `lxmf-pn` (propagation node), `nomad` (NomadNet pages), `voice-lxst` / `voice-mc` (LXST and MeshChat call endpoints), `probe`, or a `?hex` tag for unknown apps. Classification reads the `name_hash` every announce carries (no decryption involved) and survives reboots by recomputing labels from persisted identities.
@@ -630,11 +644,17 @@ Tested and confirmed working with:
 - **RNode** (SX1276 / SX1278) — bidirectional LoRa, full split-packet support for the complete 500-byte MTU. Tested with Heltec Wireless Stick Lite V1 on 868 MHz.
 - **RNS transport servers** — TCP client connectivity to remote transport hubs, automatic path learning from announces
 
-Protocol behaviour tracks **reference RNS 1.3.9**. Its link and resource
+Protocol behaviour tracks **reference RNS 1.4.1**. The 1.3.9 link and resource
 safeguards are implemented here (see the *Resource and link safeguards* block
-under [Protocol details](#protocol-details)); the parts of that release that do
-not apply to an MCU port — `BackboneInterface` flap-blocking, interface
-discovery, and the `rnsh` utility — are out of scope.
+under [Protocol details](#protocol-details)), as is the whole of 1.4.x that
+applies to a leaf or relay node: dynamic link path re-balancing, interface
+gravity, RTT-scaled keepalive and stale windows with the keepalive-reply
+throttle, `max_request_size` / `max_response_size`, and out-of-window rejection
+on `Channel` (see *Link path re-balancing* below). Nothing in 1.4.x changed the
+wire format, so older and newer peers interoperate either way.
+
+Out of scope for an MCU port: `BackboneInterface` flap-blocking, interface
+discovery, I2P, shared-instance/tunnel interfaces, and the `rnsh` utility.
 
 > **If you run an `rnsh` listener** (any platform), update it to RNS 1.3.9: that
 > release patches a critical vulnerability where a command could be started on a
@@ -819,6 +839,60 @@ smaller margin for error in mind.
   handed to routing as truncated packets.
 
 Covered by `firmware/tests/test_resource_safeguards.py`.
+
+</details>
+
+<details>
+<summary><b>Link path re-balancing and keepalives (parity with RNS 1.4.x)</b></summary>
+
+A link request and the proof that answers it do not always travel the same
+number of hops — a route can shorten or lengthen between the two, and on a mesh
+with several possible paths they can simply differ. Both ends check the proof's
+hop count, so a mismatch used to mean the link never came up at all.
+
+- **Re-balancing at a relay** — when a transit link-request proof arrives with a
+  hop count other than the one recorded for that link, the relay verifies the
+  proof signature and then adopts the new count, in both the link table and the
+  path table, instead of dropping the proof. The signature check is mandatory
+  here: this rewrites routing state, so an unverifiable proof (no native
+  Ed25519, or `strict_lr_validation` off) is still dropped — a failed link beats
+  an unauthenticated hop rewrite.
+- **Re-balancing at the initiator** — the same correction is applied to the path
+  table once our own link goes active. No extra crypto is spent: the link only
+  reaches that state after the peer's signature over our link id has been
+  verified.
+- **Keepalive on outbound silence** — what stales a link at the far end is how
+  long since *we* transmitted, not how long since we heard. An initiator that
+  only receives (a peer streaming to it) used to fall silent and get torn down
+  mid-stream; it now probes when either direction has been quiet.
+- **RTT-scaled windows** — the RTT the initiator measures is carried in the
+  handshake and now sizes the receiver's keepalive and stale windows
+  (`clamp(rtt × 360/1.75, 5, 360)`, stale = twice that). LoRa clamps back to the
+  360 s / 720 s pair this port used unconditionally before; a fast link drops to
+  roughly 20 s / 41 s, so a dead TCP link is reaped in under a minute instead of
+  twelve. An absent or unusable value keeps the old defaults.
+- **Keepalive reply throttle** — with both ends deriving that window from the
+  same RTT, a `0xFF` probe is answered only if we have been quiet for it.
+  Anything transmitted inside the window already proved us alive, and on
+  half-duplex LoRa the saved frame is one that would have gone out exactly when
+  the channel is busiest.
+- **Channel window** — a message sequence past the far edge of the receive
+  window is rejected rather than buffered forever behind a gap that can never be
+  filled.
+
+**Request and response size limits** — `destination.set_max_request_size(n)`
+caps what a destination's request handlers will accept, and
+`link.request(..., max_response_size=n)` caps what comes back. Both refuse
+before buffering: an oversized single-packet request is dropped before it is
+unpacked, and an oversized resource is cancelled with an `RCL` before a single
+part transfers, so the sender stops immediately rather than retrying for
+minutes. Without a limit the stack's own 16 KB `MAX_RESOURCE_SIZE` ceiling still
+applies — worth lowering on a node with tens of KB of free heap, especially over
+TCP where the negotiated link MTU reaches 16 KB.
+
+Covered by `firmware/tests/test_transport.py`, `test_link_request.py`,
+`test_resource_safeguards.py` and `test_channel.py`, and verified on an ESP32-S3
+(T-Deck) against real native Ed25519.
 
 </details>
 

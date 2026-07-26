@@ -224,6 +224,14 @@ class Channel:
                     log("Channel: invalid seq " + str(envelope.sequence), LOG_EXTREME)
                     return
 
+            elif envelope.sequence > self._next_rx_sequence + Channel.WINDOW_MAX:
+                # Beyond the far edge of the receive window (RNS 1.4.1). Without
+                # this the envelope is buffered in _rx_ring forever: contiguous
+                # delivery never reaches its sequence, so every later message is
+                # held back too and the ring's RAM is never reclaimed.
+                log("Channel: invalid seq " + str(envelope.sequence), LOG_EXTREME)
+                return
+
             is_new = self._emplace_envelope(envelope, self._rx_ring)
             if not is_new:
                 log("Channel: duplicate message", LOG_EXTREME)

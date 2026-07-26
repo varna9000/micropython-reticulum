@@ -8,6 +8,9 @@ from . import const
 from .log import log, set_loglevel, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_INFO
 from .identity import Identity
 from .transport import Transport
+from .interfaces import Interface as _BaseInterface
+
+IFACE_DEFAULT_GRAVITY = _BaseInterface.DEFAULT_GRAVITY
 
 
 class Reticulum:
@@ -186,6 +189,17 @@ class Reticulum:
                 cls = getattr(mod, itype)
                 iface = cls(iface_config)
                 iface.setup_ifac(iface_config)
+                # Pathing affinity: per-interface "gravity", else the network-wide
+                # "default_gravity", else neutral. Higher wins a same-hop tie in
+                # the path table — e.g. prefer WiFi over LoRa for a destination
+                # both can reach (see Transport._handle_announce).
+                try:
+                    iface.gravity = int(iface_config.get(
+                        "gravity", self.config.get("default_gravity",
+                                                   IFACE_DEFAULT_GRAVITY)))
+                except (TypeError, ValueError):
+                    log("Invalid gravity for " + itype + ", using default", LOG_ERROR)
+                    iface.gravity = IFACE_DEFAULT_GRAVITY
                 self.interfaces.append(iface)
                 Transport.register_interface(iface)
             except Exception as e:

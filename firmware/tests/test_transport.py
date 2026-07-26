@@ -231,6 +231,65 @@ def test_should_add_reconfirm_refreshes_expiry():
     assert e[const.IDX_PT_EXPIRES] > 1.0             # expiry refreshed (kept alive)
 
 
+# ------------- interface gravity (RNS 1.4.1) -------------------------------
+def _announce_both(dest, first_if, second_if, emitted=1000, hops1=0, hops2=0):
+    """Same announce (same emission) heard over two interfaces."""
+    data = build_announce_data(emitted=emitted)
+    Transport.inbound(build_announce_hdr1(dest, data=data, hops=hops1), first_if)
+    Transport.inbound(build_announce_hdr1(dest, data=data, hops=hops2), second_if)
+
+
+def test_gravity_moves_path_to_preferred_interface():
+    """Same announce, same hop count, two interfaces: without gravity whichever
+    copy won the race keeps the path forever. Gravity lets a node say it would
+    rather reach this destination over WiFi than LoRa."""
+    reset_transport()
+    lora = MockInterface("lora", gravity=0)
+    wifi = MockInterface("wifi", gravity=5)
+    Transport.interfaces = [lora, wifi]
+    _announce_both(DEST, lora, wifi)
+    assert Transport.path_table[DEST][const.IDX_PT_RECV_IF] is wifi
+
+
+def test_gravity_does_not_move_path_downhill():
+    reset_transport()
+    lora = MockInterface("lora", gravity=0)
+    wifi = MockInterface("wifi", gravity=5)
+    Transport.interfaces = [lora, wifi]
+    _announce_both(DEST, wifi, lora)          # preferred one heard first
+    assert Transport.path_table[DEST][const.IDX_PT_RECV_IF] is wifi
+
+
+def test_gravity_tie_keeps_first_path():
+    reset_transport()
+    a = MockInterface("a", gravity=3)
+    b = MockInterface("b", gravity=3)
+    Transport.interfaces = [a, b]
+    _announce_both(DEST, a, b)
+    assert Transport.path_table[DEST][const.IDX_PT_RECV_IF] is a
+
+
+def test_gravity_never_beats_hop_count():
+    # Affinity breaks ties; it does not buy a longer path. A 2-hop copy on the
+    # preferred interface must not displace the 1-hop path already installed.
+    reset_transport()
+    lora = MockInterface("lora", gravity=0)
+    wifi = MockInterface("wifi", gravity=9)
+    Transport.interfaces = [lora, wifi]
+    _announce_both(DEST, lora, wifi, hops1=0, hops2=1)
+    assert Transport.path_table[DEST][const.IDX_PT_RECV_IF] is lora
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 1
+
+
+def test_gravity_absent_attribute_is_neutral():
+    # Path entries restored from flash can carry a None interface.
+    reset_transport()
+    lora = MockInterface("lora", gravity=0)
+    Transport.interfaces = [lora]
+    assert Transport._gravity_of(None) == 0
+    assert Transport._gravity_of(lora) == 0
+
+
 def test_duplicate_announce_no_restorm():
     reset_transport()
     iface = MockInterface("lora")
@@ -486,6 +545,159 @@ def test_transit_lrproof_forwards_back_and_validates():
     Transport.inbound(build_lrproof(LINK_ID, hops=0), lora)
     assert len(wifi.sent) == 1                            # forwarded back to initiator
     assert Transport.link_table[LINK_ID][const.IDX_LT_VALIDATED] is True
+
+
+# ------- link path re-balancing (RNS 1.4.1) --------------------------------
+_ORIG_CAN_VERIFY = Transport.__dict__["_can_verify_lr"]
+
+
+class _FakeIdent:
+    """Identity stand-in whose Ed25519 verdict the test controls."""
+
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.checked = 0
+
+    def get_public_key(self):
+        return b"\x77" * 64
+
+    def validate(self, signature, data):
+        self.checked += 1
+        return self.ok
+
+
+def _verifiable(flag=True):
+    """Force _can_verify_lr(): the host rig has no native Ed25519, so it is
+    False here. The signature check itself still runs for real."""
+    Transport._can_verify_lr = staticmethod(lambda: flag)
+
+
+def _rebalance_rig(ok=True, rem_hops=3, path_hops=3):
+    reset_transport()
+    wifi = MockInterface("wifi")
+    lora = MockInterface("lora")
+    Transport.interfaces = [wifi, lora]
+    Transport.link_table[LINK_ID] = _link_entry(nh_if=lora, recv_if=wifi,
+                                                rem_hops=rem_hops, validated=False)
+    Transport.path_table[DEST] = _path(RELAY, path_hops, lora)
+    Identity.known[DEST] = _FakeIdent(ok=ok)
+    return wifi, lora
+
+
+def test_transit_lrproof_rebalances_hop_mismatch():
+    """The reverse path is not the length we recorded (topology moved, or the
+    request and the proof took different routes). Dropping the proof fails the
+    link outright, so adopt the count it came back with."""
+    wifi, lora = _rebalance_rig(ok=True, rem_hops=3, path_hops=3)
+    _verifiable(True)
+    try:
+        Transport.inbound(build_lrproof(LINK_ID, hops=0), lora)   # arrives as hops=1
+    finally:
+        Transport._can_verify_lr = _ORIG_CAN_VERIFY
+
+    entry = Transport.link_table[LINK_ID]
+    assert len(wifi.sent) == 1                                    # forwarded, not dropped
+    assert entry[const.IDX_LT_REM_HOPS] == 1                      # link table adopted it
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 1     # ...and the path table
+    assert entry[const.IDX_LT_VALIDATED] is True
+    assert Identity.known[DEST].checked == 1                      # verified exactly once
+
+
+def test_transit_lrproof_rebalance_requires_valid_signature():
+    # A forged hop count must never rewrite routing tables.
+    wifi, lora = _rebalance_rig(ok=False, rem_hops=3, path_hops=3)
+    _verifiable(True)
+    try:
+        Transport.inbound(build_lrproof(LINK_ID, hops=0), lora)
+    finally:
+        Transport._can_verify_lr = _ORIG_CAN_VERIFY
+
+    entry = Transport.link_table[LINK_ID]
+    assert wifi.sent == [] and lora.sent == []
+    assert entry[const.IDX_LT_REM_HOPS] == 3
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 3
+    assert entry[const.IDX_LT_VALIDATED] is False
+
+
+def test_transit_lrproof_no_rebalance_when_unverifiable():
+    # No native Ed25519 (or strict validation off): the old drop stands, since
+    # an unauthenticated hop rewrite is worse than a link that fails to come up.
+    wifi, lora = _rebalance_rig(ok=True, rem_hops=3, path_hops=3)
+    assert Transport._can_verify_lr() is False                    # host rig default
+    Transport.inbound(build_lrproof(LINK_ID, hops=0), lora)
+
+    assert wifi.sent == []
+    assert Transport.link_table[LINK_ID][const.IDX_LT_REM_HOPS] == 3
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 3
+
+
+def test_transit_lrproof_rebalance_disabled_by_flag():
+    wifi, lora = _rebalance_rig(ok=True, rem_hops=3, path_hops=3)
+    _verifiable(True)
+    Transport.allow_link_path_rebalance = False
+    try:
+        Transport.inbound(build_lrproof(LINK_ID, hops=0), lora)
+    finally:
+        Transport._can_verify_lr = _ORIG_CAN_VERIFY
+        Transport.allow_link_path_rebalance = True
+
+    assert wifi.sent == []
+    assert Transport.link_table[LINK_ID][const.IDX_LT_REM_HOPS] == 3
+
+
+class _StubOutLink:
+    """Minimal initiator-side link: Transport only needs the proof handed over
+    and the resulting status to decide whether to re-balance."""
+    ACTIVE = 0x01
+    PENDING = 0x00
+
+    def __init__(self, link_id, dest_hash, expected_hops, validates=True):
+        self.link_id = link_id
+        self.status = _StubOutLink.PENDING
+        self.expected_hops = expected_hops
+        self.rebalanced = None
+        self.destination = _LocalDest(dest_hash)
+        self.proved = None
+        self._validates = validates
+
+    def validate_proof(self, packet):
+        self.proved = packet
+        if self._validates:
+            self.status = _StubOutLink.ACTIVE
+
+
+def test_lrproof_terminus_rebalances_path_table():
+    """We asked over a 3-hop path; the proof came back over 1. The path table
+    is what later announce comparisons and link timeouts read, so correct it."""
+    reset_transport()
+    lora = MockInterface("lora")
+    Transport.interfaces = [lora]
+    Transport.path_table[DEST] = _path(RELAY, 3, lora)
+    sl = _StubOutLink(LINK_ID, DEST, expected_hops=3)
+    Transport.pending_links.append(sl)
+
+    Transport.inbound(build_lrproof(LINK_ID, hops=0), lora)        # arrives as hops=1
+
+    assert sl.proved is not None
+    assert sl.expected_hops == 1
+    assert sl.rebalanced is not None
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 1
+
+
+def test_lrproof_terminus_no_rebalance_without_validation():
+    # validate_proof() rejected the signature (link stays PENDING) -> the hop
+    # count in that proof is unauthenticated and must not touch the table.
+    reset_transport()
+    lora = MockInterface("lora")
+    Transport.interfaces = [lora]
+    Transport.path_table[DEST] = _path(RELAY, 3, lora)
+    sl = _StubOutLink(LINK_ID, DEST, expected_hops=3, validates=False)
+    Transport.pending_links.append(sl)
+
+    Transport.inbound(build_lrproof(LINK_ID, hops=0), lora)
+
+    assert sl.rebalanced is None
+    assert Transport.path_table[DEST][const.IDX_PT_HOPS] == 3
 
 
 def test_transit_lrproof_wrong_interface_dropped():

@@ -68,6 +68,11 @@ class Transport:
     # Native-gated: skipped when native Ed25519 is unavailable (avoids ~2s verify).
     strict_lr_validation = True
 
+    # Adopt the hop count a link-request proof comes back with when it differs
+    # from what we recorded (RNS 1.4.1 "dynamic path re-balancing"). Requires a
+    # verified proof signature, so it is inert where _can_verify_lr() is False.
+    allow_link_path_rebalance = True
+
     # Maintenance / persistence (Phase 5/6)
     _last_cull = 0
     _last_persist = 0
@@ -327,6 +332,15 @@ class Transport:
                 and packet.context == const.CTX_LRPROOF):
             return False
         return True
+
+    @staticmethod
+    def _gravity_of(interface):
+        """Pathing affinity of an interface, neutral when unknown. Restored
+        path-table entries can carry a None interface, so this must tolerate it."""
+        try:
+            return int(getattr(interface, "gravity", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _announce_emitted(packet):
@@ -628,19 +642,32 @@ class Transport:
         return True
 
     @staticmethod
+    def _can_verify_lr():
+        """Whether an LRPROOF signature can actually be checked here: strict
+        validation enabled AND native Ed25519 present (a pure-Python verify is
+        ~2s and would stall the event loop for every relayed link)."""
+        if not Transport.strict_lr_validation:
+            return False
+        try:
+            from .crypto import ed25519
+            return ed25519.have_native()
+        except Exception:
+            return False
+
+    @staticmethod
     def _validate_transit_lr_proof(packet, entry):
         """Verify a link-request proof's Ed25519 signature before relaying it
         (anti-DoS on an open mesh). Native-gated: returns True (forward) when
         native crypto is unavailable, to avoid a ~2s blocking verify per link."""
-        if not Transport.strict_lr_validation:
+        if not Transport._can_verify_lr():
             return True
-        try:
-            from .crypto import ed25519
-            native = ed25519.have_native()
-        except Exception:
-            native = False
-        if not native:
-            return True
+        return Transport._verify_lr_proof_sig(packet, entry)
+
+    @staticmethod
+    def _verify_lr_proof_sig(packet, entry):
+        """Check the proof signature against the link destination's identity.
+        Returns True only on a genuine pass — never fails open, so callers that
+        must not act on unauthenticated data (path re-balancing) can use it."""
         try:
             from .identity import Identity
             from .link import ECPUBSIZE, LINK_MTU_SIZE, _parse_signalling, _signalling_bytes
@@ -672,13 +699,36 @@ class Transport:
         entry = Transport.link_table.get(packet.destination_hash)
         if entry is None:
             return False
-        if packet.hops != entry[const.IDX_LT_REM_HOPS]:
-            log("Transit LRPROOF hop mismatch, ignoring", LOG_DEBUG)
-            return False
         if packet.receiving_interface is not entry[const.IDX_LT_NH_IF]:
             log("Transit LRPROOF on wrong interface, ignoring", LOG_DEBUG)
             return False
-        if not Transport._validate_transit_lr_proof(packet, entry):
+
+        # Hop mismatch: the reverse path is not the length we recorded when the
+        # request passed through (topology moved, or the request and the proof
+        # took different routes). Dropping it fails the link outright, so adopt
+        # the proof's count instead — but ONLY against a verified signature,
+        # since this rewrites our routing tables. Where we cannot verify
+        # (_can_verify_lr false) the old drop stands: an unauthenticated hop
+        # rewrite is worse than a failed link. RNS 1.4.1 parity.
+        verified = False
+        if packet.hops != entry[const.IDX_LT_REM_HOPS]:
+            if (Transport.allow_link_path_rebalance
+                    and not entry[const.IDX_LT_VALIDATED]
+                    and Transport._can_verify_lr()
+                    and Transport._verify_lr_proof_sig(packet, entry)):
+                verified = True
+                log("Re-balancing link " + packet.destination_hash.hex()[:8]
+                    + " remaining hops " + str(entry[const.IDX_LT_REM_HOPS])
+                    + " -> " + str(packet.hops), LOG_VERBOSE)
+                entry[const.IDX_LT_REM_HOPS] = packet.hops
+                pe = Transport.path_table.get(entry[const.IDX_LT_DEST])
+                if pe is not None:
+                    pe[const.IDX_PT_HOPS] = packet.hops
+            else:
+                log("Transit LRPROOF hop mismatch, ignoring", LOG_DEBUG)
+                return False
+
+        if not verified and not Transport._validate_transit_lr_proof(packet, entry):
             log("Transit LRPROOF failed validation, dropping", LOG_DEBUG)
             return True   # consumed (dropped)
         Transport._cache_packet_hash(packet)
@@ -1355,6 +1405,18 @@ class Transport:
                 should_add = True
             elif packet.hops == entry[const.IDX_PT_HOPS]:
                 should_add = emitted > entry[const.IDX_PT_EMITTED]
+                if not should_add and emitted == entry[const.IDX_PT_EMITTED]:
+                    # Same announce, same cost, reached us over a second
+                    # interface: let pathing affinity break the tie (RNS 1.4.1
+                    # interface gravity). Without this the first copy to arrive
+                    # keeps the path — which on a mixed node means whichever of
+                    # LoRa/WiFi happened to win the race, forever.
+                    should_add = Transport._gravity_of(packet.receiving_interface) \
+                        > Transport._gravity_of(entry[const.IDX_PT_RECV_IF])
+                    if should_add:
+                        log("Path " + dest.hex()[:8] + " moving to "
+                            + str(packet.receiving_interface) + " (higher gravity)",
+                            LOG_VERBOSE)
             else:
                 should_add = now >= entry[const.IDX_PT_EXPIRES]
 
@@ -1489,6 +1551,7 @@ class Transport:
                 if link.link_id == packet.destination_hash:
                     Transport._cache_packet_hash(packet)   # ours — remember now
                     link.validate_proof(packet)
+                    Transport._rebalance_link_terminus(link, packet)
                     return True
         elif packet.context == const.CTX_RESOURCE_PRF:
             # Resource proof — route to the link
@@ -1502,6 +1565,32 @@ class Transport:
                 if receipt.validate_proof_packet(packet):
                     return True
         return False
+
+    @staticmethod
+    def _rebalance_link_terminus(link, packet):
+        """We are the link initiator and the proof arrived over a path whose
+        length differs from what the path table claimed. Adopt the real count
+        (RNS 1.4.1). No separate signature check is needed here — unlike a
+        relay, we only reach this after validate_proof() verified the peer's
+        Ed25519 signature over our link_id, so a link that just went ACTIVE has
+        already authenticated this packet. Re-balance once per link."""
+        if not Transport.allow_link_path_rebalance:
+            return
+        if link.status != link.ACTIVE or getattr(link, "rebalanced", None):
+            return
+        expected = getattr(link, "expected_hops", None)
+        if expected is None or packet.hops == expected:
+            return
+        link.rebalanced = time.time()
+        link.expected_hops = packet.hops
+        dest = getattr(getattr(link, "destination", None), "hash", None)
+        entry = Transport.path_table.get(dest) if dest else None
+        if entry is not None:
+            # Only a routed destination has a hop count to correct; a direct
+            # peer has no path-table entry and nothing to re-balance.
+            entry[const.IDX_PT_HOPS] = packet.hops
+            log("Re-balanced path to " + dest.hex()[:8] + " at link terminus,"
+                + " hops " + str(expected) + " -> " + str(packet.hops), LOG_VERBOSE)
 
     @staticmethod
     def hops_to(destination_hash):

@@ -42,8 +42,22 @@ class Link:
     ACTIVE  = 0x01
     CLOSED  = 0x02
 
+    last_outbound = 0           # see _had_outbound (class default for stubs)
+
     KEEPALIVE_INTERVAL  = 360   # seconds
     STALE_GRACE         = 720   # seconds
+    # RTT-scaled keepalive window (reference RNS Link.__update_keepalive). Both
+    # ends derive the same numbers from the same measured RTT, which is what
+    # makes it safe to skip a keepalive reply: see receive() and _update_rtt().
+    KEEPALIVE_MAX       = 360
+    KEEPALIVE_MIN       = 5
+    KEEPALIVE_MAX_RTT   = 1.75
+    STALE_FACTOR        = 2
+    # Defaults until the peer tells us its RTT — the values this port used
+    # unconditionally before, so an absent or unusable LRRTT changes nothing.
+    rtt                 = None
+    keepalive           = KEEPALIVE_INTERVAL
+    stale_time          = STALE_GRACE
     # Establishment timeout scales per hop, like reference RNS
     # (Link.ESTABLISHMENT_TIMEOUT_PER_HOP): each LoRa hop adds airtime and
     # relay latency on top of a base that covers ECDH (~5s per side on ESP32)
@@ -92,6 +106,7 @@ class Link:
         self.status = Link.PENDING
         self.activated_at = None
         self.last_activity = time.time()
+        self.last_outbound = time.time()
         self.last_proof_time = time.time()
         self.establishment_timeout = (Link.ESTABLISHMENT_BASE
                                       + Link.ESTABLISHMENT_PER_HOP * max(1, getattr(packet, "hops", 1)))
@@ -196,6 +211,7 @@ class Link:
             attached_interface=self.attached_interface,
         )
         proof_packet.send()
+        self._had_outbound()
 
         # Clean up (no longer needed after proof)
         del self._ephemeral_pub_bytes, self._signalling_bytes
@@ -215,12 +231,22 @@ class Link:
         if packet.context == const.CTX_KEEPALIVE:
             self.last_activity = time.time()
             if packet.data == b"\xff":
+                # Answer only if we have been quiet for a keepalive window
+                # (RNS 1.4.1). Anything we sent inside it already proved us
+                # alive to the initiator, whose stale window is twice this —
+                # so the reply would be pure airtime. Both ends derive this
+                # number from the same RTT, which is what makes skipping safe.
+                if time.time() < self.last_outbound + self.keepalive:
+                    log("Link " + self.link_id.hex()[:8]
+                        + " keepalive not answered (recently transmitted)", LOG_DEBUG)
+                    return
                 from .packet import Packet, LinkDestination
                 Packet(
                     LinkDestination(self.link_id), b"\xfe",
                     const.PKT_DATA, context=const.CTX_KEEPALIVE,
                     create_receipt=False,
                 ).send()
+                self._had_outbound()
                 log("Link " + self.link_id.hex()[:8] + " keepalive answered", LOG_DEBUG)
             return
 
@@ -266,8 +292,36 @@ class Link:
         else:
             log("Link " + self.link_id.hex()[:8] + " unhandled context=0x" + ("%02x" % packet.context), LOG_DEBUG)
 
+    def _update_rtt(self, plaintext):
+        """Adopt the RTT the initiator measured (the LRRTT payload) and size the
+        keepalive and stale windows from it, as reference RNS does on both ends.
+
+        Until now this value was parsed and thrown away, leaving every link on
+        the fixed 360/720 s pair: fine for LoRa, but it means a dead TCP link
+        lingers for twelve minutes. It also gives receive() a defensible basis
+        for skipping a keepalive reply — the initiator stales us at twice this
+        window, so having transmitted inside it is proof enough of liveness.
+
+        An unusable value leaves the defaults in place. A peer can only shrink
+        its own link's windows, never anyone else's."""
+        try:
+            from . import umsgpack
+            rtt = umsgpack.unpackb(plaintext)
+        except Exception:
+            return
+        if not isinstance(rtt, (int, float)) or rtt != rtt or rtt <= 0:
+            return
+        self.rtt = rtt
+        self.keepalive = max(min(rtt * (Link.KEEPALIVE_MAX / Link.KEEPALIVE_MAX_RTT),
+                                 Link.KEEPALIVE_MAX), Link.KEEPALIVE_MIN)
+        self.stale_time = self.keepalive * Link.STALE_FACTOR
+        log("Link " + self.link_id.hex()[:8] + " rtt=" + str(int(rtt * 1000))
+            + "ms keepalive=" + str(int(self.keepalive))
+            + "s stale=" + str(int(self.stale_time)) + "s", LOG_DEBUG)
+
     def _handle_rtt(self, plaintext):
         """RTT packet marks link as ACTIVE (packet 3 of handshake)."""
+        self._update_rtt(plaintext)
         if self.status == Link.PENDING:
             self.status = Link.ACTIVE
             self.activated_at = time.time()
@@ -331,6 +385,14 @@ class Link:
             return
 
         from . import umsgpack
+
+        # App-level size cap, checked before unpacking so an oversized request
+        # never becomes a Python object graph (RNS 1.4.1 max_request_size).
+        limit = getattr(self.destination, "max_request_size", None)
+        if limit is not None and len(plaintext) > limit:
+            log("Link " + self.link_id.hex()[:8] + " request of " + str(len(plaintext))
+                + "B exceeds limit " + str(limit) + ", ignoring", LOG_DEBUG)
+            return
 
         try:
             request_data = umsgpack.unpackb(plaintext)
@@ -412,11 +474,33 @@ class Link:
                 + str(e), LOG_ERROR)
             self.teardown()
             return
+        if r is not None and not self._request_resource_allowed(r):
+            return
         if r and self.resource_started_callback:
             try:
                 self.resource_started_callback(r)
             except Exception as e:
                 log("Resource started callback error: " + str(e), LOG_ERROR)
+
+    def _request_resource_allowed(self, resource):
+        """Enforce the destination's max_request_size on a request arriving as a
+        resource. Cancelling here costs nothing: no part has transferred yet,
+        and the RCL tells the sender to stop instead of retrying for minutes.
+        Only request resources are capped — an LXMF delivery carries no
+        request_id, and a response is the requester's business, not ours."""
+        from .resource import FLAG_IS_RESPONSE
+        limit = getattr(self.destination, "max_request_size", None)
+        if limit is None:
+            return True
+        if not resource.request_id or (resource.flags & FLAG_IS_RESPONSE):
+            return True
+        if resource.total_data_size <= limit:
+            return True
+        log("Link " + self.link_id.hex()[:8] + " request resource of "
+            + str(resource.total_data_size) + "B exceeds limit " + str(limit)
+            + ", rejecting", LOG_DEBUG)
+        resource.cancel()
+        return False
 
     def _handle_resource_req(self, plaintext):
         """Handle resource part request (sender mode)."""
@@ -473,7 +557,18 @@ class Link:
             const.PKT_PROOF, create_receipt=False,
         )
         proof.send()
+        self._had_outbound()
         log("Link " + self.link_id.hex()[:8] + " proof sent for " + packet.packet_hash.hex()[:8], LOG_DEBUG)
+
+    def _had_outbound(self):
+        """Stamp the last time we put anything on the wire for this link. The
+        peer's watchdog stales a link it hears nothing on, so our own send
+        times — not just what we receive — decide whether a keepalive is due
+        (reference RNS 1.4.0 Link.had_outbound). Resource parts and proofs sent
+        straight from resource.py are not stamped; under-reporting only ever
+        costs a redundant 1-byte probe, while over-reporting would suppress a
+        keepalive the peer is waiting for."""
+        self.last_outbound = time.time()
 
     def set_packet_callback(self, callback):
         self.packet_callback = callback
@@ -502,6 +597,7 @@ class Link:
         )
         packet.MTU = self.mtu
         packet.send()
+        self._had_outbound()
 
     def check_keepalive(self):
         """Check link staleness and send keepalive if needed."""
@@ -530,8 +626,10 @@ class Link:
             if r.is_timed_out():
                 r.cancel()
 
-        # Check stale grace period
-        if now - self.last_activity > Link.STALE_GRACE:
+        # Check stale grace period. Scaled from the peer's measured RTT once it
+        # has sent one (twice its keepalive interval, so a live initiator always
+        # beats it); the old fixed 720 s stands until then.
+        if now - self.last_activity > self.stale_time:
             log("Link " + self.link_id.hex()[:8] + " stale, closing", LOG_VERBOSE)
             self.teardown()
 
@@ -567,6 +665,7 @@ _PR_TIMEOUT = 2
 _PR_RESP_CB = 3
 _PR_FAIL_CB = 4
 _PR_PROG_CB = 5
+_PR_MAX_RESP = 6
 
 
 class OutgoingLink:
@@ -587,6 +686,13 @@ class OutgoingLink:
     _lrrtt_resends   = 0
     _lrrtt_last      = 0
     _lrrtt_wait      = 10
+
+    # Same for the keepalive / path re-balancing bookkeeping. last_outbound=0
+    # reads as "we have never transmitted", which errs toward sending a probe
+    # — the safe direction, since suppressing one lets the peer stale us.
+    last_outbound = 0
+    expected_hops = None
+    rebalanced    = None
 
     # Pending request states: SENT waits for a response packet or resource
     # advertisement (request timeout applies); RECEIVING means the response
@@ -610,6 +716,7 @@ class OutgoingLink:
         self._token = None
         self.activated_at = None
         self.last_activity = time.time()
+        self.last_outbound = time.time()
         self.request_time = time.time()
         self.rtt = 0                 # measured at handshake (validate_proof)
         self.type = const.DEST_LINK
@@ -632,9 +739,14 @@ class OutgoingLink:
         self._lrrtt_wait = 10
 
         from .transport import Transport
+        # Hop count we believe the path has right now. The proof comes back over
+        # the path as it actually is, so a mismatch is what Transport uses to
+        # re-balance the path table (see Transport._rebalance_link_terminus).
+        self.expected_hops = Transport.hops_to(destination.hash)
+        self.rebalanced = None
         self.establishment_timeout = (OutgoingLink.ESTABLISHMENT_BASE
                                       + OutgoingLink.ESTABLISHMENT_PER_HOP
-                                      * max(1, Transport.hops_to(destination.hash)))
+                                      * max(1, self.expected_hops))
 
         # Generate ephemeral X25519 keypair for ECDH
         gc.collect()
@@ -802,6 +914,12 @@ class OutgoingLink:
             const.PKT_DATA, context=context, create_receipt=False,
         )
         packet.send()
+        self._had_outbound()
+
+    def _had_outbound(self):
+        """Stamp the last time we transmitted on this link — see
+        Link._had_outbound and the keepalive gate in check_keepalive."""
+        self.last_outbound = time.time()
 
     # --- Channel (rnsh etc.) ------------------------------------------------
 
@@ -834,6 +952,7 @@ class OutgoingLink:
         from .packet import Packet, LinkDestination
         Packet(LinkDestination(self.link_id), proof_data,
                const.PKT_PROOF, create_receipt=False).send()
+        self._had_outbound()
 
     def identify(self, identity):
         """Identify this initiator to the peer (reference Link.identify): send
@@ -868,12 +987,14 @@ class OutgoingLink:
             Packet(LinkDestination(self.link_id), b"\xff",
                    const.PKT_DATA, context=const.CTX_KEEPALIVE,
                    create_receipt=False).send()
+            self._had_outbound()
             log("OutLink " + self.link_id.hex()[:8] + " keepalive sent", LOG_DEBUG)
         except Exception as e:
             log("OutLink keepalive send error: " + str(e), LOG_DEBUG)
 
     def request(self, path, data=None, response_callback=None,
-                failed_callback=None, progress_callback=None, timeout=None):
+                failed_callback=None, progress_callback=None, timeout=None,
+                max_response_size=None):
         """Send a request over this link (reference RNS Link.request parity).
 
         Returns the request_id (bytes) or None if the request could not be
@@ -881,6 +1002,11 @@ class OutgoingLink:
         on timeout or failure failed_callback(request_id) fires. Responses
         larger than one packet arrive as a Resource and are dispatched
         transparently. The request payload itself must fit in one packet.
+
+        max_response_size caps what we will accept back, in bytes (RNS 1.4.1).
+        An oversized response fails the request through failed_callback instead
+        of being buffered — the remote decides that size, and on an MCU it is
+        not a number to take on trust.
         """
         from .identity import Identity
         from . import umsgpack
@@ -914,6 +1040,7 @@ class OutgoingLink:
         self.pending_requests[request_id] = [
             OutgoingLink.REQ_SENT, time.time(), timeout,
             response_callback, failed_callback, progress_callback,
+            max_response_size,
         ]
         log("OutLink " + self.link_id.hex()[:8] + " request " + path
             + " id=" + request_id.hex()[:8], LOG_VERBOSE)
@@ -932,9 +1059,23 @@ class OutgoingLink:
         self._dispatch_response(unpacked[0], unpacked[1])
 
     def _dispatch_response(self, request_id, response_data):
-        entry = self.pending_requests.pop(request_id, None)
+        entry = self.pending_requests.get(request_id)
         if entry is None:
             return
+        limit = entry[_PR_MAX_RESP]
+        if limit is not None:
+            # len() in a try, NOT hasattr(x, "__len__"): MicroPython implements
+            # dunders as C slots, so hasattr is False even for bytes and the
+            # check would silently pass everything.
+            try:
+                size = len(response_data)
+            except TypeError:
+                size = 0
+            if size > limit:
+                self._fail_request(request_id, "response of " + str(size)
+                                   + "B exceeds limit " + str(limit))
+                return
+        self.pending_requests.pop(request_id, None)
         log("OutLink " + self.link_id.hex()[:8] + " response id=" + request_id.hex()[:8], LOG_VERBOSE)
         if entry[_PR_RESP_CB]:
             try:
@@ -1034,6 +1175,16 @@ class OutgoingLink:
             # here the resource retry machinery governs failure, so suspend
             # the request timeout and route progress to the requester.
             entry = self.pending_requests[r.request_id]
+            limit = entry[_PR_MAX_RESP]
+            if limit is not None and r.total_data_size > limit:
+                # Cancel before a single part transfers; the RCL stops the
+                # sender rather than leaving it retrying against a peer that
+                # will never request parts.
+                r.cancel()
+                self._fail_request(r.request_id, "response resource of "
+                                   + str(r.total_data_size) + "B exceeds limit "
+                                   + str(limit))
+                return
             entry[_PR_STATE] = OutgoingLink.REQ_RECEIVING
             if entry[_PR_PROG_CB]:
                 r.progress_callback = entry[_PR_PROG_CB]
@@ -1157,9 +1308,15 @@ class OutgoingLink:
         # Initiator keepalive: the peer stales the link if it hears nothing for
         # a while, so send a 0xFF probe when idle (it replies 0xFE, refreshing
         # last_activity). Only the initiator sends these (reference RNS).
+        #
+        # Probe on OUTBOUND silence as well as inbound (RNS 1.4.0 fix): what
+        # stales us at the far end is how long since *we* transmitted, not how
+        # long since we heard. A peer that streams to us keeps last_activity
+        # fresh, so gating on inbound alone means we never probe, we never
+        # transmit, and the peer tears the link down mid-stream.
         now = time.time()
         kival = self._keepalive_interval()
-        if (now - self.last_activity >= kival
+        if ((now - self.last_activity >= kival or now - self.last_outbound >= kival)
                 and now - self._last_keepalive >= kival):
             self._send_keepalive()
             self._last_keepalive = now

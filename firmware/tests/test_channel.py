@@ -155,6 +155,37 @@ def test_receive_out_of_order():
     print("ok test_receive_out_of_order")
 
 
+def test_receive_beyond_window_dropped():
+    # A sequence past the far edge of the receive window is rejected outright
+    # (RNS 1.4.1). Buffering it would stall every later message behind a gap
+    # that can never be filled, and hold its RAM for the life of the link.
+    ch = channel.Channel(MockOutlet(rtt=0.1))
+    ch.register_message_type(Ping)
+    got = []
+    ch.add_message_handler(lambda m: got.append(m.data) or False)
+    ch._receive(_raw(0, b"a"))
+    edge = ch._next_rx_sequence + channel.Channel.WINDOW_MAX    # last acceptable
+    ch._receive(_raw(edge + 1, b"far"))                         # one past it
+    assert len(ch._rx_ring) == 0, ch._rx_ring                   # not buffered
+    ch._receive(_raw(1, b"b"))                                  # stream continues
+    assert got == [b"a", b"b"], got
+    assert ch._next_rx_sequence == 2
+    print("ok test_receive_beyond_window_dropped")
+
+
+def test_receive_within_window_buffered():
+    # The edge case just inside the window is still accepted and buffered.
+    ch = channel.Channel(MockOutlet(rtt=0.1))
+    ch.register_message_type(Ping)
+    got = []
+    ch.add_message_handler(lambda m: got.append(m.data) or False)
+    edge = ch._next_rx_sequence + channel.Channel.WINDOW_MAX
+    ch._receive(_raw(edge, b"edge"))
+    assert len(ch._rx_ring) == 1
+    assert got == []
+    print("ok test_receive_within_window_buffered")
+
+
 def test_receive_duplicate():
     ch = channel.Channel(MockOutlet(rtt=0.1))
     ch.register_message_type(Ping)
