@@ -646,17 +646,15 @@ Tested and confirmed working with:
 
 Protocol behaviour tracks **reference RNS 1.4.1**. The 1.3.9 link and resource
 safeguards are implemented here (see the *Resource and link safeguards* block
-under [Protocol details](#protocol-details)), as are the 1.4.x fixes that matter
-on a mesh: dynamic link path re-balancing, keepalives that also trigger on
-outbound silence, and out-of-window rejection on `Channel` (see *Link path
-re-balancing* below). Nothing in 1.4.x changed the wire format, so older and
-newer peers interoperate either way.
+under [Protocol details](#protocol-details)), as is the whole of 1.4.x that
+applies to a leaf or relay node: dynamic link path re-balancing, interface
+gravity, RTT-scaled keepalive and stale windows with the keepalive-reply
+throttle, `max_request_size` / `max_response_size`, and out-of-window rejection
+on `Channel` (see *Link path re-balancing* below). Nothing in 1.4.x changed the
+wire format, so older and newer peers interoperate either way.
 
 Out of scope for an MCU port: `BackboneInterface` flap-blocking, interface
-discovery/gravity, I2P, and the `rnsh` utility. Not yet ported: per-destination
-`max_request_size` / `max_response_size` limits (a hard 16 KB resource cap
-already applies) and the non-initiator keepalive-reply throttle, which upstream
-sizes from a measured link RTT this port does not yet track.
+discovery, I2P, shared-instance/tunnel interfaces, and the `rnsh` utility.
 
 > **If you run an `rnsh` listener** (any platform), update it to RNS 1.3.9: that
 > release patches a critical vulnerability where a command could be started on a
@@ -867,12 +865,34 @@ hop count, so a mismatch used to mean the link never came up at all.
   long since *we* transmitted, not how long since we heard. An initiator that
   only receives (a peer streaming to it) used to fall silent and get torn down
   mid-stream; it now probes when either direction has been quiet.
+- **RTT-scaled windows** — the RTT the initiator measures is carried in the
+  handshake and now sizes the receiver's keepalive and stale windows
+  (`clamp(rtt × 360/1.75, 5, 360)`, stale = twice that). LoRa clamps back to the
+  360 s / 720 s pair this port used unconditionally before; a fast link drops to
+  roughly 20 s / 41 s, so a dead TCP link is reaped in under a minute instead of
+  twelve. An absent or unusable value keeps the old defaults.
+- **Keepalive reply throttle** — with both ends deriving that window from the
+  same RTT, a `0xFF` probe is answered only if we have been quiet for it.
+  Anything transmitted inside the window already proved us alive, and on
+  half-duplex LoRa the saved frame is one that would have gone out exactly when
+  the channel is busiest.
 - **Channel window** — a message sequence past the far edge of the receive
   window is rejected rather than buffered forever behind a gap that can never be
   filled.
 
-Covered by `firmware/tests/test_transport.py`, `test_link_request.py` and
-`test_channel.py`.
+**Request and response size limits** — `destination.set_max_request_size(n)`
+caps what a destination's request handlers will accept, and
+`link.request(..., max_response_size=n)` caps what comes back. Both refuse
+before buffering: an oversized single-packet request is dropped before it is
+unpacked, and an oversized resource is cancelled with an `RCL` before a single
+part transfers, so the sender stops immediately rather than retrying for
+minutes. Without a limit the stack's own 16 KB `MAX_RESOURCE_SIZE` ceiling still
+applies — worth lowering on a node with tens of KB of free heap, especially over
+TCP where the negotiated link MTU reaches 16 KB.
+
+Covered by `firmware/tests/test_transport.py`, `test_link_request.py`,
+`test_resource_safeguards.py` and `test_channel.py`, and verified on an ESP32-S3
+(T-Deck) against real native Ed25519.
 
 </details>
 
