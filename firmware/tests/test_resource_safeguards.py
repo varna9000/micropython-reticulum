@@ -486,6 +486,79 @@ def test_max_response_size_allows_within_limit():
     check(ok == [b"y" * 100], "response inside the limit is delivered")
 
 
+# ---------------- RTT-scaled keepalive windows (RNS 1.4.x) ------------------
+def test_rtt_scales_keepalive_and_stale_windows():
+    lk, _, _ = _mk_inbound_link()
+    check(lk.keepalive == link.Link.KEEPALIVE_INTERVAL,
+          "defaults to the fixed window before any LRRTT")
+    lk._update_rtt(umsgpack.packb(0.1))
+    expected = 0.1 * (link.Link.KEEPALIVE_MAX / link.Link.KEEPALIVE_MAX_RTT)
+    check(abs(lk.keepalive - expected) < 0.01, "keepalive scaled from rtt",
+          "%.2f" % lk.keepalive)
+    check(lk.stale_time == lk.keepalive * link.Link.STALE_FACTOR,
+          "stale window is twice the keepalive")
+
+
+def test_rtt_windows_are_clamped():
+    lk, _, _ = _mk_inbound_link()
+    lk._update_rtt(umsgpack.packb(0.0001))          # absurdly fast
+    check(lk.keepalive == link.Link.KEEPALIVE_MIN, "clamped at the floor")
+    lk, _, _ = _mk_inbound_link()
+    lk._update_rtt(umsgpack.packb(600))             # absurdly slow
+    check(lk.keepalive == link.Link.KEEPALIVE_MAX, "clamped at the ceiling")
+    check(lk.stale_time == link.Link.STALE_GRACE,
+          "ceiling reproduces the old fixed pair")
+
+
+def test_unusable_rtt_keeps_defaults():
+    for payload in (umsgpack.packb(-1), umsgpack.packb("soon"),
+                    umsgpack.packb(0), b"\xff\xff not msgpack"):
+        lk, _, _ = _mk_inbound_link()
+        lk._update_rtt(payload)
+        check(lk.keepalive == link.Link.KEEPALIVE_INTERVAL
+              and lk.stale_time == link.Link.STALE_GRACE,
+              "unusable rtt leaves the defaults (%r)" % payload[:8])
+
+
+def test_keepalive_reply_throttled_after_recent_send():
+    reset_transport()
+    mi = MockInterface("m")
+    Transport.interfaces.append(mi)
+    lk, _, _ = _mk_inbound_link()
+    lk._update_rtt(umsgpack.packb(0.1))             # keepalive ~20.6 s
+    pkt = types.SimpleNamespace(context=const.CTX_KEEPALIVE, data=b"\xff")
+
+    lk.last_outbound = time.time()                  # we just transmitted
+    mi.sent = []
+    lk.receive(pkt)
+    check(mi.sent == [], "reply skipped while we have recently transmitted")
+
+    lk.last_outbound = time.time() - lk.keepalive - 1
+    lk.receive(pkt)
+    check(len(mi.sent) == 1, "reply sent once we have gone quiet")
+    if mi.sent:
+        p = packet.Packet(destination=None, data=mi.sent[0])
+        p.unpack()
+        check(p.context == const.CTX_KEEPALIVE and p.data == b"\xfe",
+              "reply is the 0xFE keepalive answer")
+        check(time.time() - lk.last_outbound < 2, "reply stamps last_outbound")
+
+
+def test_stale_close_uses_derived_window():
+    reset_transport()
+    Transport.interfaces.append(MockInterface("m"))
+    lk, _, _ = _mk_inbound_link()
+    lk._update_rtt(umsgpack.packb(0.1))             # stale ~41 s
+    lk.last_activity = time.time() - 100            # quiet far past that
+    lk.check_keepalive()
+    check(lk.status == link.Link.CLOSED, "dead fast link closed on the new window")
+
+    lk2, _, _ = _mk_inbound_link()                  # no LRRTT -> old 720 s
+    lk2.last_activity = time.time() - 100
+    lk2.check_keepalive()
+    check(lk2.status == link.Link.ACTIVE, "link with no rtt keeps the old grace")
+
+
 def _real_destination_class():
     """harness injects a FAKE urns.destination, so load the real module under a
     side name. The dotted name keeps __package__ == "urns", so its relative

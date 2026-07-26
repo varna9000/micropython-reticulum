@@ -46,6 +46,18 @@ class Link:
 
     KEEPALIVE_INTERVAL  = 360   # seconds
     STALE_GRACE         = 720   # seconds
+    # RTT-scaled keepalive window (reference RNS Link.__update_keepalive). Both
+    # ends derive the same numbers from the same measured RTT, which is what
+    # makes it safe to skip a keepalive reply: see receive() and _update_rtt().
+    KEEPALIVE_MAX       = 360
+    KEEPALIVE_MIN       = 5
+    KEEPALIVE_MAX_RTT   = 1.75
+    STALE_FACTOR        = 2
+    # Defaults until the peer tells us its RTT — the values this port used
+    # unconditionally before, so an absent or unusable LRRTT changes nothing.
+    rtt                 = None
+    keepalive           = KEEPALIVE_INTERVAL
+    stale_time          = STALE_GRACE
     # Establishment timeout scales per hop, like reference RNS
     # (Link.ESTABLISHMENT_TIMEOUT_PER_HOP): each LoRa hop adds airtime and
     # relay latency on top of a base that covers ECDH (~5s per side on ESP32)
@@ -219,12 +231,22 @@ class Link:
         if packet.context == const.CTX_KEEPALIVE:
             self.last_activity = time.time()
             if packet.data == b"\xff":
+                # Answer only if we have been quiet for a keepalive window
+                # (RNS 1.4.1). Anything we sent inside it already proved us
+                # alive to the initiator, whose stale window is twice this —
+                # so the reply would be pure airtime. Both ends derive this
+                # number from the same RTT, which is what makes skipping safe.
+                if time.time() < self.last_outbound + self.keepalive:
+                    log("Link " + self.link_id.hex()[:8]
+                        + " keepalive not answered (recently transmitted)", LOG_DEBUG)
+                    return
                 from .packet import Packet, LinkDestination
                 Packet(
                     LinkDestination(self.link_id), b"\xfe",
                     const.PKT_DATA, context=const.CTX_KEEPALIVE,
                     create_receipt=False,
                 ).send()
+                self._had_outbound()
                 log("Link " + self.link_id.hex()[:8] + " keepalive answered", LOG_DEBUG)
             return
 
@@ -270,8 +292,36 @@ class Link:
         else:
             log("Link " + self.link_id.hex()[:8] + " unhandled context=0x" + ("%02x" % packet.context), LOG_DEBUG)
 
+    def _update_rtt(self, plaintext):
+        """Adopt the RTT the initiator measured (the LRRTT payload) and size the
+        keepalive and stale windows from it, as reference RNS does on both ends.
+
+        Until now this value was parsed and thrown away, leaving every link on
+        the fixed 360/720 s pair: fine for LoRa, but it means a dead TCP link
+        lingers for twelve minutes. It also gives receive() a defensible basis
+        for skipping a keepalive reply — the initiator stales us at twice this
+        window, so having transmitted inside it is proof enough of liveness.
+
+        An unusable value leaves the defaults in place. A peer can only shrink
+        its own link's windows, never anyone else's."""
+        try:
+            from . import umsgpack
+            rtt = umsgpack.unpackb(plaintext)
+        except Exception:
+            return
+        if not isinstance(rtt, (int, float)) or rtt != rtt or rtt <= 0:
+            return
+        self.rtt = rtt
+        self.keepalive = max(min(rtt * (Link.KEEPALIVE_MAX / Link.KEEPALIVE_MAX_RTT),
+                                 Link.KEEPALIVE_MAX), Link.KEEPALIVE_MIN)
+        self.stale_time = self.keepalive * Link.STALE_FACTOR
+        log("Link " + self.link_id.hex()[:8] + " rtt=" + str(int(rtt * 1000))
+            + "ms keepalive=" + str(int(self.keepalive))
+            + "s stale=" + str(int(self.stale_time)) + "s", LOG_DEBUG)
+
     def _handle_rtt(self, plaintext):
         """RTT packet marks link as ACTIVE (packet 3 of handshake)."""
+        self._update_rtt(plaintext)
         if self.status == Link.PENDING:
             self.status = Link.ACTIVE
             self.activated_at = time.time()
@@ -576,8 +626,10 @@ class Link:
             if r.is_timed_out():
                 r.cancel()
 
-        # Check stale grace period
-        if now - self.last_activity > Link.STALE_GRACE:
+        # Check stale grace period. Scaled from the peer's measured RTT once it
+        # has sent one (twice its keepalive interval, so a live initiator always
+        # beats it); the old fixed 720 s stands until then.
+        if now - self.last_activity > self.stale_time:
             log("Link " + self.link_id.hex()[:8] + " stale, closing", LOG_VERBOSE)
             self.teardown()
 
