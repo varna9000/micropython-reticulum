@@ -50,9 +50,12 @@ def _mklink():
     ol.remote_identified_callback = None
     ol.remote_identity = None
     ol.last_activity = time.time()
+    ol.last_outbound = time.time()
     ol.request_time = time.time()
     ol.activated_at = time.time()
     ol.establishment_timeout = 60
+    ol.expected_hops = 1
+    ol.rebalanced = None
     ol.rtt = 0
     ol.mdu = 431
     ol._channel = None
@@ -295,6 +298,71 @@ def test_outgoing_resource_timeout_frees_link():
 
     assert stalled.cancelled and stalled not in ol.outgoing_resources
     assert not live.cancelled and live in ol.outgoing_resources
+
+
+# ---------------- initiator keepalive (RNS 1.4.0 stale-teardown fix) --------
+def _keepalive_raw(raw):
+    """(context, payload) of a link keepalive packet: ... | context(1) | data."""
+    return raw[-2], raw[-1]
+
+
+def test_keepalive_probes_on_outbound_silence():
+    """What stales the link at the far end is how long since WE transmitted,
+    not how long since we heard. A peer that streams to us keeps last_activity
+    fresh, so gating on inbound alone means we never probe, never transmit, and
+    the peer tears the link down mid-stream (fixed upstream in RNS 1.4.0)."""
+    mi, ol = _rig()
+    kival = ol._keepalive_interval()
+    now = time.time()
+    ol.last_activity = now                 # peer is talking to us constantly
+    ol.last_outbound = now - kival - 1     # ...but we have said nothing back
+    ol._last_keepalive = now - kival - 1
+    mi.sent.clear()
+
+    ol.check_keepalive()
+
+    assert len(mi.sent) == 1, mi.sent
+    ctx, payload = _keepalive_raw(mi.sent[0])
+    assert ctx == const.CTX_KEEPALIVE and payload == 0xFF
+    assert ol.last_outbound >= now         # the probe itself counts as outbound
+
+    ol.check_keepalive()                   # rate-limited: no second probe
+    assert len(mi.sent) == 1
+
+
+def test_keepalive_probes_on_inbound_silence():
+    # The original trigger still works: nothing heard for a keepalive interval.
+    mi, ol = _rig()
+    kival = ol._keepalive_interval()
+    now = time.time()
+    ol.last_activity = now - kival - 1
+    ol.last_outbound = now
+    ol._last_keepalive = now - kival - 1
+    mi.sent.clear()
+
+    ol.check_keepalive()
+
+    assert len(mi.sent) == 1, mi.sent
+
+
+def test_keepalive_silent_when_both_directions_fresh():
+    mi, ol = _rig()
+    now = time.time()
+    ol.last_activity = now
+    ol.last_outbound = now
+    ol._last_keepalive = now - 10000       # not the limiting factor
+    mi.sent.clear()
+
+    ol.check_keepalive()
+
+    assert mi.sent == []
+
+
+def test_send_stamps_last_outbound():
+    mi, ol = _rig()
+    ol.last_outbound = time.time() - 100
+    ol.send(b"payload")
+    assert time.time() - ol.last_outbound < 1
 
 
 def test_outgoing_resource_readvertises_until_answered():

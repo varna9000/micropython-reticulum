@@ -42,6 +42,8 @@ class Link:
     ACTIVE  = 0x01
     CLOSED  = 0x02
 
+    last_outbound = 0           # see _had_outbound (class default for stubs)
+
     KEEPALIVE_INTERVAL  = 360   # seconds
     STALE_GRACE         = 720   # seconds
     # Establishment timeout scales per hop, like reference RNS
@@ -92,6 +94,7 @@ class Link:
         self.status = Link.PENDING
         self.activated_at = None
         self.last_activity = time.time()
+        self.last_outbound = time.time()
         self.last_proof_time = time.time()
         self.establishment_timeout = (Link.ESTABLISHMENT_BASE
                                       + Link.ESTABLISHMENT_PER_HOP * max(1, getattr(packet, "hops", 1)))
@@ -196,6 +199,7 @@ class Link:
             attached_interface=self.attached_interface,
         )
         proof_packet.send()
+        self._had_outbound()
 
         # Clean up (no longer needed after proof)
         del self._ephemeral_pub_bytes, self._signalling_bytes
@@ -473,7 +477,18 @@ class Link:
             const.PKT_PROOF, create_receipt=False,
         )
         proof.send()
+        self._had_outbound()
         log("Link " + self.link_id.hex()[:8] + " proof sent for " + packet.packet_hash.hex()[:8], LOG_DEBUG)
+
+    def _had_outbound(self):
+        """Stamp the last time we put anything on the wire for this link. The
+        peer's watchdog stales a link it hears nothing on, so our own send
+        times — not just what we receive — decide whether a keepalive is due
+        (reference RNS 1.4.0 Link.had_outbound). Resource parts and proofs sent
+        straight from resource.py are not stamped; under-reporting only ever
+        costs a redundant 1-byte probe, while over-reporting would suppress a
+        keepalive the peer is waiting for."""
+        self.last_outbound = time.time()
 
     def set_packet_callback(self, callback):
         self.packet_callback = callback
@@ -502,6 +517,7 @@ class Link:
         )
         packet.MTU = self.mtu
         packet.send()
+        self._had_outbound()
 
     def check_keepalive(self):
         """Check link staleness and send keepalive if needed."""
@@ -587,6 +603,13 @@ class OutgoingLink:
     _lrrtt_resends   = 0
     _lrrtt_last      = 0
 
+    # Same for the keepalive / path re-balancing bookkeeping. last_outbound=0
+    # reads as "we have never transmitted", which errs toward sending a probe
+    # — the safe direction, since suppressing one lets the peer stale us.
+    last_outbound = 0
+    expected_hops = None
+    rebalanced    = None
+
     # Pending request states: SENT waits for a response packet or resource
     # advertisement (request timeout applies); RECEIVING means the response
     # is arriving as a resource — its own retry/cancel machinery governs
@@ -609,6 +632,7 @@ class OutgoingLink:
         self._token = None
         self.activated_at = None
         self.last_activity = time.time()
+        self.last_outbound = time.time()
         self.request_time = time.time()
         self.rtt = 0                 # measured at handshake (validate_proof)
         self.type = const.DEST_LINK
@@ -630,9 +654,14 @@ class OutgoingLink:
         self._lrrtt_last = 0
 
         from .transport import Transport
+        # Hop count we believe the path has right now. The proof comes back over
+        # the path as it actually is, so a mismatch is what Transport uses to
+        # re-balance the path table (see Transport._rebalance_link_terminus).
+        self.expected_hops = Transport.hops_to(destination.hash)
+        self.rebalanced = None
         self.establishment_timeout = (OutgoingLink.ESTABLISHMENT_BASE
                                       + OutgoingLink.ESTABLISHMENT_PER_HOP
-                                      * max(1, Transport.hops_to(destination.hash)))
+                                      * max(1, self.expected_hops))
 
         # Generate ephemeral X25519 keypair for ECDH
         gc.collect()
@@ -796,6 +825,12 @@ class OutgoingLink:
             const.PKT_DATA, context=context, create_receipt=False,
         )
         packet.send()
+        self._had_outbound()
+
+    def _had_outbound(self):
+        """Stamp the last time we transmitted on this link — see
+        Link._had_outbound and the keepalive gate in check_keepalive."""
+        self.last_outbound = time.time()
 
     # --- Channel (rnsh etc.) ------------------------------------------------
 
@@ -828,6 +863,7 @@ class OutgoingLink:
         from .packet import Packet, LinkDestination
         Packet(LinkDestination(self.link_id), proof_data,
                const.PKT_PROOF, create_receipt=False).send()
+        self._had_outbound()
 
     def identify(self, identity):
         """Identify this initiator to the peer (reference Link.identify): send
@@ -862,6 +898,7 @@ class OutgoingLink:
             Packet(LinkDestination(self.link_id), b"\xff",
                    const.PKT_DATA, context=const.CTX_KEEPALIVE,
                    create_receipt=False).send()
+            self._had_outbound()
             log("OutLink " + self.link_id.hex()[:8] + " keepalive sent", LOG_DEBUG)
         except Exception as e:
             log("OutLink keepalive send error: " + str(e), LOG_DEBUG)
@@ -1141,9 +1178,15 @@ class OutgoingLink:
         # Initiator keepalive: the peer stales the link if it hears nothing for
         # a while, so send a 0xFF probe when idle (it replies 0xFE, refreshing
         # last_activity). Only the initiator sends these (reference RNS).
+        #
+        # Probe on OUTBOUND silence as well as inbound (RNS 1.4.0 fix): what
+        # stales us at the far end is how long since *we* transmitted, not how
+        # long since we heard. A peer that streams to us keeps last_activity
+        # fresh, so gating on inbound alone means we never probe, we never
+        # transmit, and the peer tears the link down mid-stream.
         now = time.time()
         kival = self._keepalive_interval()
-        if (now - self.last_activity >= kival
+        if ((now - self.last_activity >= kival or now - self.last_outbound >= kival)
                 and now - self._last_keepalive >= kival):
             self._send_keepalive()
             self._last_keepalive = now

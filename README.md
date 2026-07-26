@@ -630,11 +630,19 @@ Tested and confirmed working with:
 - **RNode** (SX1276 / SX1278) — bidirectional LoRa, full split-packet support for the complete 500-byte MTU. Tested with Heltec Wireless Stick Lite V1 on 868 MHz.
 - **RNS transport servers** — TCP client connectivity to remote transport hubs, automatic path learning from announces
 
-Protocol behaviour tracks **reference RNS 1.3.9**. Its link and resource
+Protocol behaviour tracks **reference RNS 1.4.1**. The 1.3.9 link and resource
 safeguards are implemented here (see the *Resource and link safeguards* block
-under [Protocol details](#protocol-details)); the parts of that release that do
-not apply to an MCU port — `BackboneInterface` flap-blocking, interface
-discovery, and the `rnsh` utility — are out of scope.
+under [Protocol details](#protocol-details)), as are the 1.4.x fixes that matter
+on a mesh: dynamic link path re-balancing, keepalives that also trigger on
+outbound silence, and out-of-window rejection on `Channel` (see *Link path
+re-balancing* below). Nothing in 1.4.x changed the wire format, so older and
+newer peers interoperate either way.
+
+Out of scope for an MCU port: `BackboneInterface` flap-blocking, interface
+discovery/gravity, I2P, and the `rnsh` utility. Not yet ported: per-destination
+`max_request_size` / `max_response_size` limits (a hard 16 KB resource cap
+already applies) and the non-initiator keepalive-reply throttle, which upstream
+sizes from a measured link RTT this port does not yet track.
 
 > **If you run an `rnsh` listener** (any platform), update it to RNS 1.3.9: that
 > release patches a critical vulnerability where a command could be started on a
@@ -819,6 +827,38 @@ smaller margin for error in mind.
   handed to routing as truncated packets.
 
 Covered by `firmware/tests/test_resource_safeguards.py`.
+
+</details>
+
+<details>
+<summary><b>Link path re-balancing and keepalives (parity with RNS 1.4.x)</b></summary>
+
+A link request and the proof that answers it do not always travel the same
+number of hops — a route can shorten or lengthen between the two, and on a mesh
+with several possible paths they can simply differ. Both ends check the proof's
+hop count, so a mismatch used to mean the link never came up at all.
+
+- **Re-balancing at a relay** — when a transit link-request proof arrives with a
+  hop count other than the one recorded for that link, the relay verifies the
+  proof signature and then adopts the new count, in both the link table and the
+  path table, instead of dropping the proof. The signature check is mandatory
+  here: this rewrites routing state, so an unverifiable proof (no native
+  Ed25519, or `strict_lr_validation` off) is still dropped — a failed link beats
+  an unauthenticated hop rewrite.
+- **Re-balancing at the initiator** — the same correction is applied to the path
+  table once our own link goes active. No extra crypto is spent: the link only
+  reaches that state after the peer's signature over our link id has been
+  verified.
+- **Keepalive on outbound silence** — what stales a link at the far end is how
+  long since *we* transmitted, not how long since we heard. An initiator that
+  only receives (a peer streaming to it) used to fall silent and get torn down
+  mid-stream; it now probes when either direction has been quiet.
+- **Channel window** — a message sequence past the far edge of the receive
+  window is rejected rather than buffered forever behind a gap that can never be
+  filled.
+
+Covered by `firmware/tests/test_transport.py`, `test_link_request.py` and
+`test_channel.py`.
 
 </details>
 
