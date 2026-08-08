@@ -111,7 +111,6 @@ else:
     MAX_PATH_TABLE        = 32
     MAX_ACTIVE_LINKS      = 4
     MAX_KNOWN_DESTINATIONS = 160
-KNOWN_DEST_EVICT_BATCH = const(32)  # amortized LRU eviction (see Identity.remember)
 MAX_ANNOUNCE_QUEUE    = const(16)
 MAX_RECEIPTS          = const(32)
 MAX_INCOMING_RESOURCES = const(1)
@@ -161,7 +160,11 @@ else:
 
 # Inbound announce ingress (validation deferred to job_loop — see transport)
 MAX_ANNOUNCE_INGRESS       = const(32)   # queued announces awaiting validation
-ANNOUNCE_INGRESS_BUDGET_MS = const(100)  # max ms per job_loop tick validating
+# Budget per job_loop tick. Sized for UI smoothness, not throughput: a stall
+# above ~2 frames (50ms redraw throttle) reads as scroll jank on the T-Deck.
+# 30ms x 4 ticks/s still validates 3-6 announces/s with IRAM crypto — about
+# 5x the measured public-hub announce rate.
+ANNOUNCE_INGRESS_BUDGET_MS = const(30)
 
 # Maintenance / flood-control (Phase 5/6)
 CULL_INTERVAL         = const(5)           # seconds between table-maintenance passes

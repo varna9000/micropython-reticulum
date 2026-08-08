@@ -50,13 +50,19 @@ class Identity:
             # LRU-by-announce eviction (the timestamp refreshes on every
             # announce). Unbounded growth on a public hub reached 449 entries
             # / 123KB JSON — a 4.5s flash write at persist and an ever-growing
-            # boot load. Evict a batch so the sort amortizes over many
-            # inserts instead of running at every one once at the cap.
-            by_age = sorted(kd, key=lambda k: kd[k][0])
-            for k in by_age[:const.KNOWN_DEST_EVICT_BATCH]:
-                del kd[k]
-            log("known_destinations at cap, evicted "
-                + str(const.KNOWN_DEST_EVICT_BATCH) + " oldest", LOG_DEBUG)
+            # boot load. One min-scan per insert (~10ms at the cap): a batched
+            # sorted() amortizes to less total work but spikes >100ms in one
+            # tick, which reads as UI jank on the T-Deck.
+            oldest = None
+            oldest_ts = None
+            for k in kd:
+                ts = kd[k][0]
+                if oldest_ts is None or ts < oldest_ts:
+                    oldest_ts = ts
+                    oldest = k
+            if oldest is not None:
+                del kd[oldest]
+                log("known_destinations at cap, evicted oldest", LOG_DEBUG)
         kd[destination_hash] = [time.time(), packet_hash, public_key, app_data]
 
     @staticmethod

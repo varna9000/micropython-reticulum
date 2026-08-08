@@ -13,6 +13,10 @@ ESC      = 0x7D
 ESC_MASK = 0x20
 _FLAG_BYTES = b"\x7e"
 
+# Millisecond monotonic clock: MicroPython ticks_ms, host-CPython fallback.
+_ticks_ms = getattr(time, "ticks_ms", None) or (lambda: int(time.time() * 1000))
+_ticks_diff = getattr(time, "ticks_diff", None) or (lambda a, b: a - b)
+
 
 def hdlc_escape(data):
     """Escape FLAG and ESC bytes in data"""
@@ -38,10 +42,14 @@ class TCPClientInterface(Interface):
     RECONNECT_WAIT = 5
     MAX_RECONNECTS = 0       # 0 = unlimited
 
-    # Max bytes drained from the socket per poll_loop iteration. Bounds how
-    # long one iteration can run so cohabiting tasks (GUI, LoRa) still get
-    # scheduled during a bulk transfer.
+    # Per-iteration drain bounds so cohabiting tasks (GUI, LoRa) still get
+    # scheduled during a bulk transfer: RX_BUDGET caps bytes, RX_SLICE_MS
+    # caps wall time (frame processing runs inline, and a burst of small
+    # frames costs far more time than its byte count suggests — one stalled
+    # iteration above ~2 GUI frames reads as scroll jank). Un-drained bytes
+    # stay in the socket buffer for the next iteration; nothing is lost.
     RX_BUDGET = 16384
+    RX_SLICE_MS = 25
 
     def __init__(self, config):
         name = config.get("name", "TCP")
@@ -257,16 +265,18 @@ class TCPClientInterface(Interface):
                 continue
 
             got = 0
+            t0 = _ticks_ms()
             try:
                 # Re-assert non-blocking before every drain — ESP32 lwIP
                 # bug: send() corrupts the socket's non-blocking state.
                 # process_outgoing() restores it after sendall(), but
                 # guard here too in case of any edge cases.
                 self._socket.settimeout(0)
-                # Drain until EAGAIN or budget. The former single 512B read
-                # per 10ms tick capped throughput at ~50KB/s before any
-                # processing cost; a busy hub link needs the backlog cleared
-                # in bursts, with the budget bounding loop monopolization.
+                # Drain until EAGAIN, byte budget or time slice. The former
+                # single 512B read per 10ms tick capped throughput at ~50KB/s
+                # before any processing cost; a busy hub link needs the
+                # backlog cleared in bursts, with the bounds capping loop
+                # monopolization.
                 while got < self.RX_BUDGET:
                     n = self._socket.readinto(self._recv_buf)
                     if n is None:
@@ -277,6 +287,8 @@ class TCPClientInterface(Interface):
                         break
                     got += n
                     self._feed(self._recv_mv[:n])
+                    if _ticks_diff(_ticks_ms(), t0) >= self.RX_SLICE_MS:
+                        break
             except OSError as e:
                 if e.args[0] == 11:  # EAGAIN
                     pass
@@ -290,8 +302,9 @@ class TCPClientInterface(Interface):
                 # loop from crashing.
                 log("TCP poll error: " + str(e), LOG_ERROR)
 
-            if got >= self.RX_BUDGET:
-                await asyncio.sleep(0)          # more pending: yield only
+            if got and (got >= self.RX_BUDGET
+                        or _ticks_diff(_ticks_ms(), t0) >= self.RX_SLICE_MS):
+                await asyncio.sleep(0)          # backlog likely: yield only
             elif got:
                 await asyncio.sleep(0.002)
             else:
