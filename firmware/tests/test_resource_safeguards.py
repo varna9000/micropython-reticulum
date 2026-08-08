@@ -337,18 +337,17 @@ def test_identify_binds_once():
 def test_hdlc_frame_length_validation():
     tcp = importlib.import_module("urns.interfaces.tcp")
     iface = object.__new__(tcp.TCPClientInterface)
-    iface._in_frame = False
-    iface._escape = False
-    iface._buffer = bytearray()
+    iface._frame = None
     iface._frame_overflow = False
     delivered = []
     iface.process_incoming = lambda raw: delivered.append(raw)
 
     def feed(payload):
-        iface._process_byte(tcp.FLAG)
+        # Feed one byte at a time — worst-case chunking for the deframer.
+        iface._feed(bytes([tcp.FLAG]))
         for b in payload:
-            iface._process_byte(b)
-        iface._process_byte(tcp.FLAG)
+            iface._feed(bytes([b]))
+        iface._feed(bytes([tcp.FLAG]))
 
     feed(b"\x01" * 8)                       # shorter than a header
     check(len(delivered) == 0, "undersized HDLC frame dropped",

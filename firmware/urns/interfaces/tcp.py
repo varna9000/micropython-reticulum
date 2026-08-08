@@ -11,6 +11,7 @@ MIN_FRAME_LEN = 19   # == const.HEADER_MINSIZE; shorter cannot be a packet
 FLAG     = 0x7E
 ESC      = 0x7D
 ESC_MASK = 0x20
+_FLAG_BYTES = b"\x7e"
 
 
 def hdlc_escape(data):
@@ -37,6 +38,11 @@ class TCPClientInterface(Interface):
     RECONNECT_WAIT = 5
     MAX_RECONNECTS = 0       # 0 = unlimited
 
+    # Max bytes drained from the socket per poll_loop iteration. Bounds how
+    # long one iteration can run so cohabiting tasks (GUI, LoRa) still get
+    # scheduled during a bulk transfer.
+    RX_BUDGET = 16384
+
     def __init__(self, config):
         name = config.get("name", "TCP")
         super().__init__(name)
@@ -47,11 +53,9 @@ class TCPClientInterface(Interface):
         self.max_reconnects = config.get("max_reconnects", self.MAX_RECONNECTS)
 
         self._socket = None
-        self._in_frame = False
-        self._escape = False
-        self._buffer = bytearray()
+        self._frame = None            # None = outside frame, else escaped bytes so far
         self._frame_overflow = False
-        self._recv_buf = bytearray(512)
+        self._recv_buf = bytearray(2048)
         self._recv_mv = memoryview(self._recv_buf)
         self._reconnect_count = 0
         self._last_reconnect = 0
@@ -76,9 +80,7 @@ class TCPClientInterface(Interface):
             pass
 
         self._socket = s
-        self._in_frame = False
-        self._escape = False
-        self._buffer = bytearray()
+        self._frame = None
         self._frame_overflow = False
         self.online = True
         self._reconnect_count = 0
@@ -182,47 +184,66 @@ class TCPClientInterface(Interface):
             self.online = False
             return False
 
-    def _process_byte(self, byte):
-        if self._in_frame and byte == FLAG:
-            self._in_frame = False
-            if len(self._buffer) > 0:
-                raw = bytes(self._buffer)
-                # Validate before handing anything to the transport layer. A
-                # frame shorter than a header cannot be a packet, and one that
-                # overflowed HW_MTU was truncated mid-flight — delivering it
-                # feeds a corrupt packet into routing (reference RNS 1.3.9
-                # added the same length checks to its HDLC reader).
-                if self._frame_overflow:
-                    log("TCP oversized HDLC frame dropped (>" + str(self.HW_MTU) + "B)", LOG_DEBUG)
-                elif len(raw) <= MIN_FRAME_LEN:
-                    log("TCP undersized HDLC frame dropped (" + str(len(raw)) + "B)", LOG_DEBUG)
+    def _feed(self, data):
+        """Chunk-level HDLC deframer. Replaces the former per-byte state
+        machine: a Python-level call per byte cost ~32us/byte on ESP32-S3
+        (~30KB/s CPU ceiling); scanning for FLAG with bytes.find() and
+        unescaping with two replace() passes runs at C speed.
+
+        Semantics match the byte machine: a FLAG opens a frame, the next FLAG
+        closes and delivers it, bytes outside a frame are discarded (RNS HDLC
+        brackets every frame with its own leading and trailing FLAG, so
+        between-frame bytes only occur when joining a stream mid-frame)."""
+        data = bytes(data)
+        pos = 0
+        n = len(data)
+        while pos < n:
+            idx = data.find(_FLAG_BYTES, pos)
+            if self._frame is None:
+                if idx < 0:
+                    return                      # garbage before any FLAG
+                self._frame = bytearray()       # frame opens
+                pos = idx + 1
+            elif idx < 0:
+                # Frame continues past this chunk. Cap the escaped size at
+                # 2x HW_MTU (worst case every byte escaped) — beyond that the
+                # frame can only be truncation or stream corruption.
+                if len(self._frame) + (n - pos) > 2 * self.HW_MTU + 2:
+                    self._frame_overflow = True
                 else:
-                    log("TCP RX " + str(len(raw)) + "B flags=0x" + ("%02x" % raw[0]) + " dest=" + raw[2:18].hex(), LOG_DEBUG)
-                    self.process_incoming(raw)
-                self._buffer = bytearray()
-            self._frame_overflow = False
-
-        elif byte == FLAG:
-            self._in_frame = True
-            self._buffer = bytearray()
-            self._escape = False
-            self._frame_overflow = False
-
-        elif self._in_frame:
-            if len(self._buffer) >= self.HW_MTU:
-                # Stop buffering, but remember the frame is spoiled so the
-                # closing FLAG discards it instead of delivering the prefix.
-                self._frame_overflow = True
-            elif byte == ESC:
-                self._escape = True
+                    self._frame += data[pos:]
+                return
             else:
-                if self._escape:
-                    if byte == FLAG ^ ESC_MASK:
-                        byte = FLAG
-                    elif byte == ESC ^ ESC_MASK:
-                        byte = ESC
-                    self._escape = False
-                self._buffer.append(byte)
+                if len(self._frame) + (idx - pos) > 2 * self.HW_MTU + 2:
+                    self._frame_overflow = True
+                else:
+                    self._frame += data[pos:idx]
+                self._deliver_frame()
+                pos = idx + 1
+
+    def _deliver_frame(self):
+        esc = self._frame
+        self._frame = None
+        overflow = self._frame_overflow
+        self._frame_overflow = False
+        if len(esc) == 0:
+            return                              # back-to-back FLAGs
+        # Unescape at C speed. Pass order is safe: any 0x7D in the escaped
+        # stream is an escape lead, so 0x7D 0x5E is always an escaped FLAG;
+        # the second pass then resolves the remaining 0x7D 0x5D pairs.
+        raw = bytes(esc).replace(b"\x7d\x5e", b"\x7e").replace(b"\x7d\x5d", b"\x7d")
+        # Validate before handing anything to the transport layer. A frame
+        # shorter than a header cannot be a packet, and one that overflowed
+        # HW_MTU was truncated mid-flight — delivering it feeds a corrupt
+        # packet into routing (reference RNS 1.3.9 added the same length
+        # checks to its HDLC reader).
+        if overflow or len(raw) > self.HW_MTU:
+            log("TCP oversized HDLC frame dropped (>" + str(self.HW_MTU) + "B)", LOG_DEBUG)
+        elif len(raw) <= MIN_FRAME_LEN:
+            log("TCP undersized HDLC frame dropped (" + str(len(raw)) + "B)", LOG_DEBUG)
+        else:
+            log("TCP RX " + str(len(raw)) + "B flags=0x" + ("%02x" % raw[0]) + " dest=" + raw[2:18].hex(), LOG_DEBUG)
+            self.process_incoming(raw)
 
     async def poll_loop(self):
         import uasyncio as asyncio
@@ -235,20 +256,27 @@ class TCPClientInterface(Interface):
                 await asyncio.sleep(1)
                 continue
 
+            got = 0
             try:
-                # Re-assert non-blocking before every recv — ESP32 lwIP
+                # Re-assert non-blocking before every drain — ESP32 lwIP
                 # bug: send() corrupts the socket's non-blocking state.
                 # process_outgoing() restores it after sendall(), but
                 # guard here too in case of any edge cases.
                 self._socket.settimeout(0)
-                n = self._socket.readinto(self._recv_buf)
-                if n and n > 0:
-                    for i in range(n):
-                        self._process_byte(self._recv_mv[i])
-                elif n == 0:
-                    # Empty recv = connection closed
-                    log("TCP connection closed by remote", LOG_NOTICE)
-                    self.online = False
+                # Drain until EAGAIN or budget. The former single 512B read
+                # per 10ms tick capped throughput at ~50KB/s before any
+                # processing cost; a busy hub link needs the backlog cleared
+                # in bursts, with the budget bounding loop monopolization.
+                while got < self.RX_BUDGET:
+                    n = self._socket.readinto(self._recv_buf)
+                    if n is None:
+                        break                   # EAGAIN surfaced as None
+                    if n == 0:
+                        log("TCP connection closed by remote", LOG_NOTICE)
+                        self.online = False
+                        break
+                    got += n
+                    self._feed(self._recv_mv[:n])
             except OSError as e:
                 if e.args[0] == 11:  # EAGAIN
                     pass
@@ -262,7 +290,12 @@ class TCPClientInterface(Interface):
                 # loop from crashing.
                 log("TCP poll error: " + str(e), LOG_ERROR)
 
-            await asyncio.sleep(0.01)
+            if got >= self.RX_BUDGET:
+                await asyncio.sleep(0)          # more pending: yield only
+            elif got:
+                await asyncio.sleep(0.002)
+            else:
+                await asyncio.sleep(0.01)
 
         log("TCP poll loop EXITED for " + self.name, LOG_ERROR)
 
