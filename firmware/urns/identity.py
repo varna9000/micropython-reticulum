@@ -10,6 +10,17 @@ from .crypto import (
     Ed25519PrivateKey, Ed25519PublicKey,
     Token, sha256, sha512, hkdf,
 )
+from .crypto import ed25519 as _ed25519_backend
+
+
+def _gc_after_crypto():
+    """The pure-Python 25519 fallback churns MBs of bignum temporaries per
+    operation; collecting right after keeps peak heap bounded on small boards.
+    With the native module there is no such garbage and each collect costs
+    ~10ms+ of heap scan per call on a populated heap — skip it."""
+    if not _ed25519_backend.have_native():
+        import gc
+        gc.collect()
 
 
 class Identity:
@@ -33,7 +44,20 @@ class Identity:
     def remember(packet_hash, destination_hash, public_key, app_data=None):
         if len(public_key) != Identity.KEYSIZE // 8:
             raise TypeError("Invalid public key size: " + str(len(public_key)))
-        Identity.known_destinations[destination_hash] = [time.time(), packet_hash, public_key, app_data]
+        kd = Identity.known_destinations
+        if (destination_hash not in kd
+                and len(kd) >= const.MAX_KNOWN_DESTINATIONS):
+            # LRU-by-announce eviction (the timestamp refreshes on every
+            # announce). Unbounded growth on a public hub reached 449 entries
+            # / 123KB JSON — a 4.5s flash write at persist and an ever-growing
+            # boot load. Evict a batch so the sort amortizes over many
+            # inserts instead of running at every one once at the cap.
+            by_age = sorted(kd, key=lambda k: kd[k][0])
+            for k in by_age[:const.KNOWN_DEST_EVICT_BATCH]:
+                del kd[k]
+            log("known_destinations at cap, evicted "
+                + str(const.KNOWN_DEST_EVICT_BATCH) + " oldest", LOG_DEBUG)
+        kd[destination_hash] = [time.time(), packet_hash, public_key, app_data]
 
     @staticmethod
     def recall(target_hash, from_identity_hash=False):
@@ -179,10 +203,7 @@ class Identity:
             log("Announce identity loaded: hash=" + str(announced_identity.hexhash), LOG_DEBUG)
 
             sig_valid = announced_identity.validate(signature, signed_data)
-            try:
-                import gc; gc.collect()
-            except:
-                pass
+            _gc_after_crypto()
             log("Announce sig_valid=" + str(sig_valid), LOG_DEBUG)
 
             # Fallback: if verification failed, try opposite ratchet assumption.
@@ -209,10 +230,7 @@ class Identity:
                 if alternate_layout and len(signature) == sig_len:
                     signed_data = destination_hash + public_key + name_hash + random_hash + ratchet + app_data
                     sig_valid = announced_identity.validate(signature, signed_data)
-                    try:
-                        import gc; gc.collect()
-                    except:
-                        pass
+                    _gc_after_crypto()
                     if sig_valid:
                         log("Announce verified with alternate layout", LOG_DEBUG)
                 if not len(packet.data) > keysize + name_hash_len + 10 + sig_len:
@@ -286,6 +304,13 @@ class Identity:
                     bytes.fromhex(entry[2]) if entry[2] else None,
                     bytes.fromhex(entry[3]) if entry[3] else None,
                 ]
+            # Trim a file written before the cap existed (or by a bigger
+            # board) down to this board's cap, oldest first.
+            kd = Identity.known_destinations
+            if len(kd) > const.MAX_KNOWN_DESTINATIONS:
+                by_age = sorted(kd, key=lambda k: kd[k][0])
+                for k in by_age[:len(kd) - const.MAX_KNOWN_DESTINATIONS]:
+                    del kd[k]
             log("Loaded " + str(len(Identity.known_destinations)) + " known destinations", LOG_VERBOSE)
         except OSError:
             log("No known destinations file found", LOG_VERBOSE)
@@ -403,10 +428,7 @@ class Identity:
         if self.pub is not None:
             ephemeral_key = X25519PrivateKey.generate()
             ephemeral_pub_bytes = ephemeral_key.public_key().public_bytes()
-            try:
-                import gc; gc.collect()
-            except:
-                pass
+            _gc_after_crypto()
 
             if ratchet is not None:
                 target_public_key = X25519PublicKey.from_public_bytes(ratchet)
@@ -414,10 +436,7 @@ class Identity:
                 target_public_key = self.pub
 
             shared_key = ephemeral_key.exchange(target_public_key)
-            try:
-                import gc; gc.collect()
-            except:
-                pass
+            _gc_after_crypto()
             derived_key = hkdf(
                 length=Identity.DERIVED_KEY_LENGTH,
                 derive_from=shared_key,
@@ -425,10 +444,7 @@ class Identity:
                 context=self.get_context(),
             )
             token = Token(derived_key)
-            try:
-                import gc; gc.collect()
-            except:
-                pass
+            _gc_after_crypto()
             ciphertext = token.encrypt(plaintext)
             return ephemeral_pub_bytes + ciphertext
         else:

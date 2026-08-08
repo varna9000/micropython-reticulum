@@ -86,10 +86,32 @@ TRANSPORT_TUNNEL      = const(0x03)
 LINK_CURVE            = "Curve25519"
 LINK_ECPUBSIZE        = const(32)  # bytes
 
-# Table size limits (microcontroller caps)
-MAX_DESTINATIONS      = const(64)
-MAX_PATH_TABLE        = const(32)
-MAX_ACTIVE_LINKS      = const(4)
+# Table size limits. The small values are microcontroller caps sized for the
+# Pico-W-class boards this port started on. A board with megabytes of free
+# heap (ESP32-S3 with PSRAM) talking to a public TCP hub sees more distinct
+# destinations per MINUTE than the small path table holds — the table churns
+# permanently and every page open becomes a fresh path request ("path not
+# found" while the node list is full). Gate on measured free heap, not on
+# sys.platform: a plain no-PSRAM ESP32 must keep the small caps.
+try:
+    import gc as _gc
+    _BIG_RAM = _gc.mem_free() > 2 * 1024 * 1024
+except (ImportError, AttributeError):
+    _BIG_RAM = False       # host CPython (tests): keep the small, pinned caps
+
+# (Plain ints, not const(): MicroPython's const() forbids branch-dependent
+# assignment, and other modules reach these via attribute lookup anyway.)
+if _BIG_RAM:
+    MAX_DESTINATIONS      = 512
+    MAX_PATH_TABLE        = 256
+    MAX_ACTIVE_LINKS      = 16
+    MAX_KNOWN_DESTINATIONS = 768
+else:
+    MAX_DESTINATIONS      = 64
+    MAX_PATH_TABLE        = 32
+    MAX_ACTIVE_LINKS      = 4
+    MAX_KNOWN_DESTINATIONS = 160
+KNOWN_DEST_EVICT_BATCH = const(32)  # amortized LRU eviction (see Identity.remember)
 MAX_ANNOUNCE_QUEUE    = const(16)
 MAX_RECEIPTS          = const(32)
 MAX_INCOMING_RESOURCES = const(1)
@@ -123,12 +145,23 @@ PATH_EXPIRY            = const(60 * 60 * 24)    # 1 day
 REVERSE_TIMEOUT       = const(8 * 60)          # 8 minutes
 LINK_ENTRY_TIMEOUT    = const(15 * 60)         # link-table entry lifetime
 
-# Routing-table caps (RAM-bounded for MCU)
-MAX_REVERSE_TABLE     = const(32)
-MAX_LINK_TABLE        = const(16)
-MAX_ANNOUNCE_TABLE    = const(16)
-MAX_PACKET_CACHE      = const(32)
-MAX_PACKET_HASHLIST   = const(512)
+# Routing-table caps (RAM-bounded for MCU; hub-scale on big-RAM boards)
+if _BIG_RAM:
+    MAX_REVERSE_TABLE     = 128
+    MAX_LINK_TABLE        = 64
+    MAX_ANNOUNCE_TABLE    = 32
+    MAX_PACKET_CACHE      = 64
+    MAX_PACKET_HASHLIST   = 1024
+else:
+    MAX_REVERSE_TABLE     = 32
+    MAX_LINK_TABLE        = 16
+    MAX_ANNOUNCE_TABLE    = 16
+    MAX_PACKET_CACHE      = 32
+    MAX_PACKET_HASHLIST   = 512
+
+# Inbound announce ingress (validation deferred to job_loop — see transport)
+MAX_ANNOUNCE_INGRESS       = const(32)   # queued announces awaiting validation
+ANNOUNCE_INGRESS_BUDGET_MS = const(100)  # max ms per job_loop tick validating
 
 # Maintenance / flood-control (Phase 5/6)
 CULL_INTERVAL         = const(5)           # seconds between table-maintenance passes
