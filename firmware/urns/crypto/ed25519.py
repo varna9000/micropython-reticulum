@@ -13,18 +13,34 @@ _native = None
 def _try_native():
     global _native
     mod = None
+    # 1. IRAM natmod from the filesystem (lib/ed25519_iram.mpy). A dynamically
+    #    loaded natmod executes from IRAM; a built-in C module executes from
+    #    flash XIP, which on ESP32-S3 measures ~80x slower for this code (the
+    #    16KB icache + shared dcache thrash between Monocypher's inner loops
+    #    and the PSRAM heap: verify 1461ms XIP vs 17.6ms IRAM). The distinct
+    #    module name matters — a VFS .mpy can never shadow a registered
+    #    built-in of the same name.
+    #    MemoryError (IRAM exhausted) and ValueError (mpy ABI mismatch) fall
+    #    through to the built-in, so a bad or missing file only costs speed.
     try:
-        if sys.platform == "esp32":
-            import ed25519_fast_xtensawin
-            mod = ed25519_fast_xtensawin
-        elif sys.platform == "rp2":
-            import ed25519_fast_armv6m
-            mod = ed25519_fast_armv6m
-        else:
-            import ed25519_fast
-            mod = ed25519_fast
-    except ImportError:
+        import ed25519_iram
+        mod = ed25519_iram
+    except (ImportError, MemoryError, ValueError, OSError):
         pass
+    # 2. Built-in / platform C modules (flash XIP on esp32 — slow but present)
+    if mod is None:
+        try:
+            if sys.platform == "esp32":
+                import ed25519_fast_xtensawin
+                mod = ed25519_fast_xtensawin
+            elif sys.platform == "rp2":
+                import ed25519_fast_armv6m
+                mod = ed25519_fast_armv6m
+            else:
+                import ed25519_fast
+                mod = ed25519_fast
+        except ImportError:
+            pass
     if mod is None:
         try:
             import ed25519_fast
