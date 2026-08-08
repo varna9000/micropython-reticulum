@@ -1613,7 +1613,11 @@ class Transport:
         from .destination import Destination
         for dest in Transport.destinations:
             if dest.hash == packet.destination_hash and dest.direction == Destination.IN:
-                import gc; gc.collect()
+                # Pre-decrypt collect only matters for the pure-Python
+                # crypto fallback (bignum churn); with native crypto it was
+                # a forced full-heap pause per opportunistic message.
+                from .identity import _gc_after_crypto
+                _gc_after_crypto()
                 if dest.receive(packet):
                     # Honour proof_strategy (mirrors reference RNS Transport.py).
                     if dest.proof_strategy == Destination.PROVE_ALL:
@@ -1765,8 +1769,15 @@ class Transport:
                         Transport._last_persist = now
                         Transport.save_path_table(Transport.persist_path)
 
+                # Periodic collect is a small-board crutch: a Pico-W-class
+                # heap fragments to death over long sessions without it. On
+                # a PSRAM board the same call is a full-heap pause (tens of
+                # ms) every CULL_INTERVAL — a metronome UI hiccup — for no
+                # benefit, since allocation-threshold auto-GC handles
+                # pressure incrementally. Collect only when actually tight.
                 import gc
-                gc.collect()
+                if gc.mem_free() < 262144:
+                    gc.collect()
 
             except Exception as e:
                 log("Transport job error: " + str(e), LOG_ERROR)

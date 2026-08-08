@@ -132,6 +132,7 @@ def _register_urns_pkg():
     # Inject fakes BEFORE any real import resolves them.
     fid = types.ModuleType("urns.identity")
     fid.Identity = Identity
+    fid._gc_after_crypto = lambda: None   # real one gates on native crypto
     sys.modules["urns.identity"] = fid
 
     fds = types.ModuleType("urns.destination")
