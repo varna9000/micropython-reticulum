@@ -16,6 +16,12 @@ from .log import log, sl, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_EXTREME, LOG_NO
 
 # ESP32 MicroPython counts seconds from 2000-01-01; convert to/from Unix epoch.
 _EPOCH_OFFSET = 946684800 if sys.platform == "esp32" else 0
+
+# Millisecond monotonic clock: MicroPython ticks_ms, host-CPython fallback
+# (time.time() there is a float with sub-ms resolution; wraparound-safe diff
+# only matters on the ticks_ms port, which supplies its own ticks_diff).
+_ticks_ms = getattr(time, "ticks_ms", None) or (lambda: int(time.time() * 1000))
+_ticks_diff = getattr(time, "ticks_diff", None) or (lambda a, b: a - b)
 # Single sanity floor: a clock/timestamp at/above this is considered "real".
 # Below it, the source (or our own clock) is still unset. This also keeps the
 # 2000-epoch conversion non-negative. The upper bound is handled by requiring
@@ -63,6 +69,17 @@ class Transport:
     control_hashes = []         # their hashes (special-cased in admission/forwarding)
     discovery_path_requests = {} # dest_hash -> {"requesting_interface", "timeout"}
     _pr_tags = []                # recent (dest_hash + tag) path-request dedup tags
+
+    # Inbound announce ingress. Validating an announce costs an Ed25519
+    # verify — the heaviest single operation this stack runs — so inbound()
+    # queues announces here and job_loop validates them under a time budget.
+    # Processing them synchronously in the interface read path let a busy
+    # hub starve link proofs and path responses behind back-to-back verifies
+    # (measured: ~78% of the event loop on a public TCP hub).
+    # announce_inline restores the old synchronous behaviour; host tests use
+    # it to assert on tables immediately after inbound().
+    announce_ingress = []
+    announce_inline = False
 
     # Validate link-request proofs before relaying them (anti-DoS on open mesh).
     # Native-gated: skipped when native Ed25519 is unavailable (avoids ~2s verify).
@@ -869,7 +886,13 @@ class Transport:
 
             # Route by type (local delivery; transit proofs handled in _handle_proof).
             if packet.packet_type == const.PKT_ANNOUNCE:
-                Transport._handle_announce(packet)
+                if Transport.announce_inline:
+                    Transport._handle_announce(packet)
+                elif len(Transport.announce_ingress) < const.MAX_ANNOUNCE_INGRESS:
+                    Transport.announce_ingress.append(packet)
+                else:
+                    log("Announce ingress full, dropped "
+                        + packet.destination_hash.hex()[:8], LOG_DEBUG)
             elif packet.packet_type == const.PKT_LINKREQUEST:
                 Transport._handle_linkrequest(packet)
             elif packet.packet_type == const.PKT_DATA:
@@ -942,11 +965,20 @@ class Transport:
             local = unix_ts - _EPOCH_OFFSET   # convert Unix -> this port's epoch
             if local < 0:
                 return
+            before = time.time()
             t = time.gmtime(local)
             # RTC tuple: (year, month, mday, weekday, hour, minute, second, subsec)
             machine.RTC().datetime((t[0], t[1], t[2], t[6], t[3], t[4], t[5], 0))
             Transport._clock_synced = True
             Transport._time_votes = {}
+            # Re-base every table stamp taken with the pre-sync clock. The RTC
+            # just jumped forward ~26 years; without this, a path entry born
+            # seconds ago has an expiry ~26 years in the past and the next
+            # cull pass (<=5s away) silently wipes every path learned before
+            # the sync — a systematic "path not found" right after boot.
+            delta = time.time() - before
+            if delta > 0:
+                Transport._shift_clocks(delta, before + const.PATH_EXPIRY + 60)
             # Everything we announced before this moment carried a year-2000
             # emission time, so peers who already knew us from a previous boot
             # dropped those announces as stale replays (emission-freshness
@@ -961,6 +993,57 @@ class Transport:
             log(msg, LOG_NOTICE)
         except Exception as e:
             log("Clock sync failed: " + str(e), LOG_ERROR)
+
+    @staticmethod
+    def _shift_clocks(delta, cut):
+        """Shift every absolute timestamp taken with the pre-sync clock
+        forward by `delta` seconds. `cut` separates old-clock values from
+        already-correct ones: anything a pre-sync stamp could have produced
+        is <= before + PATH_EXPIRY, while post-sync stamps are ~delta above
+        `before` (delta is decades for a battery-less RTC)."""
+        def _sh(v):
+            return v + delta if isinstance(v, (int, float)) and v < cut else v
+        for e in Transport.path_table.values():
+            e[const.IDX_PT_TIMESTAMP] = _sh(e[const.IDX_PT_TIMESTAMP])
+            e[const.IDX_PT_EXPIRES] = _sh(e[const.IDX_PT_EXPIRES])
+        for k in Transport.reachable_destinations:
+            Transport.reachable_destinations[k] = _sh(
+                Transport.reachable_destinations[k])
+        for e in Transport.announce_table.values():
+            e[const.IDX_AT_TIMESTAMP] = _sh(e[const.IDX_AT_TIMESTAMP])
+            e[const.IDX_AT_RTMO] = _sh(e[const.IDX_AT_RTMO])
+        for d in Transport.discovery_path_requests.values():
+            if "timeout" in d:
+                d["timeout"] = _sh(d["timeout"])
+        for ws in Transport._path_waiters.values():
+            for w in ws:
+                if "deadline" in w:
+                    w["deadline"] = _sh(w["deadline"])
+        for k in Transport._path_request_times:
+            Transport._path_request_times[k] = _sh(
+                Transport._path_request_times[k])
+        for k in Transport._announce_rate:
+            Transport._announce_rate[k] = [
+                _sh(t) for t in Transport._announce_rate[k]]
+        for r in Transport.receipts:
+            if r.sent_at is not None:
+                r.sent_at = _sh(r.sent_at)
+        for l in Transport.pending_links + Transport.active_links:
+            for attr in ("last_outbound", "last_inbound", "last_proof_time",
+                         "request_time", "activated_at"):
+                v = getattr(l, attr, None)
+                if v is not None:
+                    setattr(l, attr, _sh(v))
+        from .identity import Identity
+        for e in Identity.known_destinations.values():
+            e[0] = _sh(e[0])
+        for k in Identity.known_ratchets:
+            r, received = Identity.known_ratchets[k]
+            Identity.known_ratchets[k] = (r, _sh(received))
+        Transport._last_cull = _sh(Transport._last_cull)
+        Transport._last_persist = _sh(Transport._last_persist)
+        log("Re-based " + str(len(Transport.path_table))
+            + " paths after clock sync (+" + str(delta) + "s)", LOG_VERBOSE)
 
     @staticmethod
     def _reannounce_local():
@@ -1353,11 +1436,25 @@ class Transport:
             Transport.announce_handlers.remove(handler)
 
     @staticmethod
+    def _service_announce_ingress():
+        """job_loop tick: validate queued announces, oldest first, within a
+        time budget so a burst (a hub reconnect floods dozens at once) cannot
+        monopolize the event loop. The budget is checked after each item, so
+        even a slow-crypto board always makes one announce of progress."""
+        t0 = _ticks_ms()
+        while Transport.announce_ingress:
+            packet = Transport.announce_ingress.pop(0)
+            try:
+                Transport._handle_announce(packet)
+            except Exception as e:
+                log("Announce processing error: " + str(e), LOG_ERROR)
+            if _ticks_diff(_ticks_ms(), t0) >= const.ANNOUNCE_INGRESS_BUDGET_MS:
+                break
+
+    @staticmethod
     def _handle_announce(packet):
         from .identity import Identity
-        import gc; gc.collect()
         valid = Identity.validate_announce(packet)
-        gc.collect()
         if not valid:
             log("Invalid announce for " + packet.destination_hash.hex(), LOG_DEBUG)
             return
@@ -1643,6 +1740,12 @@ class Transport:
                 for l in closed_links:
                     if l in Transport.active_links:
                         Transport.active_links.remove(l)
+
+                # Validate queued inbound announces (bounded time slice) BEFORE
+                # servicing path waiters, so a path response processed this
+                # tick can satisfy a waiter in the same tick.
+                if Transport.announce_ingress:
+                    Transport._service_announce_ingress()
 
                 # Service deferred sends waiting on a path request.
                 Transport._process_path_waiters()

@@ -33,6 +33,9 @@ class Identity:
     KEYSIZE = 512
     NAME_HASH_LENGTH = 80
 
+    known_destinations = {}       # mirrors the real Identity store shape
+    known_ratchets = {}
+
     validate_result = True        # tests flip this to simulate bad announces
     known = {}                    # dest_hash -> app_data (for recall)
     app_data = {}                 # dest_hash -> announce app_data (recall_app_data)
@@ -152,6 +155,10 @@ def setup():
 
 const, log, packet, transport = setup()
 Transport = transport.Transport
+# Tests assert on tables immediately after Transport.inbound(); process
+# announces synchronously instead of via the job_loop ingress queue.
+# test_announce_ingress.py flips this off to exercise the deferred path.
+Transport.announce_inline = True
 
 import importlib as _importlib
 link = _importlib.import_module("urns.link")        # module-level only (crypto is lazy)
@@ -284,6 +291,7 @@ def reset_transport():
     T.blackholed_identities = []
     T._announce_rate = {}
     T._pr_tags = []
+    T.announce_ingress = []
     T.relayed_announces = T.relayed_data = T.relayed_links = T.relayed_proofs = 0
     T.control_destinations = []
     T.control_hashes = []
