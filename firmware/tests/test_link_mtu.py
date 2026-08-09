@@ -158,6 +158,7 @@ def test_outlink_request_gate_and_mtu():
     ol.sdu = 8192 - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
     ol.mdu = link._link_mdu(8192)
     ol.pending_requests = {}
+    ol.rtt = 0
     ol.destination = _Dest()
     _seed_path(iface)
     rid = ol.request("/big", data=b"y" * 2000)

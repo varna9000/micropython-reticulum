@@ -37,6 +37,23 @@ def _link_mdu(mtu):
             * const.AES128_BLOCKSIZE) - 1
 
 
+_crypto_grace = None
+
+
+def _crypto_grace_s():
+    """Establishment grace for ECDH + signing: ~2 s with native crypto, ~12 s
+    for the pure-Python fallback (~5 s per side on ESP32). Cached probe of the
+    crypto package's native flag."""
+    global _crypto_grace
+    if _crypto_grace is None:
+        try:
+            from .crypto import ed25519
+            _crypto_grace = 2 if getattr(ed25519, "_native", None) else 12
+        except Exception:
+            _crypto_grace = 12
+    return _crypto_grace
+
+
 class Link:
     PENDING = 0x00
     ACTIVE  = 0x01
@@ -675,9 +692,6 @@ class OutgoingLink:
     PENDING = 0x00
     ACTIVE  = 0x01
     CLOSED  = 0x02
-    # Per-hop establishment timeout, same rationale as Link above.
-    ESTABLISHMENT_BASE    = 35  # seconds
-    ESTABLISHMENT_PER_HOP = 20  # seconds per hop
 
     # Inert LRRTT defaults at class level, so a link object constructed without
     # __init__ (host tests, any object.__new__ path) still has well-defined
@@ -701,8 +715,6 @@ class OutgoingLink:
     # failure, so the request timeout is suspended.
     REQ_SENT      = 0x00
     REQ_RECEIVING = 0x01
-    REQUEST_TIMEOUT_BASE    = 30  # seconds, + per-hop below
-    REQUEST_TIMEOUT_PER_HOP = 15
 
     def __init__(self, destination, established_callback=None, closed_callback=None,
                  sign_proofs=False):
@@ -745,9 +757,21 @@ class OutgoingLink:
         # re-balance the path table (see Transport._rebalance_link_terminus).
         self.expected_hops = Transport.hops_to(destination.hash)
         self.rebalanced = None
-        self.establishment_timeout = (OutgoingLink.ESTABLISHMENT_BASE
-                                      + OutgoingLink.ESTABLISHMENT_PER_HOP
-                                      * max(1, self.expected_hops))
+        # Establishment timeout scales with the first-hop bitrate (reference
+        # Transport.first_hop_timeout does the same for hop 1; assuming path
+        # homogeneity errs safe on LoRa meshes): each hop gets the base
+        # per-hop timeout plus 3 full-MTU airtimes, capped at the old LoRa
+        # figure. +1 hop is first-hop grace; _crypto_grace_s() covers
+        # ECDH + signing on both sides. TCP 1-hop lands at ~14 s (was 55),
+        # SF11 1-hop at ~52 s.
+        out_if_bitrate = 0
+        entry = Transport.path_table.get(destination.hash)
+        if entry is not None and entry[const.IDX_PT_RECV_IF] is not None:
+            out_if_bitrate = getattr(entry[const.IDX_PT_RECV_IF], "bitrate", 0) or 0
+        hop_air = (const.MTU * 8) / out_if_bitrate if out_if_bitrate > 0 else 0
+        per_hop = min(const.DEFAULT_PER_HOP_TIMEOUT + 3 * hop_air, 20)
+        self.establishment_timeout = (per_hop * (max(1, self.expected_hops) + 1)
+                                      + _crypto_grace_s())
 
         # Generate ephemeral X25519 keypair for ECDH
         gc.collect()
@@ -1028,9 +1052,10 @@ class OutgoingLink:
             return None
 
         if timeout is None:
-            from .transport import Transport
-            hops = max(1, Transport.hops_to(self.destination.hash))
-            timeout = OutgoingLink.REQUEST_TIMEOUT_BASE + OutgoingLink.REQUEST_TIMEOUT_PER_HOP * hops
+            # RTT already encodes the path (reference Link.request parity);
+            # rtt is measured at proof time, so it is set on any ACTIVE link.
+            timeout = ((self.rtt or 1.0) * const.TRAFFIC_TIMEOUT_FACTOR
+                       + const.RESPONSE_MAX_GRACE_TIME * 1.125)
 
         ciphertext = self._token.encrypt(packed)
         from .packet import Packet, LinkDestination

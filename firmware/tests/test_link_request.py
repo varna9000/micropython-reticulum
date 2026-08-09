@@ -145,9 +145,12 @@ def test_request_guards():
 def test_request_default_timeout():
     mi, ol = _rig()
     rid = ol.request("/page/index.mu")
-    base = link.OutgoingLink.REQUEST_TIMEOUT_BASE
-    per_hop = link.OutgoingLink.REQUEST_TIMEOUT_PER_HOP
-    assert ol.pending_requests[rid][2] == base + per_hop  # hops unknown -> 1
+    # rtt=0 in the rig -> the 1.0 s fallback: 1*6 + 10*1.125
+    assert ol.pending_requests[rid][2] == 1.0 * const.TRAFFIC_TIMEOUT_FACTOR \
+        + const.RESPONSE_MAX_GRACE_TIME * 1.125
+    ol.rtt = 4.0
+    rid2 = ol.request("/page/other.mu")
+    assert abs(ol.pending_requests[rid2][2] - (4.0 * 6 + 11.25)) < 1e-9
 
 
 # ----------------------------- responses ----------------------------------
