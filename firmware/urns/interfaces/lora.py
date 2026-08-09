@@ -78,6 +78,20 @@ class LoRaInterface(Interface):
         self._crc_en = config.get("crc_en", True)
         self._syncword = config.get("syncword", 0x1424)
 
+        # On-air bitrate from SF/BW/CR (reference RNodeInterface.updateBitrate
+        # formula: SF * BW/2^SF * 4/CR; SF7/125k/CR5 -> 5468.75 bps). Sole
+        # consumer is Transport's announce airtime cap (ANNOUNCE_CAP of TX
+        # time). An explicit "bitrate" config key overrides; 0 disables the
+        # cap on this interface.
+        try:
+            if "bitrate" in config:
+                self.bitrate = config["bitrate"] or 0
+            else:
+                bw_hz = float(self._bw) * 1000
+                self.bitrate = self._sf * (bw_hz / (2 ** self._sf)) * (4.0 / self._coding_rate)
+        except Exception:
+            self.bitrate = 0
+
         # Listen-before-talk (CSMA). Before each frame TX the modem's live
         # RSSI is probed; while it reads at or above lbt_rssi dBm the send
         # is deferred in short random slots, up to lbt_max_ms total (then

@@ -38,6 +38,10 @@ class TCPClientInterface(Interface):
     # echoed back to it (see Transport._rebroadcast_announce).
     POINT_TO_POINT = True
     HW_MTU = 16384
+    # Same guess as reference TCPInterface: engages the announce airtime cap
+    # (a no-op at this rate) and marks the interface as fast for any
+    # bitrate-scaled timing.
+    BITRATE_GUESS = 10_000_000
     CONNECT_TIMEOUT = 5
     RECONNECT_WAIT = 5
     MAX_RECONNECTS = 0       # 0 = unlimited
@@ -54,6 +58,7 @@ class TCPClientInterface(Interface):
     def __init__(self, config):
         name = config.get("name", "TCP")
         super().__init__(name)
+        self.bitrate = config.get("bitrate", self.BITRATE_GUESS)
 
         self.target_host = config.get("target_host", "localhost")
         self.target_port = config.get("target_port", 4242)

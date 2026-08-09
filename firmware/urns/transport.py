@@ -418,12 +418,24 @@ class Transport:
                 completed.append(dest)
                 continue
             if now > entry[const.IDX_AT_RTMO]:
-                entry[const.IDX_AT_RTMO] = now + const.PATHFINDER_G + const.PATHFINDER_RW
-                entry[const.IDX_AT_RETRIES] += 1
+                sent = capped = 0
+                allowed_at = 0
                 try:
-                    Transport._rebroadcast_announce(entry)
+                    sent, capped, allowed_at = Transport._rebroadcast_announce(entry)
                 except Exception as e:
                     log("Announce rebroadcast error: " + str(e), LOG_ERROR)
+                if sent == 0 and capped > 0:
+                    # Every eligible interface was airtime-capped: defer without
+                    # spending the retry. At LoRa rates the cap window (SF7 ~13s,
+                    # SF11 ~134s per announce) outlasts the whole retry budget
+                    # (2 passes ~5.5s apart), so spending here would permanently
+                    # drop the announce; reference RNS queues capped announces
+                    # instead. A pass with no eligible interface at all still
+                    # counts, so dead entries don't linger.
+                    entry[const.IDX_AT_RTMO] = max(now + const.PATHFINDER_G, allowed_at)
+                else:
+                    entry[const.IDX_AT_RTMO] = now + const.PATHFINDER_G + const.PATHFINDER_RW
+                    entry[const.IDX_AT_RETRIES] += 1
         for d in completed:
             Transport.announce_table.pop(d, None)
 
@@ -432,9 +444,13 @@ class Transport:
         """Re-emit a stored announce as HDR_2 with OUR transport_id, on every
         online OUT interface (subject to the airtime cap). hops carries the
         stored (already-incremented) value; the next node increments again.
-        Dedup (route-independent hash) + should_add prevent loops/bad paths."""
+        Dedup (route-independent hash) + should_add prevent loops/bad paths.
+
+        Returns (sent_count, capped_count, earliest_allowed_at) so the caller
+        can defer — not spend — the retry when every eligible interface was
+        airtime-capped."""
         if Transport.identity is None:
-            return
+            return (0, 0, 0)
         raw = entry[const.IDX_AT_RAW]
         hops = entry[const.IDX_AT_HOPS]
         attached_if = entry[const.IDX_AT_ATTCHD_IF]
@@ -452,6 +468,8 @@ class Transport:
             new_raw = new_raw[:34] + bytes([const.CTX_PATH_RESPONSE]) + new_raw[35:]
         recv_if = entry[const.IDX_AT_RECV_IF] if len(entry) > const.IDX_AT_RECV_IF else None
         sent_on = []
+        capped = 0
+        allowed_at = 0
         for interface in Transport.interfaces:
             if not interface.online or not getattr(interface, "OUT", True):
                 continue
@@ -469,7 +487,15 @@ class Transport:
             if (interface is recv_if
                     and getattr(interface, "POINT_TO_POINT", False)):
                 continue
-            if not Transport._announce_airtime_ok(interface, len(new_raw)):
+            # Path responses (blk_rbrd) bypass the airtime cap: they are rare,
+            # latency-bound (the requester's path waiter expires in seconds),
+            # and get exactly one emission (retries preloaded to PATHFINDER_R).
+            if (not entry[const.IDX_AT_BLK_RBRD]
+                    and not Transport._announce_airtime_ok(interface, len(new_raw))):
+                capped += 1
+                aa = getattr(interface, "_announce_allowed_at", 0)
+                if allowed_at == 0 or aa < allowed_at:
+                    allowed_at = aa
                 log("Announce airtime cap hit on " + str(interface), LOG_DEBUG)
                 continue
             if Transport.transmit(interface, new_raw):
@@ -479,6 +505,7 @@ class Transport:
             _d8 = new_raw[18:34].hex()[:8] if len(new_raw) >= 34 else "?"
             log("Relay announce " + _d8 + " hops=" + str(hops)
                 + " -> " + ",".join(sent_on), LOG_NOTICE)
+        return (len(sent_on), capped, allowed_at)
 
     @staticmethod
     def _add_reverse(trunc_hash, recv_if, out_if):
