@@ -103,9 +103,10 @@ class Transport:
     relayed_links = 0
     relayed_proofs = 0
 
-    # Reachability + on-demand path resolution (path requests). Membership-only,
-    # no expiry — see has_path(). path_table is the HDR_2-route subset of this.
-    reachable_destinations = {}   # dest_hash -> last announce time (capped)
+    # Reachability + on-demand path resolution (path requests). Refreshed on
+    # EVERY validated announce, LRU-evicted at cap, and removed whenever the
+    # route is removed — see has_path(). path_table is the HDR_2-route subset.
+    reachable_destinations = {}   # dest_hash -> last announce heard (capped)
     _path_waiters = {}            # dest_hash -> [ {on_found, on_timeout, deadline} ]
     _path_request_times = {}      # dest_hash -> last request sent (rate-limit)
     _path_request_dest = None     # cached OUT/PLAIN "rnstransport.path.request"
@@ -1101,13 +1102,15 @@ class Transport:
     def has_path(destination_hash):
         """True if we currently know how to reach this destination.
 
-        Membership-only, NO expiry: a transport answers a path request by
-        replaying the destination's *cached* announce, which has the same packet
-        hash as the original. If reachability expired while that hash were still
-        in packet_hashlist, the replayed response would be dropped as a duplicate
-        and the path never re-learned. So a destination is "unreachable" only when
-        we have genuinely never heard it this boot (packet_hashlist also empty),
-        which avoids that dedup conflict.
+        Reads reachable_destinations, which mirrors path_table's lifetime:
+        refreshed on every validated announce (including dup/worse ones that
+        change no route — a replayed path response carries the ORIGINAL
+        emission, and it must still restore reachability), LRU-evicted at
+        MAX_DESTINATIONS by last-heard time, and removed together with the
+        path entry (cull, cap-eviction, expire_path, blackhole). A False here
+        therefore means "no route" and the caller should request_path(); the
+        answer is never lost to hash dedup, because packet_filter exempts
+        duplicate SINGLE announces.
         """
         return destination_hash in Transport.reachable_destinations
 
@@ -1395,6 +1398,7 @@ class Transport:
         so the next send triggers a fresh path request."""
         Transport.path_table.pop(dest_hash, None)
         Transport.path_states.pop(dest_hash, None)
+        Transport.reachable_destinations.pop(dest_hash, None)
         log("Expired path to " + dest_hash.hex()[:8], LOG_VERBOSE)
 
     @staticmethod
@@ -1515,6 +1519,19 @@ class Transport:
             for d in Transport.destinations
         )
 
+        # A validated announce proves the destination is reachable right now,
+        # route change or not — refresh membership BEFORE the should_add gate.
+        # A replayed path response carries the ORIGINAL emission and lands in
+        # the should_add=False branch below; refreshing only on route adoption
+        # left has_path() false-negative after a request the network answered.
+        # Evict by last-heard value, not dict order: MicroPython dicts are not
+        # insertion-ordered, so next(iter()) evicted an arbitrary destination.
+        if not is_self:
+            rd = Transport.reachable_destinations
+            if len(rd) >= const.MAX_DESTINATIONS and dest not in rd:
+                rd.pop(min(rd, key=lambda k: rd[k]), None)
+            rd[dest] = now
+
         # should_add: shortest path wins and is sticky (reference-RNS-like).
         #   - fewer hops  -> ALWAYS adopt. A shorter path is better even if its
         #     announce is OLDER. Field case: the 1-hop TCP copy of c4756060 arrives
@@ -1566,12 +1583,18 @@ class Transport:
 
         log("Valid announce from " + dest.hex(), LOG_NOTICE)
 
-        # Install the rich path-table entry (evict oldest if full).
+        # Install the rich path-table entry (evict oldest if full). The evicted
+        # destination loses reachability too: membership without a route makes
+        # has_path() lie, and callers then skip the path request and emit a
+        # direct HDR_1 link request no transport will forward ("link failed"
+        # where a path request would have worked).
         if (len(Transport.path_table) >= const.MAX_PATH_TABLE
                 and dest not in Transport.path_table):
             oldest = min(Transport.path_table,
                          key=lambda k: Transport.path_table[k][const.IDX_PT_TIMESTAMP])
             Transport.path_table.pop(oldest, None)
+            Transport.reachable_destinations.pop(oldest, None)
+            Transport.path_states.pop(oldest, None)
         Transport.path_table[dest] = [now, received_from, packet.hops,
                                       now + const.PATH_EXPIRY,
                                       packet.receiving_interface,
@@ -1581,13 +1604,6 @@ class Transport:
 
         # Cache the announce so we can answer path requests by replaying it.
         Transport.cache_announce(packet.packet_hash, packet.raw)
-
-        # Mark reachable (membership-only) for opportunistic sends / path waiters.
-        if (len(Transport.reachable_destinations) >= const.MAX_DESTINATIONS
-                and dest not in Transport.reachable_destinations):
-            Transport.reachable_destinations.pop(
-                next(iter(Transport.reachable_destinations)), None)
-        Transport.reachable_destinations[dest] = now
 
         # Queue a timed rebroadcast (transport nodes only, subject to the
         # per-source announce rate-limit — the path is kept either way).
