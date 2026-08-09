@@ -222,6 +222,13 @@ class Transport:
                     if (_path is not None and _path[const.IDX_PT_HOPS] > 1
                             and interface is not _path[const.IDX_PT_RECV_IF]):
                         continue
+                    if len(raw) > getattr(interface, "HW_MTU", const.MTU):
+                        # Big-MTU link traffic fanning out past a small-MTU
+                        # interface (16K TCP parts hitting LoRa/serial): skip
+                        # quietly instead of a per-part TX-failed warning.
+                        log("TX skip " + interface.name + " (" + str(len(raw))
+                            + "B > HW_MTU)", LOG_DEBUG)
+                        continue
                     try:
                         result = interface.process_outgoing(raw)
                         if result or result is None:
@@ -1727,6 +1734,18 @@ class Transport:
         if entry is not None:
             return entry[const.IDX_PT_HOPS]
         return 0
+
+    @staticmethod
+    def next_hop_interface_hw_mtu(destination_hash):
+        """HW_MTU of the interface a packet to destination would leave on,
+        or None when no path is known (caller falls back to const.MTU)."""
+        entry = Transport.path_table.get(destination_hash)
+        if entry is None:
+            return None
+        out_if = entry[const.IDX_PT_RECV_IF]
+        if out_if is None:
+            return None
+        return getattr(out_if, "HW_MTU", const.MTU)
 
     @staticmethod
     async def job_loop():

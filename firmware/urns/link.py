@@ -119,6 +119,7 @@ class Link:
         self.packet_callback = None
         self.remote_identity = None
         self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
+        self.mdu = _link_mdu(self.mtu)
 
         # %-formatted in one expression: str + bytes-ish concat chains here
         # raise TypeError when this module is frozen into firmware bytecode.
@@ -769,11 +770,16 @@ class OutgoingLink:
             self._sig_prv = None
             self._sig_pub_bytes = os.urandom(32)
 
-        # Signalling bytes (our MTU, AES-256-CBC)
-        self.mtu = const.MTU
+        # Signalling bytes: propose the next-hop interface's HW_MTU (reference
+        # RNS link MTU discovery). Transit nodes clamp the signalling to each
+        # hop's HW_MTU, the responder min()s against its own interface, and we
+        # min() again on proof — the final MTU never exceeds any hop that saw
+        # the request. No known path -> conservative protocol MTU.
+        nh_mtu = Transport.next_hop_interface_hw_mtu(destination.hash)
+        self.mtu = nh_mtu if nh_mtu else const.MTU
         self.sdu = self.mtu - const.HEADER_MAXSIZE - const.IFAC_MIN_SIZE
         self.mdu = _link_mdu(self.mtu)
-        sig_bytes = _signalling_bytes(const.MTU, MODE_AES256_CBC)
+        sig_bytes = _signalling_bytes(self.mtu, MODE_AES256_CBC)
 
         # Build and send link request
         request_data = self._pub_bytes + self._sig_pub_bytes + sig_bytes
@@ -913,6 +919,7 @@ class OutgoingLink:
             LinkDestination(self.link_id), ciphertext,
             const.PKT_DATA, context=context, create_receipt=False,
         )
+        packet.MTU = self.mtu
         packet.send()
         self._had_outbound()
 
@@ -1016,8 +1023,8 @@ class OutgoingLink:
 
         path_hash = Identity.truncated_hash(path.encode("utf-8"))
         packed = umsgpack.packb([time.time(), path_hash, data])
-        if len(packed) > self.sdu:
-            log("Link request too large: " + str(len(packed)) + "B > " + str(self.sdu) + "B sdu", LOG_ERROR)
+        if len(packed) > self.mdu:
+            log("Link request too large: " + str(len(packed)) + "B > " + str(self.mdu) + "B mdu", LOG_ERROR)
             return None
 
         if timeout is None:
@@ -1031,6 +1038,7 @@ class OutgoingLink:
             LinkDestination(self.link_id), ciphertext,
             const.PKT_DATA, context=const.CTX_REQUEST, create_receipt=False,
         )
+        packet.MTU = self.mtu
         if packet.send() is False:
             return None
 

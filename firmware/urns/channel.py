@@ -410,6 +410,7 @@ class LinkChannelOutlet:
         from .packet import Packet
         packet = Packet(_ChannelDestination(link), ciphertext, const.PKT_DATA,
                         context=const.CTX_CHANNEL, create_receipt=True)
+        packet.MTU = getattr(link, "mtu", const.MTU)
         packet._chan_raw = raw   # keep plaintext envelope for re-encrypt-on-resend
         packet.send()
         return packet
