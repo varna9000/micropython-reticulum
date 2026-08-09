@@ -8,20 +8,55 @@ from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
 from .identity import Identity
 from .crypto.hashes import sha256
 
+# Millisecond monotonic clock for round timing. Device time.time() is whole
+# seconds — dividing rate math by it is a ZeroDivisionError on any fast round.
+# Same host-CPython fallback pattern as transport.py.
+_ticks_ms = getattr(time, "ticks_ms", None) or (lambda: int(time.time() * 1000))
+_ticks_diff = getattr(time, "ticks_diff", None) or (lambda a, b: a - b)
+
 
 # Constants (wire-compatible with reference RNS)
 MAPHASH_LEN = 4
 RANDOM_HASH_SIZE = 4
-WINDOW = 4
-MAX_RETRIES = 16
-MAX_ADV_RETRIES = 4
-TIMEOUT = 120
 HASHMAP_IS_EXHAUSTED = 0xFF
 HASHMAP_IS_NOT_EXHAUSTED = 0x00
 MAX_RESOURCE_SIZE = 16384  # 16KB — ESP32 memory safe
-REQUEST_RETRY_INTERVAL = 10  # seconds between request retries
-MAX_REQUEST_RETRIES = 5
-ADV_RETRY_INTERVAL = 15  # (sender) seconds without a part request -> re-advertise
+
+# Windowing (reference RNS Resource parity). The receiver requests up to
+# `window` parts per round; the window grows each completed round and its cap
+# unlocks (or clamps) with the measured transfer rate — the same code ramps a
+# TCP link to big windows while LoRa settles at WINDOW_MAX_VERY_SLOW.
+WINDOW               = 4
+WINDOW_MIN           = 2
+WINDOW_MAX_SLOW      = 10
+WINDOW_MAX_VERY_SLOW = 4       # sustained < 2 kbps: LoRa lands here
+WINDOW_MAX_FAST      = 75      # request pkt 1+32+75*4 = 333 B fits mdu 431;
+                               # in-flight RAM is bounded by MAX_RESOURCE_SIZE
+FAST_RATE_THRESHOLD  = 4       # samples above RATE_FAST to unlock FAST
+VERY_SLOW_RATE_THRESHOLD = 2
+RATE_FAST            = 6250.0  # B/s (50 kbps)
+RATE_VERY_SLOW       = 250.0   # B/s (2 kbps)
+WINDOW_FLEXIBILITY   = 4
+
+# Receiver part-timeout scaling (reference PART_TIMEOUT_FACTOR*). Timers
+# derive from the measured in-flight rate (eifr) or the link RTT — no fixed
+# interval fits both a ~50 ms TCP round and a ~28 s SF11 round.
+PART_TIMEOUT_FACTOR           = 4      # before a rate is measured
+PART_TIMEOUT_FACTOR_AFTER_RTT = 2
+RETRY_GRACE_TIME = 0.25
+PER_RETRY_DELAY  = 0.5
+T_PART_MIN = 1.0     # floor: job_loop services us at 0.25 s ticks
+T_PART_MAX = 60.0    # cap: SF11 initial rounds
+MAX_RETRIES     = 16   # receiver retry budget — spent on timeouts only,
+                       # refunded by progress (any received part)
+MAX_ADV_RETRIES = 4
+TIMEOUT = 120          # overall wall-clock ceiling (16 KB cap bounds it)
+
+# Rate samples approximate wire bytes (reference samples len(packet.raw)).
+# Token overhead applies to the request packet; parts are pre-encrypted
+# stream slices, so only the header rides on top.
+_WIRE_OVERHEAD_REQ  = const.MTU - const.ENCRYPTED_MDU
+_WIRE_OVERHEAD_PART = const.HEADER_MINSIZE
 
 # Resource flags
 FLAG_ENCRYPTED = 0x01
@@ -66,6 +101,7 @@ class Resource:
         self.retries = 0
         self.adv_retries = 0
         self.last_adv_at = 0
+        self.rtt = None   # measured when the first part request answers the adv
 
         # Generate random hash
         self.random_hash = Identity.get_random_hash()[:RANDOM_HASH_SIZE]
@@ -217,14 +253,35 @@ class Resource:
         # Allocate parts
         r.parts = [None] * r.total_parts
         r.received_count = 0
-        r.window_count = 0  # parts received since last request
+        r.window_count = 0  # parts received in the current round
         r.last_request_at = 0
-        r.request_retries = 0
+        r.last_part_at = 0
+        r.retries_left = MAX_RETRIES
         r.progress_callback = None  # callback(resource) — reference RNS signature
         r.sdu = link.sdu
         r.encrypted = None
         r.expected_proof = None
         r.status = TRANSFERRING
+
+        # Adaptive window state (reference Resource parity).
+        r.window = WINDOW
+        r.window_max = WINDOW_MAX_SLOW
+        r.window_min = WINDOW_MIN
+        r.window_flexibility = WINDOW_FLEXIBILITY
+        r.fast_rate_rounds = 0
+        r.very_slow_rate_rounds = 0
+        r.round_requested = 0
+        r.round_rx_bytes = 0
+        r.round_first_sampled = False
+        r.req_sent_ms = 0
+        r.req_sent_bytes = 0
+        r.eifr = 0.0   # measured in-flight rate, B/s
+        # Slow-init clamp (urns deviation; mirrors Channel's rtt > RTT_SLOW
+        # init): parts are served synchronously into a blocking LoRa TX path,
+        # so never let the first unmeasured rounds burst past the very-slow
+        # window on a link already known to be slow.
+        if (getattr(link, "rtt", 0) or 0) > 1.45:
+            r.window_max = WINDOW_MAX_VERY_SLOW
 
         # Register with link
         link.register_incoming_resource(r)
@@ -283,11 +340,16 @@ class Resource:
         it's a 2-frame split sent while the peer's radio may still be turning
         around from TX, so losing it is common. Without a retry the transfer
         is stillborn: the receiver never learns the resource exists, so its
-        own retry machinery never engages. Gives up (cancel -> FAILED) after
-        MAX_ADV_RETRIES so the sender fails in ~75s instead of the 120s cap."""
+        own retry machinery never engages. Spacing scales with the link RTT
+        (reference: rtt x traffic factor + grace), floored for the 0.25 s job
+        tick and capped at the old fixed 15 s; gives up (cancel -> FAILED)
+        after MAX_ADV_RETRIES."""
         if self.status != ADVERTISED:
             return
-        if time.time() - self.last_adv_at < ADV_RETRY_INTERVAL:
+        lrtt = getattr(self.link, "rtt", 0) or 1.0
+        interval = lrtt * const.TRAFFIC_TIMEOUT_FACTOR + 1.0
+        interval = min(max(interval, 2.0), 15.0)
+        if time.time() - self.last_adv_at < interval:
             return
         if self.adv_retries >= MAX_ADV_RETRIES:
             log("Resource adv unanswered after " + str(MAX_ADV_RETRIES) +
@@ -306,12 +368,19 @@ class Resource:
         if not self._link_ok():
             return
 
-        # Find missing parts starting from consecutive
+        # Find missing parts, up to the current window (bounded so the
+        # token-encrypted request always fits one packet: mdu-based).
+        try:
+            link_mdu = self.link.mdu
+        except AttributeError:
+            from .link import _link_mdu
+            link_mdu = _link_mdu(getattr(self.link, "mtu", const.MTU))
+        limit = min(self.window, max(1, (link_mdu - 34) // MAPHASH_LEN))
         missing = []
         for i in range(self.total_parts):
             if self.parts[i] is None:
                 missing.append(i)
-                if len(missing) >= WINDOW:
+                if len(missing) >= limit:
                     break
 
         if not missing:
@@ -337,10 +406,16 @@ class Resource:
             req_data += self.hashmap[i]
 
         self.window_count = 0
+        self.round_requested = len(missing)
+        self.round_rx_bytes = 0
+        self.round_first_sampled = False
         self.last_request_at = time.time()
-        self.request_retries += 1
+        self.req_sent_ms = _ticks_ms()
+        self.req_sent_bytes = len(req_data) + _WIRE_OVERHEAD_REQ
         self.link.send(req_data, const.CTX_RESOURCE_REQ)
-        log("Resource request: " + str(len(missing)) + " parts for " + self.hash.hex()[:8], LOG_DEBUG)
+        log("Resource request: " + str(len(missing)) + " parts (window "
+            + str(self.window) + "/" + str(self.window_max) + ") for "
+            + self.hash.hex()[:8], LOG_DEBUG)
 
     def get_progress(self):
         """Return transfer progress as a float 0.0 to 1.0."""
@@ -352,18 +427,45 @@ class Resource:
             return self.received_count / self.total_parts
 
     def check_request_timeout(self):
-        """(Receiver) Retry resource request if no parts arrived within interval."""
+        """(Receiver) Re-request when a round stalls. The wait scales with the
+        measured in-flight rate (or the link RTT before one exists) — a fixed
+        interval both crawls on TCP and re-requests parts still on the air at
+        SF11, where a window-4 round is ~28 s of airtime."""
         if self.status != TRANSFERRING:
             return
         if self.last_request_at == 0:
             return
-        if time.time() - self.last_request_at < REQUEST_RETRY_INTERVAL:
+        outstanding = max(1, self.round_requested - self.window_count)
+        if self.eifr > 0:
+            base = PART_TIMEOUT_FACTOR_AFTER_RTT * ((outstanding * self.sdu) / self.eifr)
+        else:
+            lrtt = getattr(self.link, "rtt", 0) or 1.0
+            # ~4x the reference pre-rate branch; deliberately conservative,
+            # T_PART_MIN floors it on fast links.
+            base = PART_TIMEOUT_FACTOR * 3.5 * lrtt
+        retries_used = MAX_RETRIES - self.retries_left
+        timeout = base + RETRY_GRACE_TIME + retries_used * PER_RETRY_DELAY
+        timeout = min(max(timeout, T_PART_MIN), T_PART_MAX)
+        # Parts refresh the clock (reference last_activity): a trickling round
+        # is progressing, not stalled.
+        anchor = max(self.last_request_at, self.last_part_at)
+        if time.time() - anchor < timeout:
             return
-        if self.request_retries >= MAX_REQUEST_RETRIES:
-            log("Resource request max retries reached: " + self.hash.hex()[:8], LOG_ERROR)
+        if self.retries_left <= 0:
+            log("Resource request retries exhausted: " + self.hash.hex()[:8], LOG_ERROR)
             self.cancel()
             return
-        log("Resource request retry " + str(self.request_retries) + "/" + str(MAX_REQUEST_RETRIES) + " for " + self.hash.hex()[:8], LOG_DEBUG)
+        # Reference shrink-on-timeout, nesting exact.
+        if self.window > self.window_min:
+            self.window -= 1
+            if self.window_max > self.window_min:
+                self.window_max -= 1
+                if (self.window_max - self.window) > (self.window_flexibility - 1):
+                    self.window_max -= 1
+        self.retries_left -= 1
+        log("Resource round stalled, retry (" + str(self.retries_left)
+            + " left, window " + str(self.window) + ") for "
+            + self.hash.hex()[:8], LOG_DEBUG)
         self.request_next()
 
     def receive_part(self, data):
@@ -379,6 +481,18 @@ class Resource:
                 self.parts[i] = data
                 self.received_count += 1
                 self.window_count += 1
+                self.retries_left = MAX_RETRIES   # progress refunds the budget
+                self.last_part_at = time.time()
+                self.round_rx_bytes += len(data) + _WIRE_OVERHEAD_PART
+                if not self.round_first_sampled and self.req_sent_ms:
+                    # First response of the round: request->first-part rate
+                    # (reference req_resp sample; feeds the fast counter only).
+                    el = _ticks_diff(_ticks_ms(), self.req_sent_ms) / 1000
+                    if el > 0:
+                        self._rate_sample(
+                            (self.req_sent_bytes + len(data) + _WIRE_OVERHEAD_PART) / el,
+                            full_round=False)
+                    self.round_first_sampled = True
                 pct = int(self.received_count * 100 / self.total_parts)
                 log("Resource RX " + str(self.received_count) + "/" + str(self.total_parts) +
                     " (" + str(pct) + "%) " + self.hash.hex()[:8], LOG_DEBUG)
@@ -393,12 +507,44 @@ class Resource:
 
                 if self.received_count == self.total_parts:
                     self.assemble()
-                elif self.window_count >= WINDOW:
-                    self.window_count = 0
-                    self.request_next()
+                elif self.round_requested and self.window_count >= self.round_requested:
+                    self._round_complete()
                 return
 
         log("Resource part hash mismatch, dropping", LOG_DEBUG)
+
+    def _round_complete(self):
+        """(Receiver) A full requested round arrived: grow the window, sample
+        the round's transfer rate, and request the next round."""
+        if self.window < self.window_max:
+            self.window += 1
+            if (self.window - self.window_min) > (self.window_flexibility - 1):
+                self.window_min += 1
+        if self.req_sent_ms:
+            el = _ticks_diff(_ticks_ms(), self.req_sent_ms) / 1000
+            if el > 0:
+                rate = self.round_rx_bytes / el
+                self._rate_sample(rate, full_round=True)
+                self.eifr = rate
+        self.window_count = 0
+        self.request_next()
+
+    def _rate_sample(self, rate, full_round):
+        """Reference fast/very-slow window-cap bookkeeping. The very-slow test
+        runs only on full-round samples: first-part samples include the request
+        uplink and read systematically low."""
+        if rate > RATE_FAST and self.fast_rate_rounds < FAST_RATE_THRESHOLD:
+            self.fast_rate_rounds += 1
+            if self.fast_rate_rounds == FAST_RATE_THRESHOLD:
+                self.window_max = WINDOW_MAX_FAST
+                log("Resource " + self.hash.hex()[:8] + " fast link, window max "
+                    + str(self.window_max), LOG_DEBUG)
+        elif (full_round and self.fast_rate_rounds == 0
+                and rate < RATE_VERY_SLOW
+                and self.very_slow_rate_rounds < VERY_SLOW_RATE_THRESHOLD):
+            self.very_slow_rate_rounds += 1
+            if self.very_slow_rate_rounds == VERY_SLOW_RATE_THRESHOLD:
+                self.window_max = WINDOW_MAX_VERY_SLOW
 
     def assemble(self):
         """(Receiver) Assemble all parts, decrypt, verify, and prove."""
@@ -525,6 +671,13 @@ class Resource:
             # Not for us — Link iterates all outgoing resources, so a request
             # for a sibling resource lands here too. Silent return.
             return
+
+        if self.status == ADVERTISED and self.last_adv_at and self.rtt is None:
+            # First request answers the advertisement (reference measures
+            # rtt = now - adv_sent there).
+            rtt = time.time() - self.last_adv_at
+            if rtt > 0:
+                self.rtt = rtt
 
         self.status = TRANSFERRING
 

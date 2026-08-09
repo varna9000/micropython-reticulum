@@ -13,6 +13,8 @@ HEADER_MINSIZE        = const(2 + 1 + (128 // 8))       # 19
 HEADER_MAXSIZE        = const(2 + 1 + (128 // 8) * 2)   # 35
 MDU                   = const(500 - 35 - 1)              # 464
 DEFAULT_PER_HOP_TIMEOUT = const(6)
+TRAFFIC_TIMEOUT_FACTOR  = const(6)   # link traffic timeout = rtt * factor (reference Link)
+RESPONSE_MAX_GRACE_TIME = const(10)  # request-response grace (reference Resource)
 
 # Identity / Key sizes (bits)
 KEYSIZE               = const(512)    # 256 enc + 256 sig
