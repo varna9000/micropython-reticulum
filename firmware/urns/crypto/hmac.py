@@ -86,3 +86,22 @@ def digest(key, msg, digest_func):
     inner.update(msg)
     outer.update(inner.digest())
     return outer.digest()
+
+
+def compare_digest(a, b):
+    """Length-constant comparison of two byte strings, without the early-exit
+    of ``==`` (which leaks the length of the matching prefix through timing).
+
+    MicroPython ships no ``hmac.compare_digest``, so this is the pure-Python
+    fallback used by Token.verify_hmac: it always scans the full length and
+    folds every byte difference into an accumulator, returning only at the end.
+    Allocation-free (indexes the existing bytes; the small-int results are
+    immediate values). True constant time is not guaranteed on a bytecode VM
+    with GC, but the obvious short-circuit timing leak is removed.
+    """
+    if len(a) != len(b):
+        return False
+    result = 0
+    for i in range(len(a)):
+        result |= a[i] ^ b[i]
+    return result == 0

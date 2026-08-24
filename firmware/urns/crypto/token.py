@@ -2,7 +2,7 @@
 # Slightly modified Fernet implementation (no VERSION/TIMESTAMP fields)
 
 import os
-from .hmac import new as hmac_new
+from .hmac import new as hmac_new, compare_digest as hmac_compare
 from .pkcs7 import PKCS7
 from .aes import AES_128_CBC, AES_256_CBC, AES
 
@@ -44,7 +44,8 @@ class Token:
             raise ValueError("Cannot verify HMAC on token of only " + str(len(token)) + " bytes")
         received_hmac = token[-32:]
         expected_hmac = hmac_new(self._signing_key, token[:-32]).digest()
-        if received_hmac == expected_hmac:
+        # Constant-time comparison — no early exit on the first differing byte.
+        if hmac_compare(received_hmac, expected_hmac):
             return True
         return False
 

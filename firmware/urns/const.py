@@ -140,6 +140,9 @@ PATHFINDER_RW          = 0.5               # random rebroadcast window (s) — f
 LOCAL_REBROADCASTS_MAX = const(2)          # back off after N neighbour rebroadcasts
 ANNOUNCE_CAP           = 0.02              # max fraction of interface airtime for announces
 MAX_HOPS               = const(16)         # mesh hop limit (reference RNS uses 128)
+# Absolute hop ceiling: drop any packet that reaches it (reference RNS
+# PATHFINDER_M; RNS 1.5.0 "early rejection of packets with excessive hop counts").
+PATHFINDER_M           = const(128)
 
 # Routing-table expiry (seconds)
 PATH_EXPIRY            = const(60 * 60 * 24)    # 1 day
