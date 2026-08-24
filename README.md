@@ -644,21 +644,26 @@ Tested and confirmed working with:
 - **RNode** (SX1276 / SX1278) — bidirectional LoRa, full split-packet support for the complete 500-byte MTU. Tested with Heltec Wireless Stick Lite V1 on 868 MHz.
 - **RNS transport servers** — TCP client connectivity to remote transport hubs, automatic path learning from announces
 
-Protocol behaviour tracks **reference RNS 1.4.2**. The 1.3.9 link and resource
+Protocol behaviour tracks **reference RNS 1.5.0**. The 1.3.9 link and resource
 safeguards are implemented here (see the *Resource and link safeguards* block
 under [Protocol details](#protocol-details)), as is the whole of 1.4.x that
 applies to a leaf or relay node: dynamic link path re-balancing, interface
 gravity, RTT-scaled keepalive and stale windows with the keepalive-reply
 throttle, `max_request_size` / `max_response_size`, and out-of-window rejection
-on `Channel` (see *Link path re-balancing* below). Nothing in 1.4.x changed the
-wire format, so older and newer peers interoperate either way.
+on `Channel` (see *Link path re-balancing* below). Neither 1.4.x nor 1.5.0
+changed the wire format, so older and newer peers interoperate either way.
 
-The 1.4.2 maintenance release needed no changes here. Its two fixes — skip
-offline interfaces when re-originating a path request, and a division by zero on
-an uninitialised RNode interface — were already covered by the online check in
-`_recursive_path_discovery()` and the zero-bitrate guard in
-`_announce_airtime_ok()`. The rest of that release touches `Discovery.py` and
-`rnsh`, neither of which this port implements.
+RNS 1.5.0's headline is a priority-based inbound ingress-queue rewrite of
+`Transport`, built on OS threads and locks — there is no analogue for this
+single-threaded `uasyncio` port, and none is needed for interop: the port
+already prioritises inline data, proof and link traffic over deferred announce
+validation. The two items from that release that apply to a leaf or relay node
+are implemented: an excessive-hop-count drop (`PATHFINDER_M = 128`, rejected in
+`Transport.packet_filter`) and a constant-time HMAC comparison in
+`Token.verify_hmac`. Identity blackholing is supported (`Transport.blackhole()`);
+the operator blackhole publish/subscribe lists and everything surfaced only
+through `rnstatus` are out of scope or opt-in, and none of it affects
+interoperability.
 
 Out of scope for an MCU port: `BackboneInterface` flap-blocking, interface
 discovery, I2P, shared-instance/tunnel interfaces, and the `rnsh` utility.
