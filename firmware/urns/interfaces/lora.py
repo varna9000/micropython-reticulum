@@ -235,6 +235,72 @@ class LoRaInterface(Interface):
         self._modem.rx_crc_error = True  # Surface CRC-failed packets for diagnostics
         self._modem.start_recv(continuous=True)
 
+    def reconfigure(self, params):
+        """Live-apply new radio params without recreating the interface — no
+        device or app restart. params keys: freq_khz, bw, sf, coding_rate,
+        tx_power (any subset). Runs synchronously in the cooperative event
+        loop (called from the UI), so it can't interleave with poll_loop or
+        process_outgoing between their awaits; the SPI bus is held for the
+        whole retune. Returns True on success. On any modem error the stored
+        params are left untouched and continuous RX is restored, so a failed
+        retune never leaves the radio deaf."""
+        if not self._modem:
+            return False
+
+        cfg = {}
+        if "freq_khz" in params:
+            cfg["freq_khz"] = params["freq_khz"]
+        if "sf" in params:
+            cfg["sf"] = params["sf"]
+        if "bw" in params:
+            cfg["bw"] = str(params["bw"])
+        if "coding_rate" in params:
+            cfg["coding_rate"] = params["coding_rate"]
+        if "tx_power" in params:
+            cfg["output_power"] = params["tx_power"]   # driver's key for TX power
+
+        self._acquire()
+        try:
+            self._modem.standby()          # configure() refuses while receiving
+            self._modem.configure(cfg)
+            try:
+                self._modem.calibrate_image()   # sharpen RX in the (maybe new) band
+            except Exception:
+                pass
+            self._modem.start_recv(continuous=True)
+        except Exception as e:
+            try:
+                self._modem.start_recv(continuous=True)
+            except Exception:
+                pass
+            self._release()
+            log("LoRa reconfigure failed: " + str(e), LOG_ERROR)
+            return False
+        self._release()
+
+        # Commit to the stored attrs and recompute the on-air bitrate (read by
+        # Transport's announce airtime cap). Same formula as __init__.
+        if "freq_khz" in params:
+            self._freq_khz = params["freq_khz"]
+        if "sf" in params:
+            self._sf = params["sf"]
+        if "bw" in params:
+            self._bw = str(params["bw"])
+        if "coding_rate" in params:
+            self._coding_rate = params["coding_rate"]
+        if "tx_power" in params:
+            self._tx_power = params["tx_power"]
+        try:
+            bw_hz = float(self._bw) * 1000
+            self.bitrate = self._sf * (bw_hz / (2 ** self._sf)) * (4.0 / self._coding_rate)
+        except Exception:
+            pass
+
+        log("LoRa reconfigured: " + str(self._freq_khz) + "kHz SF" + str(self._sf)
+            + " BW" + str(self._bw) + " CR4/" + str(self._coding_rate)
+            + " TX" + str(self._tx_power) + "dBm", LOG_NOTICE)
+        return True
+
     def _acquire(self):
         if self._spi_acquire:
             self._spi_acquire()
