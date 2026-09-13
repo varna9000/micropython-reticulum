@@ -62,6 +62,7 @@ _WIRE_OVERHEAD_PART = const.HEADER_MINSIZE
 FLAG_ENCRYPTED = 0x01
 FLAG_COMPRESSED = 0x02
 FLAG_IS_RESPONSE = 0x10
+FLAG_HAS_METADATA = 0x20   # reference ResourceAdvertisement: metadata bit (f bit 5)
 
 # States
 # Link.ACTIVE / OutgoingLink.ACTIVE — both link classes use the same value.
@@ -94,6 +95,7 @@ class Resource:
         self.link = link
         self.status = NONE
         self.is_initiator = True
+        self.has_metadata = False   # urns senders never emit metadata Resources
         self.request_id = request_id
         self.created_at = time.time()
         self.data = data
@@ -206,6 +208,10 @@ class Resource:
             r.total_segments = adv["l"]
             r.request_id = adv["q"]
             r.flags = adv["f"]
+            # Metadata Resources (reference NomadNet /media) set flags bit 5. The
+            # size is NOT in the advertisement — it rides as a 3-byte prefix in
+            # the payload and is stripped after hash-verify (see assemble()).
+            r.has_metadata = bool(adv["f"] & FLAG_HAS_METADATA)
             hashmap_raw = adv["m"]
             if not (isinstance(r.total_size, int) and isinstance(r.total_data_size, int)
                     and isinstance(r.total_parts, int) and isinstance(r.segment_index, int)
@@ -600,6 +606,15 @@ class Resource:
         self.prove()
         t3 = time.time()
         log("Resource timing: decrypt=" + str(int((t1-t0)*1000)) + "ms decompress=" + str(int((t2-t1)*1000)) + "ms prove=" + str(int((t3-t2)*1000)) + "ms total=" + str(int((t3-t0)*1000)) + "ms", LOG_NOTICE)
+
+        # Metadata Resource (reference NomadNet /media): the payload arrived as
+        # [3-byte BE len][msgpack(meta)][payload], prepended before hashing — so
+        # the hash check and prove() above both cover the full blob+payload
+        # (matching the reference sender's proof). Strip the blob only now,
+        # leaving self.data as the raw payload for the response callback.
+        if self.has_metadata:
+            meta_len = (self.data[0] << 16) | (self.data[1] << 8) | self.data[2]
+            self.data = self.data[3 + meta_len:]
 
         self.status = COMPLETE
         log("Resource complete: " + str(len(self.data)) + "B, hash=" + self.hash.hex()[:8], LOG_NOTICE)
