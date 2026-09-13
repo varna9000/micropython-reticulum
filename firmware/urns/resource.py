@@ -50,7 +50,19 @@ T_PART_MAX = 60.0    # cap: SF11 initial rounds
 MAX_RETRIES     = 16   # receiver retry budget — spent on timeouts only,
                        # refunded by progress (any received part)
 MAX_ADV_RETRIES = 4
-TIMEOUT = 120          # overall wall-clock ceiling (16 KB cap bounds it)
+# Overall give-up, RTT-scaled to match reference RNS (which has no fixed
+# ceiling): rtt * TRAFFIC_TIMEOUT_FACTOR * MAX_RETRIES + a fixed grace (sender
+# grace + the cumulative per-retry backoff). Clamped so a slow LoRa link is not
+# abandoned early (floor) yet a stalled transfer can't pin RAM forever (cap).
+# Applied in BOTH directions: outgoing via the link watchdog, incoming via
+# check_request_timeout. The old flat 120 s was only ever checked outgoing, so
+# a trickling receiver (each part refunds the retry budget) never gave up and
+# hung until the app's own cap.
+TRAFFIC_TIMEOUT_FACTOR = 6     # reference Link.TRAFFIC_TIMEOUT_FACTOR
+SENDER_GRACE_TIME      = 10    # reference Resource.SENDER_GRACE_TIME
+TIMEOUT_MIN = 120              # floor (the previous flat ceiling)
+TIMEOUT_MAX = 600              # cap MCU RAM commitment (~10 min)
+_TIMEOUT_GRACE = SENDER_GRACE_TIME + PER_RETRY_DELAY * MAX_RETRIES * (MAX_RETRIES + 1) // 2
 
 # Rate samples approximate wire bytes (reference samples len(packet.raw)).
 # Token overhead applies to the request packet; parts are pre-encrypted
@@ -62,6 +74,7 @@ _WIRE_OVERHEAD_PART = const.HEADER_MINSIZE
 FLAG_ENCRYPTED = 0x01
 FLAG_COMPRESSED = 0x02
 FLAG_IS_RESPONSE = 0x10
+FLAG_HAS_METADATA = 0x20   # reference ResourceAdvertisement: metadata bit (f bit 5)
 
 # States
 # Link.ACTIVE / OutgoingLink.ACTIVE — both link classes use the same value.
@@ -94,6 +107,7 @@ class Resource:
         self.link = link
         self.status = NONE
         self.is_initiator = True
+        self.has_metadata = False   # urns senders never emit metadata Resources
         self.request_id = request_id
         self.created_at = time.time()
         self.data = data
@@ -206,6 +220,10 @@ class Resource:
             r.total_segments = adv["l"]
             r.request_id = adv["q"]
             r.flags = adv["f"]
+            # Metadata Resources (reference NomadNet /media) set flags bit 5. The
+            # size is NOT in the advertisement — it rides as a 3-byte prefix in
+            # the payload and is stripped after hash-verify (see assemble()).
+            r.has_metadata = bool(adv["f"] & FLAG_HAS_METADATA)
             hashmap_raw = adv["m"]
             if not (isinstance(r.total_size, int) and isinstance(r.total_data_size, int)
                     and isinstance(r.total_parts, int) and isinstance(r.segment_index, int)
@@ -433,6 +451,14 @@ class Resource:
         SF11, where a window-4 round is ~28 s of airtime."""
         if self.status != TRANSFERRING:
             return
+        # Overall ceiling: received parts refund the per-round retry budget, so
+        # a trickling-but-never-completing transfer would otherwise never give
+        # up. Bound it (RTT-scaled) and conclude with a failure the requester
+        # hears — rather than hanging until the app's own timeout.
+        if self.is_timed_out():
+            log("Resource overall timeout: " + self.hash.hex()[:8], LOG_ERROR)
+            self.cancel()
+            return
         if self.last_request_at == 0:
             return
         outstanding = max(1, self.round_requested - self.window_count)
@@ -601,6 +627,15 @@ class Resource:
         t3 = time.time()
         log("Resource timing: decrypt=" + str(int((t1-t0)*1000)) + "ms decompress=" + str(int((t2-t1)*1000)) + "ms prove=" + str(int((t3-t2)*1000)) + "ms total=" + str(int((t3-t0)*1000)) + "ms", LOG_NOTICE)
 
+        # Metadata Resource (reference NomadNet /media): the payload arrived as
+        # [3-byte BE len][msgpack(meta)][payload], prepended before hashing — so
+        # the hash check and prove() above both cover the full blob+payload
+        # (matching the reference sender's proof). Strip the blob only now,
+        # leaving self.data as the raw payload for the response callback.
+        if self.has_metadata:
+            meta_len = (self.data[0] << 16) | (self.data[1] << 8) | self.data[2]
+            self.data = self.data[3 + meta_len:]
+
         self.status = COMPLETE
         log("Resource complete: " + str(len(self.data)) + "B, hash=" + self.hash.hex()[:8], LOG_NOTICE)
         self._conclude()
@@ -751,7 +786,14 @@ class Resource:
             log("Resource cancel signal failed: " + str(e), LOG_DEBUG)
 
     def is_timed_out(self):
-        return time.time() - self.created_at > TIMEOUT
+        # RTT-scaled overall ceiling (reference-style), clamped to [MIN, MAX].
+        rtt = getattr(self.link, "rtt", 0) or 0
+        ceiling = rtt * TRAFFIC_TIMEOUT_FACTOR * MAX_RETRIES + _TIMEOUT_GRACE
+        if ceiling < TIMEOUT_MIN:
+            ceiling = TIMEOUT_MIN
+        elif ceiling > TIMEOUT_MAX:
+            ceiling = TIMEOUT_MAX
+        return time.time() - self.created_at > ceiling
 
     def _conclude(self):
         """Notify link that this resource is done."""

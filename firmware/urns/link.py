@@ -632,7 +632,7 @@ class Link:
             return
 
         # Check resource request timeouts (retry if no parts arrived)
-        for r in self.incoming_resources:
+        for r in list(self.incoming_resources):   # copy: check_request_timeout may cancel
             r.check_request_timeout()
 
         # Sender-side watchdog for outgoing resources: re-advertise while the
@@ -1275,15 +1275,22 @@ class OutgoingLink:
         if rid and rid in self.pending_requests:
             from .resource import COMPLETE
             if resource.status == COMPLETE:
-                from . import umsgpack
-                try:
-                    unpacked = umsgpack.unpackb(resource.data)
-                except Exception:
-                    unpacked = None
-                if isinstance(unpacked, list) and len(unpacked) >= 2:
-                    self._dispatch_response(rid, unpacked[1])
+                if getattr(resource, "has_metadata", False):
+                    # Metadata Resource (reference NomadNet /media): resource.data
+                    # is already the raw payload (the metadata blob was stripped
+                    # in Resource.assemble()). It is NOT a msgpack [rid, data]
+                    # envelope, so dispatch it directly.
+                    self._dispatch_response(rid, resource.data)
                 else:
-                    self._fail_request(rid, "malformed response")
+                    from . import umsgpack
+                    try:
+                        unpacked = umsgpack.unpackb(resource.data)
+                    except Exception:
+                        unpacked = None
+                    if isinstance(unpacked, list) and len(unpacked) >= 2:
+                        self._dispatch_response(rid, unpacked[1])
+                    else:
+                        self._fail_request(rid, "malformed response")
             else:
                 self._fail_request(rid, "response transfer failed")
             return
@@ -1303,7 +1310,7 @@ class OutgoingLink:
         if self.status != OutgoingLink.ACTIVE:
             return
         # Check resource request timeouts (retry if no parts arrived)
-        for r in self.incoming_resources:
+        for r in list(self.incoming_resources):   # copy: check_request_timeout may cancel
             r.check_request_timeout()
         # Sender-side watchdog for outgoing resources: re-advertise while the
         # advertisement goes unanswered, and fail transfers that exceed the
