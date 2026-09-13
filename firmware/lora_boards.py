@@ -116,6 +116,37 @@ LORA_BOARDS = {
     },
 
 
+    # LilyGO T-Deck Pro (ESP32-S3 + SX1262). A different board from the T-Deck
+    # v1 above, not a revision: e-ink instead of TFT, TCA8418 keyboard, CST328
+    # touch, and a 2.4V TCXO rather than the v1's 3.3V.
+    #
+    # Two power gates must be driven high before the radio answers at all:
+    # BOARD_1V8_EN (GPIO38) and LORA_EN (GPIO46). A preset cannot express those,
+    # so the application must raise them before building the interface.
+    #
+    # The radio shares SCK (36) with the e-ink panel and the SD card, so pass
+    # "spi"/"spi_acquire"/"spi_release" at runtime for bus arbitration, exactly
+    # as the T-Deck v1 does.
+    #
+    # Battery is a BQ27220 fuel gauge over I2C, not an ADC divider, so there is
+    # deliberately no "battery" block here -- adc_reader.py cannot read it.
+    #
+    # Pins from Meshtastic variants/esp32s3/t-deck-pro/variant.h.
+    "tdeck_pro_sx1262": {
+        "spi_bus": 1,
+        "sck_pin": 36,
+        "mosi_pin": 33,
+        "miso_pin": 47,
+        "cs_pin": 3,
+        "busy_pin": 6,     # variant.h names this LORA_DIO2; it is BUSY
+        "dio1_pin": 5,     # SX1262 IRQ
+        "reset_pin": 4,
+        "dio2_rf_sw": True,
+        "dio3_tcxo_millivolts": 2400,
+        "spi_baudrate": 8_000_000,
+    },
+
+
     # HTIT-WB32LAF ESP32-S3 Heltec V4 + LoRa SX1262 + Oled SSD1315.
     # LoRa has dedicated soldered connection, should be no GPIO conflicts.
     # Pin map https://heltec.org/wp-content/uploads/2025/09/V4-pinmap-1.png
