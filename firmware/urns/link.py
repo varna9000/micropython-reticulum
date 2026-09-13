@@ -632,7 +632,7 @@ class Link:
             return
 
         # Check resource request timeouts (retry if no parts arrived)
-        for r in self.incoming_resources:
+        for r in list(self.incoming_resources):   # copy: check_request_timeout may cancel
             r.check_request_timeout()
 
         # Sender-side watchdog for outgoing resources: re-advertise while the
@@ -1310,7 +1310,7 @@ class OutgoingLink:
         if self.status != OutgoingLink.ACTIVE:
             return
         # Check resource request timeouts (retry if no parts arrived)
-        for r in self.incoming_resources:
+        for r in list(self.incoming_resources):   # copy: check_request_timeout may cancel
             r.check_request_timeout()
         # Sender-side watchdog for outgoing resources: re-advertise while the
         # advertisement goes unanswered, and fail transfers that exceed the
