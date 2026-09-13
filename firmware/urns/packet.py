@@ -221,6 +221,13 @@ class Packet:
                 self.context = self.raw[DST_LEN + 2]
                 self.data = self.raw[DST_LEN + 3:]
 
+            # Reject a zero-length data field (reference RNS 1.5.1 early
+            # protocol-violation check): no valid RNS packet carries empty
+            # data — even a keepalive sends its 1-byte 0xFF/0xFE. Caught below
+            # and dropped as a malformed packet.
+            if len(self.data) == 0:
+                raise ValueError("Zero-length data field")
+
             self.packed = False
             self.update_hash()
             return True

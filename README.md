@@ -644,13 +644,13 @@ Tested and confirmed working with:
 - **RNode** (SX1276 / SX1278) — bidirectional LoRa, full split-packet support for the complete 500-byte MTU. Tested with Heltec Wireless Stick Lite V1 on 868 MHz.
 - **RNS transport servers** — TCP client connectivity to remote transport hubs, automatic path learning from announces
 
-Protocol behaviour tracks **reference RNS 1.5.0**. The 1.3.9 link and resource
+Protocol behaviour tracks **reference RNS 1.5.2**. The 1.3.9 link and resource
 safeguards are implemented here (see the *Resource and link safeguards* block
 under [Protocol details](#protocol-details)), as is the whole of 1.4.x that
 applies to a leaf or relay node: dynamic link path re-balancing, interface
 gravity, RTT-scaled keepalive and stale windows with the keepalive-reply
 throttle, `max_request_size` / `max_response_size`, and out-of-window rejection
-on `Channel` (see *Link path re-balancing* below). Neither 1.4.x nor 1.5.0
+on `Channel` (see *Link path re-balancing* below). Neither 1.4.x nor 1.5.x
 changed the wire format, so older and newer peers interoperate either way.
 
 RNS 1.5.0's headline is a priority-based inbound ingress-queue rewrite of
@@ -664,6 +664,17 @@ are implemented: an excessive-hop-count drop (`PATHFINDER_M = 128`, rejected in
 the operator blackhole publish/subscribe lists and everything surfaced only
 through `rnstatus` are out of scope or opt-in, and none of it affects
 interoperability.
+
+RNS 1.5.1 and 1.5.2 likewise changed no wire format. Both are dominated by work
+with no analogue on a single-threaded MCU — adaptive dataplane ingress/egress
+control layered on the 1.5.0 queue rewrite, `BackboneInterface` transmit
+buffers, live profiling, and `rnstatus` diagnostics — or by fixes already
+covered here (the 1.5.2 resource-cancel guard cannot occur, since cancellation
+routes through `resource_concluded` and the link's `cancel_*_resource` already
+check membership; bz2 compression already falls back to uncompressed). The two
+frame-validation hardening checks that apply to a leaf or relay node are
+implemented: `Packet.unpack` rejects a zero-length data field, and
+`Transport.packet_filter` drops an announce frame larger than the MTU.
 
 Out of scope for an MCU port: `BackboneInterface` flap-blocking, interface
 discovery, I2P, shared-instance/tunnel interfaces, and the `rnsh` utility.
