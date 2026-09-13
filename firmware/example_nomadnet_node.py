@@ -237,12 +237,28 @@ def load_media(dest, media_dir="media"):
     the page, so no node hash is needed in the markup. The browser then issues
     a request to the *constant* endpoint ``/media`` with the wanted file in the
     request data ({"path": "/media/<file>.webp", "key": ...}); we return the
-    raw image bytes, which the browser caches and draws inline (sixel/kitty).
+    raw image bytes, which the browser caches and draws inline via the kitty
+    graphics protocol.
 
     NomadNet's only *native* media format is WebP, and it will not convert on
     our behalf, so we serve ``.webp`` only. Drop .webp files into media/. A
     single handler is registered for all media (the filename travels in the
     request data), mirroring reference NomadNet's serve_media.
+
+    Viewing requirements (CLIENT side) — the node always serves the image, but
+    the NomadNet *client* only shows it if all of these hold:
+      * The client runs in a terminal that implements the kitty graphics
+        protocol AND answers its capability query — kitty, Ghostty and WezTerm
+        are confirmed working.
+      * The client is NOT inside tmux/screen. They intercept the terminal's
+        reply to NomadNet's kitty capability query, so NomadNet decides the
+        terminal can't show images and disables them even in a capable
+        terminal. (`tmux set -g allow-passthrough on` is a prerequisite but
+        still unreliable for the query response — run outside tmux.)
+      * ``image_loading = always`` in the client's config. The default
+        ``auto`` skips images on slow links, and an MCU node's per-link ECDH
+        (~2 s) pushes the link RTT far past that threshold, so ``auto`` never
+        fetches from a node like this.
     """
     import os
 
