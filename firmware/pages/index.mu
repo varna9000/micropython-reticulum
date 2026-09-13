@@ -9,5 +9,8 @@ This node is running Micropython Reticulum on an ESP32.
 >> Sensor data
   {sensor}
 
+>> Logo
+`(MicroPython logo`a=c`:/media/micropython-logo.webp)
+
 >> Downloads
   [Hear our message to you`:/file/msg.mp3]

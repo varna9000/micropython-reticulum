@@ -225,6 +225,71 @@ def load_files(dest, files_dir="files"):
     return count
 
 
+def load_media(dest, media_dir="media"):
+    """Serve inline page images to NomadNet 1.3.0+ browsers.
+
+    NomadNet's browser renders images embedded in a micron page via an image
+    tag — a line starting with a backtick and open-paren:
+
+        `(alt text`a=c`:/media/<file>.webp)
+
+    The leading ``:`` is a relative URL that resolves to whichever node served
+    the page, so no node hash is needed in the markup. The browser then issues
+    a request to the *constant* endpoint ``/media`` with the wanted file in the
+    request data ({"path": "/media/<file>.webp", "key": ...}); we return the
+    raw image bytes, which the browser caches and draws inline (sixel/kitty).
+
+    NomadNet's only *native* media format is WebP, and it will not convert on
+    our behalf, so we serve ``.webp`` only. Drop .webp files into media/. A
+    single handler is registered for all media (the filename travels in the
+    request data), mirroring reference NomadNet's serve_media.
+    """
+    import os
+
+    try:
+        os.listdir(media_dir)
+    except OSError:
+        # Register anyway — media/ may be populated (or created) later.
+        if DEBUG >= 1:
+            print("Media directory not found (registering /media anyway):", media_dir)
+
+    def handler(path, data, request_id, link_id, remote_identity, requested_at):
+        gc.collect()
+        # NomadNet sends {"path": "/media/<file>", "key": ...}
+        if not isinstance(data, dict) or "path" not in data:
+            return None
+        name = data["path"]
+        if name.startswith("/media/"):
+            name = name[len("/media/"):]
+        name = name.lstrip("/")
+        # Flat filename only — no directory separators or traversal.
+        if (not name) or ("/" in name) or ("\\" in name) or (".." in name):
+            if DEBUG >= 2:
+                print("Rejected media path:", data.get("path"))
+            return None
+        # WebP is NomadNet's only native media type; we don't convert on-device.
+        if not name.lower().endswith(".webp"):
+            if DEBUG >= 2:
+                print("Rejected non-webp media:", name)
+            return None
+        try:
+            with open(media_dir + "/" + name, "rb") as f:
+                return f.read()
+        except OSError:
+            if DEBUG >= 2:
+                print("Media not found:", name)
+            return None
+
+    dest.register_request_handler(
+        "/media",
+        response_generator=handler,
+        allow=dest.ALLOW_ALL,
+    )
+    if DEBUG >= 1:
+        print("Registered /media image handler (serving " + media_dir + "/*.webp)")
+    return 1
+
+
 def needs_wifi(config):
     """Check if any UDP or TCP interface is enabled in config."""
     for iface in config.get("interfaces", []):
@@ -258,9 +323,10 @@ def main():
     dest.set_default_app_data(NODE_NAME.encode("utf-8"))
     dest.accepts_links(True)
 
-    # Load pages and downloadable files
+    # Load pages, downloadable files, and inline page images
     load_pages(dest)
     load_files(dest)
+    load_media(dest)
 
     def on_link(link):
         if DEBUG >= 1:
