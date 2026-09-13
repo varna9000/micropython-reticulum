@@ -322,6 +322,16 @@ class Transport:
         if packet.hops >= const.PATHFINDER_M:
             return False
 
+        # Oversized-announce reject (reference RNS 1.5.1 "early protocol
+        # violation checks"): a well-formed announce never approaches the
+        # protocol MTU, so a larger frame is malformed or hostile. Kept
+        # announce-specific — link/resource sub-packets legitimately exceed
+        # 500B on high-MTU TCP links, so this runs before their context
+        # whitelist below but only fires for announces.
+        if (packet.packet_type == const.PKT_ANNOUNCE
+                and len(packet.raw) > const.MTU):
+            return False
+
         # Drop non-announce packets addressed to a different transport instance.
         if packet.transport_id is not None and packet.packet_type != const.PKT_ANNOUNCE:
             if Transport.identity is None or packet.transport_id != Transport.identity.hash:

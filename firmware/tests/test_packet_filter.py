@@ -14,7 +14,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness  # noqa: F401
-from harness import const, packet, Transport, reset_transport, build_data_hdr1
+from harness import (const, packet, Transport, reset_transport,
+                     build_data_hdr1, build_announce_hdr1)
 
 DEST = b"\xC0" * 16
 
@@ -63,6 +64,40 @@ def test_plain_group_single_hop_cap_intact():
     assert _filter(_data(hops=1, dest_type=const.DEST_PLAIN)) is True
     reset_transport()
     assert _filter(_data(hops=2, dest_type=const.DEST_PLAIN)) is False
+
+
+def _packet(raw):
+    p = packet.Packet(None, raw)
+    assert p.unpack(), "packet failed to unpack"
+    return p
+
+
+def test_oversized_announce_dropped():
+    # RNS 1.5.1: an announce frame larger than the protocol MTU is a protocol
+    # violation (no valid announce approaches 500B) and is dropped up front,
+    # before the SINGLE-announce dedup exemption that would otherwise admit it.
+    reset_transport()
+    raw = build_announce_hdr1(DEST, data=b"\x00" * (const.MTU + 1))
+    assert len(raw) > const.MTU
+    assert Transport.packet_filter(_packet(raw)) is False
+
+
+def test_normal_size_announce_passes():
+    # A normal SINGLE announce is well under MTU and admitted by the dedup path.
+    reset_transport()
+    raw = build_announce_hdr1(DEST)          # ~83B header+payload
+    assert len(raw) <= const.MTU
+    assert Transport.packet_filter(_packet(raw)) is True
+
+
+def test_oversized_reject_is_announce_specific():
+    # A large resource sub-packet is legitimate on high-MTU TCP links and must
+    # NOT be caught by the announce size ceiling — it is whitelisted by context.
+    reset_transport()
+    raw = build_data_hdr1(DEST, ciphertext=b"\x00" * (const.MTU + 1),
+                          context=const.CTX_RESOURCE)
+    assert len(raw) > const.MTU
+    assert Transport.packet_filter(_packet(raw)) is True
 
 
 if __name__ == "__main__":
