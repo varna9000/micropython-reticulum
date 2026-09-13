@@ -27,6 +27,40 @@ FIELD_COMMANDS         = 0x09
 FIELD_RESULTS          = 0x0A
 FIELD_GROUP            = 0x0B
 FIELD_TICKET           = 0x0C
+FIELD_EVENT            = 0x0D
+FIELD_RNR_REFS         = 0x0E
+FIELD_RENDERER         = 0x0F
+FIELD_REPLY_TO         = 0x30
+FIELD_REPLY_QUOTE      = 0x31
+FIELD_REACTION         = 0x40
+FIELD_COMMENT          = 0x41
+FIELD_CONTINUATION     = 0x42
+# For embedding/tunnelling non-native data over LXMF
+FIELD_CUSTOM_TYPE      = 0xFB
+FIELD_CUSTOM_DATA      = 0xFC
+FIELD_CUSTOM_META      = 0xFD
+# Development / debug fields
+FIELD_NON_SPECIFIC     = 0xFE
+FIELD_DEBUG            = 0xFF
+# (Upstream also defines AM_* audio modes and PN_META_* propagation-node
+#  metadata keys; omitted here as unused — we do neither audio nor PN hosting.)
+
+# FIELD_RENDERER values — hint to the receiver on how to render content.
+RENDERER_PLAIN         = 0x00
+RENDERER_MICRON        = 0x01
+RENDERER_MARKDOWN      = 0x02
+RENDERER_BBCODE        = 0x03
+
+# Dict keys for FIELD_REACTION / FIELD_COMMENT / FIELD_CONTINUATION contents.
+REACTION_TO            = 0x00
+REACTION_CONTENT       = 0x01
+COMMENT_FOR            = 0x00
+CONTINUATION_OF        = 0x00
+
+# Supported-functionality signalling codes carried in announce app_data
+# element [2] (LXMF 0.9.5+). SF_COMPRESSION advertises that we accept
+# bz2-compressed Resources — see LXMRouter._build_app_data.
+SF_COMPRESSION         = 0x00
 
 
 class LXMessage:
@@ -383,16 +417,13 @@ class LXMRouter:
         # Set announce handler so Transport forwards peer announces to us
         self.delivery_destination._announce_handler = self._announce_handler
 
-        # Set app_data for announces
+        # Set app_data for announces. set_default_app_data so plain
+        # Destination.announce() calls (path responses, post-clock-sync
+        # re-announces) also carry the LXMF app_data — announce() falls back
+        # to default_app_data.
         if display_name is not None:
-            dn = display_name.encode("utf-8") if isinstance(display_name, str) else display_name
-            # [display_name, stamp_cost, supported_functionality] — upstream
-            # LXMF shape; empty functionality list = no LXMF compression.
-            # set_default_app_data so plain Destination.announce() calls (path
-            # responses, post-clock-sync re-announces) also carry the LXMF
-            # app_data — announce() falls back to default_app_data.
             self.delivery_destination.set_default_app_data(
-                umsgpack.packb([dn, stamp_cost, []]))
+                self._build_app_data(display_name, stamp_cost))
 
         log("LXMF delivery registered: " + self.delivery_destination.hexhash, LOG_NOTICE)
         return self.delivery_destination
@@ -420,13 +451,24 @@ class LXMRouter:
             log("LXMF announced as: " + (self.display_name or "unnamed"), LOG_NOTICE)
 
     def _get_announce_app_data(self):
-        """Build announce app_data: msgpack([display_name_bytes, stamp_cost,
-        supported_functionality]) — matches upstream LXMF; the empty
-        functionality list tells peers we don't support LXMF compression."""
+        """Build announce app_data for our delivery destination.
+        Leaf nodes never require a stamp, so stamp_cost is None."""
+        return self._build_app_data(self.display_name, None)
+
+    @staticmethod
+    def _build_app_data(display_name, stamp_cost=None):
+        """Build LXMF announce app_data: msgpack([display_name_bytes|None,
+        stamp_cost, supported_functionality]) — the upstream LXMF shape.
+
+        We advertise SF_COMPRESSION in the functionality list: our Resource
+        layer decompresses inbound bz2 transfers on every board (native module
+        or the pure-Python fallback in bz2dec), so peers may compress large
+        Resources sent to us, saving airtime. Older peers that read only
+        elements [0]/[1] are unaffected."""
         dn = None
-        if self.display_name:
-            dn = self.display_name.encode("utf-8") if isinstance(self.display_name, str) else self.display_name
-        return umsgpack.packb([dn, None, []])
+        if display_name:
+            dn = display_name.encode("utf-8") if isinstance(display_name, str) else display_name
+        return umsgpack.packb([dn, stamp_cost, [SF_COMPRESSION]])
 
     def send_message(self, destination_hash, content, title="",
                      fields=None, desired_method=None):
