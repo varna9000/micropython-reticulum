@@ -109,6 +109,51 @@ def test_establishment_no_path_conservative():
                - (const.DEFAULT_PER_HOP_TIMEOUT * 2 + GRACE)) < 1e-6
 
 
+def test_establishment_timeout_expires_path_and_requests_it():
+    """Reference RNS (Transport.jobs): a leaf whose pending link never
+    activated expires the path and asks for a new one. Seen live: after a
+    transport node's uplink to the peer was replaced, our retries kept using
+    the stale route and timed out three times in a row."""
+    iface = MockInterface("lora", hw_mtu=508, bitrate=5000)
+    _setup(iface, hops=2)
+    Transport.reachable_destinations[DEST] = time.time()
+    Transport.transport_enabled = False
+    Transport._path_request_times.clear()
+
+    class _PlainDest:            # harness Destination can't be constructed
+        type = const.DEST_PLAIN
+        hash = b"\x0f" * 16
+        identity = None
+        encrypt = staticmethod(lambda d: d)
+    Transport._path_request_dest = _PlainDest()
+    ol = link.OutgoingLink(_Dest())
+    sent_before = len(iface.sent)
+    ol.request_time = time.time() - ol.establishment_timeout - 1
+    ol.check_timeout()
+    assert ol.status == link.OutgoingLink.CLOSED
+    assert DEST not in Transport.path_table
+    assert not Transport.has_path(DEST)
+    assert len(iface.sent) == sent_before + 1, "one path request must go out"
+    assert DEST in Transport._path_request_times
+
+
+def test_establishment_timeout_keeps_path_on_transport_node():
+    """A relay keeps its table (reference only expires when not a transport
+    instance); link-table cleanup handles the relay case."""
+    iface = MockInterface("lora", hw_mtu=508, bitrate=5000)
+    _setup(iface, hops=2)
+    Transport.reachable_destinations[DEST] = time.time()
+    Transport.transport_enabled = True
+    try:
+        ol = link.OutgoingLink(_Dest())
+        ol.request_time = time.time() - ol.establishment_timeout - 1
+        ol.check_timeout()
+        assert ol.status == link.OutgoingLink.CLOSED
+        assert DEST in Transport.path_table
+    finally:
+        Transport.transport_enabled = False
+
+
 def test_request_timeout_scales_with_rtt():
     OL = link.OutgoingLink
     ol = object.__new__(OL)

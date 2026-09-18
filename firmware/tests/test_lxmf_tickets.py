@@ -216,7 +216,12 @@ class StubOutgoingLink:
         self.calls = []
         self.resource_concluded_callback = None
         self._established = established_callback
+        self._closed = closed_callback
         StubOutgoingLink.instances.append(self)
+
+    def fail_establishment(self):
+        self.status = 0x02
+        self._closed(self)
 
     def identify(self, identity):
         self.calls.append(("identify", identity))
@@ -279,6 +284,36 @@ def test_send_message_applies_remembered_ticket():
         link_mod.OutgoingLink, lxmf.Destination = old_link, old_dest
         lxmf.Identity.known.clear()
         Transport.reachable_destinations.clear()
+
+
+def test_direct_retry_waits_for_path_when_route_expired():
+    """A link establishment timeout expires the path (reference RNS). The
+    LXMF retry must then wait for a fresh route via ensure_path instead of
+    opening another link on a route that no longer exists (seen live: three
+    consecutive 30 s timeouts after a transport node's uplink changed)."""
+    r, peer = _router_with_peer()
+    old_link, old_dest = link_mod.OutgoingLink, lxmf.Destination
+    link_mod.OutgoingLink = StubOutgoingLink
+    lxmf.Destination = FakeDest
+    StubOutgoingLink.instances = []
+    Transport._path_waiters.clear()
+    try:
+        r.send_message(peer.hash, "reply", desired_method=LXMessage.DIRECT)
+        first = StubOutgoingLink.instances[0]
+        # Establishment times out: the link layer has expired the path.
+        Transport.expire_path(peer.hash)
+        first.fail_establishment()
+        assert len(StubOutgoingLink.instances) == 1, "must not re-link on a dead route"
+        assert peer.hash in Transport._path_waiters
+        # Route rediscovered (path response announce) -> the retry proceeds.
+        Transport.reachable_destinations[peer.hash] = time.time()
+        Transport._process_path_waiters()
+        assert len(StubOutgoingLink.instances) == 2
+    finally:
+        link_mod.OutgoingLink, lxmf.Destination = old_link, old_dest
+        lxmf.Identity.known.clear()
+        Transport.reachable_destinations.clear()
+        Transport._path_waiters.clear()
 
 
 if __name__ == "__main__":

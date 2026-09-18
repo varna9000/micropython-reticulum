@@ -668,6 +668,22 @@ class LXMRouter:
             + message.destination_hash.hex()[:8], LOG_NOTICE)
         try:
             message.state = LXMessage.SENDING
+            from .transport import Transport
+            dest_hash = message.destination_hash
+            if not Transport.has_path(dest_hash):
+                # The link layer expired the route when establishment timed
+                # out; a fresh link on the same dead route would only time
+                # out again. Wait for the path response, then retry.
+                def on_timeout():
+                    if message.state < LXMessage.SENT:
+                        message.state = LXMessage.FAILED
+                        log("LXMF DIRECT retry failed: no path to "
+                            + dest_hash.hex()[:8], LOG_ERROR)
+                Transport.ensure_path(
+                    dest_hash,
+                    on_found=lambda: self._send_direct(message, destination),
+                    on_timeout=on_timeout)
+                return True
             self._send_direct(message, destination)
             return True
         except Exception as e:

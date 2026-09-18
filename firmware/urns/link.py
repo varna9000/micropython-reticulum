@@ -1304,8 +1304,7 @@ class OutgoingLink:
         """Check link staleness (called by transport job_loop)."""
         if self.status == OutgoingLink.PENDING:
             if time.time() - self.request_time > self.establishment_timeout:
-                log("OutLink " + self.link_id.hex()[:8] + " establishment timeout", LOG_VERBOSE)
-                self._close()
+                self._establishment_timed_out()
             return
         if self.status != OutgoingLink.ACTIVE:
             return
@@ -1381,8 +1380,27 @@ class OutgoingLink:
     def check_timeout(self):
         if self.status == OutgoingLink.PENDING:
             if time.time() - self.request_time > self.establishment_timeout:
-                log("OutLink " + self.link_id.hex()[:8] + " establishment timeout", LOG_VERBOSE)
-                self._close()
+                self._establishment_timed_out()
+
+    def _establishment_timed_out(self):
+        """Reference RNS Transport.jobs: a leaf whose pending link never
+        activated treats the route as broken — expire the path and ask for a
+        new one (rate-limited), so the next attempt goes via a fresh route
+        instead of retrying into a dead one (seen live: a transport node's
+        uplink to the peer was replaced; every retry on the stale route timed
+        out). A transport node keeps its table; link-table cleanup covers it."""
+        log("OutLink " + self.link_id.hex()[:8] + " establishment timeout", LOG_VERBOSE)
+        dest = getattr(self.destination, "hash", None)   # _close() nulls destination
+        self._close()
+        from .transport import Transport, _PATH_REREQUEST_INTERVAL
+        if dest is None or Transport.transport_enabled:
+            return
+        Transport.expire_path(dest)
+        last = Transport._path_request_times.get(dest, 0)
+        if time.time() - last >= _PATH_REREQUEST_INTERVAL:
+            log("Rediscovering path to " + dest.hex()[:8]
+                + " (link never established)", LOG_VERBOSE)
+            Transport.request_path(dest)
 
     def teardown(self):
         """Gracefully close this link (sends close notification)."""
