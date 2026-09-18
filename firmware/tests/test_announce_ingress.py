@@ -132,6 +132,27 @@ def test_shift_clocks_survives_expiry_cull():
     assert e[const.IDX_PT_EXPIRES] > time.time() + delta - 120
 
 
+def test_shift_clocks_rebases_link_activity():
+    """A link's stale check reads last_activity; the boot clock jump must not
+    make a link that was live a second ago look ~25 years idle (seen live:
+    the peer's link was torn down as stale the second the clock synced)."""
+    import time
+    reset_transport()
+
+    class L:
+        pass
+    l = L()
+    now = time.time()
+    for a in ("last_activity", "last_outbound", "_last_keepalive", "_lrrtt_last"):
+        setattr(l, a, now - 5)
+    Transport.active_links = [l]
+    delta = 800000000
+    Transport._shift_clocks(delta, now + const.PATH_EXPIRY + 60)
+    for a in ("last_activity", "last_outbound", "_last_keepalive", "_lrrtt_last"):
+        assert getattr(l, a) == now - 5 + delta, a
+    Transport.active_links = []
+
+
 def _run():
     import traceback
     tests = [(n, f) for n, f in sorted(globals().items())

@@ -12,6 +12,14 @@ from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE, LOG_INFO
 from .crypto.hashes import sha256
 from .crypto import ed25519
 
+# MicroPython on ESP32 counts from 2000-01-01; LXMF timestamps and ticket
+# expiries are Unix time (https://docs.micropython.org/en/latest/library/time.html).
+_UNIX_EPOCH_OFFSET = 946684800 if sys.platform == "esp32" else 0
+
+
+def _unix_now():
+    return time.time() + _UNIX_EPOCH_OFFSET
+
 APP_NAME = "lxmf"
 
 # Standard LXMF fields
@@ -92,6 +100,7 @@ class LXMessage:
     DESTINATION_LENGTH = Identity.TRUNCATED_HASHLENGTH // 8   # 16
     SIGNATURE_LENGTH   = Identity.SIGLENGTH // 8              # 64
     TIMESTAMP_SIZE     = 8
+    TICKET_LENGTH      = 16   # reference LXMessage.TICKET_LENGTH (truncated hash size)
     STRUCT_OVERHEAD    = 8
     LXMF_OVERHEAD      = 2 * DESTINATION_LENGTH + SIGNATURE_LENGTH + TIMESTAMP_SIZE + STRUCT_OVERHEAD  # 112
 
@@ -121,6 +130,13 @@ class LXMessage:
         self.hash = None
         self.message_id = None
         self.packed = None
+        # Stamp (5th payload element). We only ever generate TICKET stamps:
+        # truncated_hash(ticket + message_id), free to compute, accepted by
+        # reference LXMF peers that hand us a ticket. PoW stamps are out of
+        # reach on an MCU, so outbound_ticket is the only way to satisfy a
+        # peer that requires stamps.
+        self.stamp = None
+        self.outbound_ticket = None
         self.state = LXMessage.GENERATING
         self.method = LXMessage.UNKNOWN
         self.desired_method = desired_method
@@ -184,16 +200,7 @@ class LXMessage:
             raise ValueError("Message already packed")
 
         if self.timestamp is None:
-            platform = sys.platform
-            # https://docs.micropython.org/en/latest/library/time.html
-            if platform == "esp32":
-                # Micropython on ESP32 uses epoch time of 2000-01-01 so for Unix time need to add 946,684,800 seconds
-                self.timestamp = 946684800 + time.time()
-            elif platform == "rp2":
-                # Micropython on rp2 uses standard unix epoch 1970-01-01
-                self.timestamp = time.time()
-            else:
-                self.timestamp = time.time()
+            self.timestamp = _unix_now()
 
         payload = [self.timestamp, self.title, self.content, self.fields]
 
@@ -213,6 +220,13 @@ class LXMessage:
         except:
             pass
         self.signature_validated = True
+
+        # Ticket stamp, appended as the 5th payload element AFTER hashing and
+        # signing (reference LXMessage.pack: hash/signature cover the
+        # 4-element payload; the receiver strips element 4 before verifying).
+        if self.outbound_ticket:
+            self.stamp = Identity.truncated_hash(self.outbound_ticket + self.message_id)
+            payload.append(self.stamp)
 
         # Assemble packed message
         packed_payload = umsgpack.packb(payload)
@@ -320,6 +334,7 @@ class LXMessage:
         message.hash = message_hash
         message.message_id = message_hash
         message.signature = signature
+        message.stamp = stamp
         message.incoming = True
         message.timestamp = timestamp
         message.title = title_bytes if isinstance(title_bytes, bytes) else title_bytes.encode("utf-8") if title_bytes else b""
@@ -382,6 +397,11 @@ class LXMRouter:
 
     def __init__(self, identity=None, storagepath=None):
         self.identity = identity
+        # Default to the node's storage dir (Reticulum sets Identity.storagepath
+        # at init, e.g. "/rns") so ticket persistence works in every app
+        # without plumbing a path through.
+        if storagepath is None:
+            storagepath = getattr(Identity, "storagepath", None)
         self.storagepath = storagepath
 
         self.delivery_destination = None
@@ -391,6 +411,14 @@ class LXMRouter:
         self._delivery_callback = None
         self._announce_callback = None
         self._progress_callback = None
+
+        # Tickets peers gave us (FIELD_TICKET in their messages) so we can
+        # reply with a free ticket stamp: dest_hash -> [expires_unix, ticket].
+        # Persisted: a reference peer re-issues a ticket at most once a day
+        # (TICKET_INTERVAL), so losing it on reboot would fail replies for
+        # up to a day.
+        self.outbound_tickets = {}
+        self._load_tickets()
 
         self.peers = {}  # hash -> {name, timestamp, identity}
         self.delivered_ids = {}  # message_hash -> timestamp (dedup)
@@ -528,6 +556,10 @@ class LXMRouter:
             desired_method=desired_method or LXMessage.OPPORTUNISTIC,
         )
 
+        # A peer that requires stamps gave us a ticket; stamp with it so the
+        # reply isn't dropped as "invalid stamp".
+        msg.outbound_ticket = self.get_outbound_ticket(destination_hash)
+
         msg.pack()
 
         if msg.method == LXMessage.OPPORTUNISTIC:
@@ -565,6 +597,19 @@ class LXMRouter:
         from . import const
 
         def deliver_on(link, owns_link):
+            if owns_link:
+                # Backchannel identification (reference LXMF does this on
+                # every delivery link it opens). MeshChatX's inbound policy
+                # reads the link's remote identity to tell contacts from
+                # strangers BEFORE accepting a Resource -- an anonymous link
+                # is a stranger even when we're in its contact list, and the
+                # transfer is cancelled before the message ever arrives.
+                # Must go out before the payload/advertisement.
+                if self.delivery_identity is not None:
+                    try:
+                        link.identify(self.delivery_identity)
+                    except Exception as e:
+                        log("LXMF link identify error: " + str(e), LOG_DEBUG)
             packed = message.packed
             # Single link packet capacity: ~415B after Token encryption
             if len(packed) <= 415:
@@ -654,6 +699,78 @@ class LXMRouter:
         if owns_link:
             link.teardown()
 
+    # --- Tickets (LXMF stamps without proof-of-work) ---------------------
+
+    _TICKET_FILE = "/lxmf_tickets"
+    _MAX_TICKETS = 32
+
+    def remember_ticket(self, message):
+        """Capture a ticket the peer attached to a signature-validated
+        message (reference LXMRouter.lxmf_delivery): FIELD_TICKET =
+        [expires_unix, 16-byte ticket]. Replies to that peer then carry
+        truncated_hash(ticket + message_id) as their stamp."""
+        if not getattr(message, "signature_validated", False):
+            return
+        fields = getattr(message, "fields", None)
+        if not isinstance(fields, dict) or FIELD_TICKET not in fields:
+            return
+        entry = fields[FIELD_TICKET]
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            return
+        expires, ticket = entry[0], entry[1]
+        if not isinstance(expires, (int, float)) or expires <= _unix_now():
+            return
+        if not isinstance(ticket, bytes) or len(ticket) != LXMessage.TICKET_LENGTH:
+            return
+        current = self.outbound_tickets.get(message.source_hash)
+        if current is not None and current[1] == ticket and current[0] == expires:
+            return          # same ticket re-sent: nothing to write to flash
+        if (message.source_hash not in self.outbound_tickets
+                and len(self.outbound_tickets) >= self._MAX_TICKETS):
+            # Evict the soonest-expiring entry.
+            victim = min(self.outbound_tickets, key=lambda k: self.outbound_tickets[k][0])
+            del self.outbound_tickets[victim]
+        self.outbound_tickets[message.source_hash] = [expires, ticket]
+        log("LXMF ticket from " + message.source_hash.hex()[:8] + " remembered", LOG_DEBUG)
+        self._save_tickets()
+
+    def get_outbound_ticket(self, destination_hash):
+        """The unexpired ticket to stamp a message to destination_hash with,
+        or None."""
+        entry = self.outbound_tickets.get(destination_hash)
+        if entry is None:
+            return None
+        if entry[0] <= _unix_now():
+            del self.outbound_tickets[destination_hash]
+            return None
+        return entry[1]
+
+    def _load_tickets(self):
+        if not self.storagepath:
+            return
+        try:
+            with open(self.storagepath + self._TICKET_FILE, "rb") as f:
+                data = umsgpack.unpackb(f.read())
+            if isinstance(data, dict):
+                now = _unix_now()
+                for k, v in data.items():
+                    if (isinstance(k, bytes) and isinstance(v, (list, tuple))
+                            and len(v) >= 2 and v[0] > now):
+                        self.outbound_tickets[k] = [v[0], v[1]]
+        except OSError:
+            pass          # no file yet
+        except Exception as e:
+            log("LXMF ticket load error: " + str(e), LOG_DEBUG)
+
+    def _save_tickets(self):
+        if not self.storagepath:
+            return
+        try:
+            with open(self.storagepath + self._TICKET_FILE, "wb") as f:
+                f.write(umsgpack.packb(self.outbound_tickets))
+        except Exception as e:
+            log("LXMF ticket save error: " + str(e), LOG_DEBUG)
+
     def _on_link_established(self, link):
         """Called when a link is established to our delivery destination."""
         link.set_packet_callback(self._link_packet_received)
@@ -677,6 +794,7 @@ class LXMRouter:
             message = LXMessage.unpack_from_bytes(lxmf_data)
             message.transport_encrypted = True
             message.transport_encryption = "Curve25519"
+            self.remember_ticket(message)
 
             if message.signature_validated:
                 log("LXMF link message from " + message.source_hash.hex()[:8] +
@@ -728,6 +846,7 @@ class LXMRouter:
             message = LXMessage.unpack_from_bytes(lxmf_data)
             message.transport_encrypted = True
             message.transport_encryption = "Curve25519"
+            self.remember_ticket(message)
 
             if message.signature_validated:
                 log("LXMF resource message from " + message.source_hash.hex()[:8] +
@@ -771,6 +890,7 @@ class LXMRouter:
 
             log("LXMF unpacking: " + str(len(lxmf_data)) + "B total", LOG_DEBUG)
             message = LXMessage.unpack_from_bytes(lxmf_data)
+            self.remember_ticket(message)
 
             if message.signature_validated:
                 log("LXMF message from " + message.source_hash.hex()[:8] +

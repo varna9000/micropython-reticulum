@@ -1084,8 +1084,12 @@ class Transport:
             if r.sent_at is not None:
                 r.sent_at = _sh(r.sent_at)
         for l in Transport.pending_links + Transport.active_links:
+            # last_activity feeds the stale check: without re-basing it a link
+            # that was live a second ago looks decades idle and is torn down
+            # the moment the clock syncs (seen live with a MeshChat peer).
             for attr in ("last_outbound", "last_inbound", "last_proof_time",
-                         "request_time", "activated_at"):
+                         "request_time", "activated_at", "last_activity",
+                         "_last_keepalive", "_lrrtt_last"):
                 v = getattr(l, attr, None)
                 if v is not None:
                     setattr(l, attr, _sh(v))
