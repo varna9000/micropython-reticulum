@@ -137,6 +137,31 @@ def test_establishment_timeout_expires_path_and_requests_it():
     assert DEST in Transport._path_request_times
 
 
+def test_establishment_timeout_expires_path_before_closed_callback():
+    """The closed-callback is where LXMF schedules its DIRECT retry, and the
+    retry checks has_path() to decide between opening a fresh link now and
+    waiting for a new path. The stale path must therefore be gone BEFORE the
+    callback runs, or the retry re-uses the dead route immediately."""
+    iface = MockInterface("lora", hw_mtu=508, bitrate=5000)
+    _setup(iface, hops=2)
+    Transport.reachable_destinations[DEST] = time.time()
+    Transport.transport_enabled = False
+    Transport._path_request_times.clear()
+
+    class _PlainDest:
+        type = const.DEST_PLAIN
+        hash = b"\x0f" * 16
+        identity = None
+        encrypt = staticmethod(lambda d: d)
+    Transport._path_request_dest = _PlainDest()
+    seen = []
+    ol = link.OutgoingLink(_Dest(),
+                           closed_callback=lambda l: seen.append(Transport.has_path(DEST)))
+    ol.request_time = time.time() - ol.establishment_timeout - 1
+    ol.check_timeout()
+    assert seen == [False], "path still present when closed_callback ran: %r" % seen
+
+
 def test_establishment_timeout_keeps_path_on_transport_node():
     """A relay keeps its table (reference only expires when not a transport
     instance); link-table cleanup handles the relay case."""

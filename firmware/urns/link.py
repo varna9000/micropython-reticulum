@@ -1391,11 +1391,18 @@ class OutgoingLink:
         out). A transport node keeps its table; link-table cleanup covers it."""
         log("OutLink " + self.link_id.hex()[:8] + " establishment timeout", LOG_VERBOSE)
         dest = getattr(self.destination, "hash", None)   # _close() nulls destination
-        self._close()
         from .transport import Transport, _PATH_REREQUEST_INTERVAL
         if dest is None or Transport.transport_enabled:
+            self._close()
             return
+        # Expire BEFORE _close(): the closed-callback is where LXMF schedules
+        # its DIRECT retry, and that retry checks has_path() to decide between
+        # opening a fresh link now and waiting for a new path. With the stale
+        # entry still present it would re-open on the dead route immediately.
+        # The rate-limited re-request goes last so a retry's own ensure_path()
+        # request (which records _path_request_times) isn't duplicated.
         Transport.expire_path(dest)
+        self._close()
         last = Transport._path_request_times.get(dest, 0)
         if time.time() - last >= _PATH_REREQUEST_INTERVAL:
             log("Rediscovering path to " + dest.hex()[:8]
