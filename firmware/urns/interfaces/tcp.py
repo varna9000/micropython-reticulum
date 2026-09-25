@@ -55,6 +55,21 @@ class TCPClientInterface(Interface):
     RX_BUDGET = 16384
     RX_SLICE_MS = 25
 
+    # RX-idle watchdog. A TCP client that only ever listens cannot tell a
+    # quiet hub from a dead socket: after a WiFi re-association, a NAT entry
+    # expiring or the hub dropping us, readinto() keeps returning EAGAIN and
+    # the interface stays "online" forever — until the next send happens to
+    # fail. No bytes at all for RX_IDLE_TIMEOUT seconds forces a reconnect.
+    # Safe for links: an active link on TCP exchanges keepalives every ~20s.
+    # 0 disables.
+    #
+    # Reference TCPClientInterface uses kernel TCP keepalive for this instead,
+    # but MicroPython's ESP32 setsockopt() cannot set it: it dispatches on the
+    # option number alone, ignoring the level, and implements none of
+    # SO_KEEPALIVE/TCP_KEEPIDLE/INTVL/CNT — 0x03 and 0x04 even collide with
+    # IP_ADD_MEMBERSHIP and SO_REUSEADDR.
+    RX_IDLE_TIMEOUT = 180
+
     def __init__(self, config):
         name = config.get("name", "TCP")
         super().__init__(name)
@@ -64,6 +79,7 @@ class TCPClientInterface(Interface):
         self.target_port = config.get("target_port", 4242)
         self.reconnect_wait = config.get("reconnect_wait", self.RECONNECT_WAIT)
         self.max_reconnects = config.get("max_reconnects", self.MAX_RECONNECTS)
+        self.rx_idle_timeout = config.get("rx_idle_timeout", self.RX_IDLE_TIMEOUT)
 
         self._socket = None
         self._frame = None            # None = outside frame, else escaped bytes so far
@@ -72,6 +88,7 @@ class TCPClientInterface(Interface):
         self._recv_mv = memoryview(self._recv_buf)
         self._reconnect_count = 0
         self._last_reconnect = 0
+        self._last_rx = _ticks_ms()
 
         try:
             self._connect()
@@ -93,6 +110,7 @@ class TCPClientInterface(Interface):
             pass
 
         self._socket = s
+        self._last_rx = _ticks_ms()
         self._frame = None
         self._frame_overflow = False
         self.online = True
@@ -291,6 +309,7 @@ class TCPClientInterface(Interface):
                         self.online = False
                         break
                     got += n
+                    self._last_rx = _ticks_ms()
                     self._feed(self._recv_mv[:n])
                     if _ticks_diff(_ticks_ms(), t0) >= self.RX_SLICE_MS:
                         break
@@ -306,6 +325,13 @@ class TCPClientInterface(Interface):
                 # packet.prove → process_outgoing) to prevent the poll
                 # loop from crashing.
                 log("TCP poll error: " + str(e), LOG_ERROR)
+
+            if (not got and self.online and self.rx_idle_timeout
+                    and _ticks_diff(_ticks_ms(), self._last_rx)
+                        >= self.rx_idle_timeout * 1000):
+                log("TCP no data for " + str(self.rx_idle_timeout)
+                    + "s, assuming dead connection; reconnecting", LOG_NOTICE)
+                self.online = False
 
             if got and (got >= self.RX_BUDGET
                         or _ticks_diff(_ticks_ms(), t0) >= self.RX_SLICE_MS):
