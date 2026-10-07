@@ -163,6 +163,32 @@ LORA_BOARDS = {
         "dio3_tcxo_millivolts": 1800,
     },
 
+
+    # Heltec Wireless Paper (ESP32-S3FN8, no PSRAM, SX1262, 2.13" e-ink).
+    # Also sold unbranded as "2.13 inch LoRa E-Ink ESP32-S3" (Amazon B0DBHG2X3D).
+    # Radio wiring is the standard Heltec S3 map (same as HTIT-WB32LAF).
+    #
+    # The e-ink panel is NOT part of this preset (presets are radio wiring);
+    # its pins live in config.EINK and are consumed by example_eink_node.py:
+    #   CS 4, DC 5, RST 6, BUSY 7, SCK 3, MOSI 2, VEXT GPIO45 (active LOW).
+    #
+    # Battery: ADC on GPIO20 behind an enable transistor on GPIO19 (active LOW,
+    # Meshtastic ADC_CTRL). The divider is nominally 1:1 (vbat = 2 * vpin);
+    # calibrate against a meter and adjust "divider" here.
+    "heltec_wireless_paper": {
+        "spi_bus": 1,
+        "sck_pin": 9,
+        "mosi_pin": 10,
+        "miso_pin": 11,
+        "cs_pin": 8,
+        "busy_pin": 13,
+        "dio1_pin": 14,
+        "reset_pin": 12,
+        "dio2_rf_sw": True,
+        "dio3_tcxo_millivolts": 1800,
+        "battery": {"pin": 20, "divider": 2.0, "ctrl_pin": 19, "ctrl_active": 0},
+    },
+
 }
 
 
