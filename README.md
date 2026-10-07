@@ -270,6 +270,26 @@ the other 2.13" revision, and uses the controller's 8-bit Y addressing.
 import example_eink_node
 ```
 
+The Wireless Paper has **no PSRAM** (about 220 KB of heap), so deploy it
+differently from the other ESP32-S3 boards: precompile the stack to bytecode
+and leave the native Ed25519 module off the device (it alone costs 95 KB of
+heap; pure-Python crypto is slower but fits).
+
+```bash
+MPY=mpy-cross   # from the MicroPython repo, same major version as the board
+mkdir -p stage/lib/lora
+for f in $(cd firmware && find urns peripherals -name '*.py' -not -path '*__pycache__*'); do
+  mkdir -p stage/$(dirname $f); $MPY -march=xtensawin -o stage/${f%.py}.mpy firmware/$f
+done
+for f in path/to/micropython-lib/lora/*.py; do $MPY -march=xtensawin -o stage/lib/lora/$(basename ${f%.py}).mpy $f; done
+$MPY -march=xtensawin -o stage/example_eink_node.mpy firmware/example_eink_node.py
+$MPY -march=xtensawin -o stage/lora_boards.mpy firmware/lora_boards.py
+cp firmware/config.py stage/   # edit NODE_NAME, board, radio params first
+cp firmware/lib/bz2_fast_xtensawin.mpy stage/lib/
+mpremote connect /dev/cu.usbserial-0001 fs cp -r stage/urns stage/peripherals stage/lib :/
+mpremote connect /dev/cu.usbserial-0001 fs cp stage/example_eink_node.mpy stage/lora_boards.mpy stage/config.py :/
+```
+
 ## Interfaces
 
 Every interface is configured by an entry in the `CONFIG["interfaces"]` list in `config.py`. You can run multiple interfaces at the same time (e.g. WiFi + LoRa). The auto-generated `/rns/config.json` on the device mirrors this — you usually don't need to edit it by hand.

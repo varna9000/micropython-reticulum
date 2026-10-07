@@ -114,8 +114,10 @@ Screen (250×122 landscape):
 └─────────────────────────────────────────────────────┘
 ```
 
-- QR content: `lxmf@<32 hex>` (the delivery destination hash), so Sideband and
-  MeshChat can scan it to add the node.
+- QR content: `lxma://<delivery hash hex>:<identity public key hex>` (168
+  bytes), the contact URI Sideband, MeshChatX and Columba scan; same string the
+  T-Deck shows. Fits QR version 8-L byte mode (`qr.MAX_BYTES = 192`). Encoded
+  once at boot into a 98×98 framebuffer and blitted on every redraw.
 - Stats sources: the `LoRaInterface` instance's `rx`, `tx`, `rssi`, `snr`
   attributes and its configured `freq_khz`/`sf`; `time.ticks_ms()` uptime;
   `adc_reader.battery_voltage()` with a simple LiPo 3.3–4.2 V percent map.
@@ -158,9 +160,25 @@ Keyboard/button UI, message composing, peer list, partial-window refresh,
 LCMEN2R13EFC1 (JD79656) panel support, deep sleep / battery-saving sleep,
 porting this board into `reticulum-tdeck`.
 
-## Open items resolved on hardware during implementation
+## Resolved on hardware (2026-10-07)
 
-1. `rotate` default (90 vs 270) — pick the one that puts text upright with the
-   USB connector on the left.
-2. Battery divider value and whether GPIO19 must be low during the read.
-3. Transpose timing; if the viper loop is > 150 ms, keep it but document it.
+1. **`rotate = 270`** puts text upright with the USB connector on the left
+   (90 = USB on the right). A bare transpose mirrors the image; the mapping is
+   transpose + one axis flip.
+2. **Battery divider unverified**: no cell was available; on USB the channel
+   reads 5.9 V with the nominal 2.0 divider through the GPIO19 gate. Calibrate
+   with a cell and a meter before trusting the gauge.
+3. **Timing**: full flush 1715 ms, fast 638 ms end to end; transpose + SPI
+   ≈ 140 ms (viper), within target. Display stack RAM ≈ 12 KB.
+4. **Panel wedge**: a reset pulse does not recover a wedged SSD1682 (RAM
+   reads back 0xFF, refresh never runs); only a VEXT power cycle with
+   CS/DC/RST/SCK/MOSI held low does. The constructor always performs one
+   (500 ms off + 300 ms warm-up).
+5. **SPI claim before bit-bang**: on MicroPython 1.28 / ESP32-S3 the first
+   hardware SPI initialised on pins already driven as GPIO stays silent; the
+   driver creates and releases the bus once before the chip-ID bit-bang.
+6. **Memory**: the board has no PSRAM (213–228 KB GC heap). The native
+   Ed25519 `.mpy` costs 95 KB of heap and the stack compiled from source does
+   not fit. Deploy the stack, `peripherals/` and `/lib/lora` as mpy-cross
+   `xtensawin` bytecode and do **not** install `ed25519_*.mpy` on this board;
+   pure-Python crypto leaves ~40 KB free while running.
