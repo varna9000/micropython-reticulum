@@ -224,6 +224,23 @@ def test_detect_initialises_hardware_spi_before_bitbanging():
     assert p._spi is None                    # released again before bit-banging
 
 
+def test_xoff_outside_visible_window_is_rejected():
+    """xoff shifts 122 visible columns inside 128 RAM columns: 0..6 only.
+    xoff 7 would make the viper transpose write one byte past the RAM buffer."""
+    for bad in (-1, 7, 128):
+        F.reset()
+        F.Pin(2).in_bits = list(ID_OK)
+        try:
+            SSD1682(rotate=270, xoff=bad, **PINS)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("xoff=%d accepted" % bad)
+    F.reset()
+    F.Pin(2).in_bits = list(ID_OK)
+    SSD1682(rotate=270, xoff=6, **PINS)          # upper bound is fine
+
+
 def _run():
     import traceback
     tests = [(n, f) for n, f in sorted(globals().items())

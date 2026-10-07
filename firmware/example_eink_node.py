@@ -15,6 +15,8 @@ Usage (MicroPython on the Wireless Paper):
 
 The panel redraws when RX/TX/message counters change or every 30 s, never
 more often than every 5 s (a fast refresh blocks the event loop ~0.5 s).
+After three consecutive display failures (dead panel, MemoryError) the
+display is disabled and the node keeps running as a plain LoRa leaf.
 """
 from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG, EINK
 
@@ -31,9 +33,6 @@ gc.collect()
 import peripherals.adc_reader as adc_reader
 adc_reader.init_battery(CONFIG)
 gc.collect()
-
-REDRAW_PERIOD_MS = 30_000
-REDRAW_MIN_GAP_MS = 5_000
 
 _msgs = 0            # LXMF messages received since boot
 _qr_fb = None        # QR of our lxma:// URI, rendered once in make_stats_fn()
@@ -126,21 +125,20 @@ def make_stats_fn(rns, dest, lora_cfg):
 
 async def display_loop(get_stats):
     import uasyncio as asyncio
+    guard = eink_status.DisplayGuard()
     last_key = None
     last_draw = None
-    while True:
+    while guard.enabled:
         s = get_stats()
         now = time.ticks_ms()
         key = (s["rx"], s["tx"], s["msgs"])
         first = last_draw is None
         gap = None if first else time.ticks_diff(now, last_draw)
-        due = first or gap >= REDRAW_PERIOD_MS or (key != last_key and gap >= REDRAW_MIN_GAP_MS)
-        if due:
-            try:
+        if eink_status.redraw_due(first, gap, key != last_key):
+            def draw():
                 eink_status.render(panel.fb, s, qr_fb=_qr_fb)
                 panel.flush(full=first)
-            except OSError as e:
-                print("eink:", e)
+            guard.run(draw)
             last_key = key
             last_draw = now
             gc.collect()
@@ -162,6 +160,10 @@ def main():
     rns.config = CONFIG
 
     dest, router = setup_node(rns, NODE_NAME)
+    gc.collect()
+    # Encode the QR BEFORE the interfaces claim the LoRa driver and modem
+    # buffers: on this PSRAM-less board that is the last point with headroom.
+    get_stats = make_stats_fn(rns, dest, _lora_config(CONFIG))
     gc.collect()
     rns.setup_interfaces()
     gc.collect()
@@ -187,7 +189,7 @@ def main():
 
     async def run_all():
         asyncio.create_task(announce_loop())
-        asyncio.create_task(display_loop(make_stats_fn(rns, dest, _lora_config(CONFIG))))
+        asyncio.create_task(display_loop(get_stats))
         await _original_run()
 
     try:

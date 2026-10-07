@@ -78,6 +78,10 @@ class SSD1682:
                  spi_bus=2, baudrate=4_000_000):
         if rotate not in (90, 270):
             raise ValueError("rotate must be 90 or 270")
+        if not 0 <= xoff <= _RAM_W - _H:
+            # 122 visible columns inside 128 RAM columns; anything else makes
+            # the viper transpose index outside the 4000-byte RAM buffer.
+            raise ValueError("xoff must be 0..%d" % (_RAM_W - _H))
         self._sck_n, self._mosi_n, self._miso_n = sck, mosi, miso
         self._spi_bus, self._baud = spi_bus, baudrate
         self._rot, self._xoff = rotate, xoff

@@ -20,6 +20,48 @@ QR_Y = 12
 COL = 112                     # text column start
 _ROW = (4, 24, 40, 56, 72, 88, 104)
 
+REDRAW_PERIOD_MS = 30_000     # idle redraw
+REDRAW_MIN_GAP_MS = 5_000     # never faster than this, even on change
+
+
+def redraw_due(first, gap, changed, period=REDRAW_PERIOD_MS, min_gap=REDRAW_MIN_GAP_MS):
+    """Redraw on the first call, every `period`, or on a change once `min_gap`
+    has passed since the last draw. `gap` is ms since the last draw (None first)."""
+    if first:
+        return True
+    if gap >= period:
+        return True
+    return changed and gap >= min_gap
+
+
+class DisplayGuard:
+    """Run display work so a dead panel cannot take the radio node down.
+
+    flush() blocks up to 10 s before raising on a stuck BUSY, and a tight heap
+    can raise MemoryError from any draw call. After MAX_FAILURES consecutive
+    failures the display is disabled (run() stops calling fn) and the node
+    keeps routing; a success resets the count."""
+    MAX_FAILURES = 3
+
+    def __init__(self):
+        self.failures = 0
+        self.enabled = True
+
+    def run(self, fn):
+        if not self.enabled:
+            return False
+        try:
+            fn()
+        except Exception as e:                       # noqa: BLE001 - must not escape
+            self.failures += 1
+            print("eink: %r (%d/%d)" % (e, self.failures, self.MAX_FAILURES))
+            if self.failures >= self.MAX_FAILURES:
+                self.enabled = False
+                print("eink: display disabled, node keeps running")
+            return False
+        self.failures = 0
+        return True
+
 
 def format_uptime(ms):
     s = ms // 1000

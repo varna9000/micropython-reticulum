@@ -156,6 +156,35 @@ def test_render_uses_prerendered_qr_without_encoding():
     assert _count(fb, S.QR_X, S.QR_Y, 98, 98) > 1000
 
 
+def test_redraw_due_policy():
+    due = S.redraw_due
+    assert due(first=True, gap=None, changed=False) is True
+    assert due(first=False, gap=1000, changed=True) is False       # too soon after a draw
+    assert due(first=False, gap=5000, changed=True) is True        # change after min gap
+    assert due(first=False, gap=29000, changed=False) is False     # idle, not yet periodic
+    assert due(first=False, gap=30000, changed=False) is True      # periodic redraw
+
+
+def test_display_guard_disables_after_three_consecutive_failures():
+    g = S.DisplayGuard()
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise MemoryError("x")
+
+    def ok():
+        calls.append(2)
+
+    assert g.run(boom) is False and g.enabled
+    assert g.run(ok) is True and g.failures == 0          # a success resets the count
+    for _ in range(3):
+        g.run(boom)
+    assert not g.enabled
+    n = len(calls)
+    assert g.run(ok) is False and len(calls) == n          # disabled: fn not called
+
+
 def _run():
     import traceback
     tests = [(n, f) for n, f in sorted(globals().items())
