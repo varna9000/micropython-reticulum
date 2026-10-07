@@ -12,6 +12,7 @@ import time
 
 pins = {}
 log = []
+spis = []                    # every FakeSPI constructed, in order
 clock_ms = 0
 
 
@@ -70,12 +71,15 @@ class FakeSPI:
         self.bus = bus
         self.baudrate = baudrate
         self.deinit_called = 0
+        spis.append(self)
+        log.append(("spi-init", bus))
 
     def write(self, buf):
         log.append(("spi", bytes(buf)))
 
     def deinit(self):
         self.deinit_called += 1
+        log.append(("spi-deinit", self.bus))
 
 
 class _FrameBuffer:
@@ -179,6 +183,7 @@ def reset():
     global clock_ms
     pins.clear()
     log.clear()
+    del spis[:]
     clock_ms = 0
 
 
@@ -191,6 +196,8 @@ def commands(dc=5):
         if ev[0] == "pin":
             if ev[1] == dc:
                 dc_v = ev[2]
+            continue
+        if ev[0] != "spi":
             continue
         _, b = ev
         if dc_v == 0:

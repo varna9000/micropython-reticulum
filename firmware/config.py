@@ -17,7 +17,7 @@ NODE_NAME = "ESP32s3"
 # visible columns inside the 128-wide RAM if the frame looks cut off on one side.
 # "miso" is any unconnected GPIO: the panel has no MISO but machine.SPI wants one.
 EINK = {"sck": 3, "mosi": 2, "cs": 4, "dc": 5, "rst": 6, "busy": 7,
-        "vext": 45, "vext_active": 0, "rotate": 90, "xoff": 0, "miso": 21}
+        "vext": 45, "vext_active": 0, "rotate": 270, "xoff": 0, "miso": 21}
 
 # WebREPL login password (4-9 chars) for over-the-network control at
 # ws://<node-ip>:8266/  (started by boot.py). Change it from the default.

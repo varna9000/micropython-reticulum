@@ -6,7 +6,9 @@ Verified on hardware 2026-10-07 (see docs/superpowers/specs/2026-10-07-
 eink-wireless-paper-design.md). Three facts that cost an afternoon:
 
   * Panel power (VEXT) is GPIO45, ACTIVE LOW, and needs ~300 ms before the
-    first command.
+    first command. The controller can wedge (ignores RST, swallows RAM
+    writes) and only a VEXT power cycle with the logic lines held low
+    recovers it, so the constructor always does one.
   * Y addresses are 8-bit on this controller: 0x45 takes (start, end) = 2
     bytes and 0x4F takes 1 byte. The SSD1680-style 16-bit form silently
     collapses the window to one row and the panel shows noise.
@@ -37,6 +39,7 @@ _RAM_BYTES = _RAM_W // 8 * _RAM_H          # 4000
 _FB_STRIDE = (_W + 7) // 8                 # 32
 _BUSY_TIMEOUT_MS = 10000
 _WARMUP_MS = 300
+_OFF_MS = 500                 # VEXT off time in the constructor's power cycle
 
 
 @micropython.viper
@@ -44,8 +47,10 @@ def _transpose(src: ptr8, dst: ptr8, rot: int, xoff: int):
     """Landscape 250x122 MONO_HLSB (1 = black) -> portrait 128x250 RAM
     (1 = white). dst must be pre-filled 0xFF; only black pixels clear bits.
 
-    rot 90 : px = xoff + y        py = x
-    rot 270: px = xoff + 121 - y  py = 249 - x
+    A rotation is a transpose plus ONE axis flip; a bare transpose mirrors
+    the image (verified on glass: mirrored text).
+    rot 90 : px = xoff + y        py = 249 - x
+    rot 270: px = xoff + 121 - y  py = x
     Shifts only, no division: this loop runs 30 500 times per flush."""
     for y in range(122):
         srow = y << 5                        # 32-byte stride
@@ -53,10 +58,10 @@ def _transpose(src: ptr8, dst: ptr8, rot: int, xoff: int):
             if (src[srow + (x >> 3)] >> (7 - (x & 7))) & 1:
                 if rot == 90:
                     px = xoff + y
-                    py = x
+                    py = 249 - x
                 else:
                     px = xoff + 121 - y
-                    py = 249 - x
+                    py = x
                 i = (py << 4) + (px >> 3)
                 dst[i] = dst[i] & ~(1 << (7 - (px & 7)))
 
@@ -75,7 +80,14 @@ class SSD1682:
         self._spi_bus, self._baud = spi_bus, baudrate
         self._rot, self._xoff = rotate, xoff
         if vext is not None:
-            Pin(vext, Pin.OUT, value=vext_active)
+            # Real power cycle. A wedged controller ignores RST, and it stays
+            # parasitically powered through CS/DC/RST/SCK/MOSI unless those are
+            # held low while VEXT is off (Heltec's customPowerOff does this).
+            for n in (cs, dc, rst, sck, mosi):
+                Pin(n, Pin.OUT, value=0)
+            vp = Pin(vext, Pin.OUT, value=1 - vext_active)
+            time.sleep_ms(_OFF_MS)
+            vp.value(vext_active)
             time.sleep_ms(_WARMUP_MS)
         self._cs = Pin(cs, Pin.OUT, value=1)
         self._dc = Pin(dc, Pin.OUT, value=1)
@@ -126,15 +138,25 @@ class SSD1682:
         self._cmd(0x4E, b"\x00")
         self._cmd(0x4F, b"\x00")                 # (1 byte!)
 
+    def _make_spi(self):
+        return SPI(self._spi_bus, baudrate=self._baud, polarity=0, phase=0,
+                   sck=Pin(self._sck_n), mosi=Pin(self._mosi_n),
+                   miso=Pin(self._miso_n))
+
     # ----- panel identification ---------------------------------------
     def detect(self):
         """Chip ID as Heltec's factory firmware reads it: command 0x2F, then
         8 bits clocked in on the (bidirectional) data line. Cached."""
         if self._chip is not None:
             return self._chip
-        if self._spi is not None:
-            self._spi.deinit()
-            self._spi = None
+        # Claim and release the hardware bus once BEFORE bit-banging. Seen on
+        # the ESP32-S3 port: an SPI first initialised on pins that Pin() had
+        # already driven as GPIO stays silent (refresh never runs, RAM reads
+        # back 0xFF), while a bus created and released beforehand works.
+        if self._spi is None:
+            self._spi = self._make_spi()
+        self._spi.deinit()
+        self._spi = None
         sck = Pin(self._sck_n, Pin.OUT, value=0)
         mosi = Pin(self._mosi_n, Pin.OUT, value=0)
         self._hw_reset()
@@ -167,9 +189,7 @@ class SSD1682:
         cid = self.detect()
         if (cid & 0x03) != 0x01:
             raise OSError("eink: unsupported panel id 0x%02X" % cid)
-        self._spi = SPI(self._spi_bus, baudrate=self._baud, polarity=0, phase=0,
-                        sck=Pin(self._sck_n), mosi=Pin(self._mosi_n),
-                        miso=Pin(self._miso_n))
+        self._spi = self._make_spi()
         self._hw_reset()
         self._cmd(0x12)                          # SWRESET
         time.sleep_ms(20)

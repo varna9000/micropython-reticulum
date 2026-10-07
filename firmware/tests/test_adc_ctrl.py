@@ -104,6 +104,13 @@ def test_preset_exists_with_radio_pins():
     assert p["battery"]["ctrl_active"] == 0
 
 
+def test_battery_voltage_helper_still_exists():
+    _reset()
+    assert adc_reader.battery_voltage() is None          # nothing configured
+    adc_reader.init({"battery": 20}, dividers={"battery": 2.0})
+    assert abs(adc_reader.battery_voltage() - 3.3) < 0.01
+
+
 def _run():
     import traceback
     tests = [(n, f) for n, f in sorted(globals().items())

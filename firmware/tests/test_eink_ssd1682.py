@@ -100,8 +100,8 @@ def test_transpose_rotate_90_maps_landscape_pixel_to_portrait_bit():
     p.fb.pixel(10, 3, 1)            # landscape (x=10, y=3) black
     p.flush(full=True)
     ram = _writes(0x24)[0]
-    # rot 90: portrait row py = x = 10, portrait column px = xoff + y = 3
-    i = 10 * 16 + (3 >> 3)
+    # rot 90: portrait column px = xoff + y = 3, portrait row py = 249 - x = 239
+    i = 239 * 16 + (3 >> 3)
     bit = 7 - (3 & 7)
     assert ((ram[i] >> bit) & 1) == 0, "black must be a cleared bit"
     assert sum(1 for b in ram if b != 0xFF) == 1, "exactly one byte touched"
@@ -112,7 +112,7 @@ def test_transpose_rotate_270_maps_landscape_pixel_to_portrait_bit():
     p.fb.pixel(10, 3, 1)
     p.flush(full=True)
     ram = _writes(0x24)[0]
-    py = 249 - 10
+    py = 10
     px = 121 - 3
     i = py * 16 + (px >> 3)
     bit = 7 - (px & 7)
@@ -127,7 +127,8 @@ def test_xoff_shifts_portrait_column():
     p.fb.pixel(0, 0, 1)
     p.flush(full=True)
     ram = _writes(0x24)[0]
-    assert ((ram[0] >> (7 - 6)) & 1) == 0, hex(ram[0])
+    i = 249 * 16                       # rot 90 puts landscape x=0 on the last portrait row
+    assert ((ram[i] >> (7 - 6)) & 1) == 0, hex(ram[i])
 
 
 def test_fast_flush_sequence_and_old_plane_update():
@@ -191,6 +192,36 @@ def test_clear_fills_white_and_full_refreshes():
     p.clear()
     assert _writes(0x24)[-1] == b"\xff" * 4000
     assert _refresh_modes()[0] == b"\xF7"
+
+
+def test_constructor_power_cycles_panel_with_logic_lines_low():
+    """A wedged SSD1682 ignores RST; only a real power cycle clears it, and
+    the controller stays parasitically powered through CS/DC/RST unless they
+    are held low while VEXT is off (Heltec's customPowerOff does the same)."""
+    p = _panel()
+    ev = [e for e in F.log if e[0] == "pin" and e[1] in (45, 4, 5, 6)]
+    off = ev.index(("pin", 45, 1))                 # VEXT inactive (off)
+    on = ev.index(("pin", 45, 0), off)              # then active (on)
+    lows_before_off = {e[1] for e in ev[:off] if e[2] == 0}
+    assert lows_before_off >= {4, 5, 6}, ev[:off]  # CS, DC, RST low before power off
+    highs_after_on = {e[1] for e in ev[on:] if e[2] == 1}
+    assert highs_after_on >= {4, 5, 6}, ev[on:]    # released only after power on
+    assert F.clock_ms >= 300 + 300                  # off time + warm-up
+
+
+def test_detect_initialises_hardware_spi_before_bitbanging():
+    """ESP32-S3 port quirk seen on hardware: the first SPI init on pins that
+    Pin() already drove as GPIO leaves the bus silent, while an SPI that was
+    created and released before the bit-bang works. So detect() claims the bus
+    once, releases it, bit-bangs, and _begin() creates the real one."""
+    p = _panel()
+    p.detect()
+    kinds = [e[0] for e in F.log]
+    first_bitbang_clock = next(i for i, e in enumerate(F.log)
+                               if e[0] == "pin" and e[1] == 3 and e[2] == 1)
+    assert "spi-init" in kinds[:first_bitbang_clock], kinds[:12]
+    assert "spi-deinit" in kinds[:first_bitbang_clock], kinds[:12]
+    assert p._spi is None                    # released again before bit-banging
 
 
 def _run():

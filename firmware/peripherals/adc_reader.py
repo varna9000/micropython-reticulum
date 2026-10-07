@@ -88,6 +88,11 @@ def read_voltage(name):
     return _raw(adc, name) * 3.3 / 65535 * divider
 
 
+def battery_voltage():
+    """Battery-channel voltage (float), or None if no battery is configured."""
+    return read_voltage("battery")
+
+
 def _read(name, adc, divider):
     raw = _raw(adc, name)
     return "{}: {:.2f}V (raw {})".format(name, raw * 3.3 / 65535 * divider, raw)
