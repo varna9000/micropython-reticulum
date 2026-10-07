@@ -84,6 +84,57 @@ def test_qr_code_size_and_quiet_zone_untouched():
     assert fb.pixel(6, 12) == 1 and fb.pixel(7, 13) == 1
 
 
+from peripherals import eink_status as S  # noqa: E402
+
+STATS = dict(name="Paper", hash="ab12cd34" * 4, uri="lxma://" + "ab12cd34" * 4 + ":" + "ef" * 64,
+             rx=123, tx=45, rssi=-87, snr=9.5, freq_khz=868800, sf=8,
+             uptime_ms=3_720_000, vbat=3.95, msgs=0)
+
+
+def test_format_uptime():
+    assert S.format_uptime(45_000) == "up 45s"
+    assert S.format_uptime(3_720_000) == "up 1h02m"
+    assert S.format_uptime(100 * 3600_000) == "up 4d04h"
+
+
+def test_battery_percent_clamps_and_passes_none():
+    assert S.battery_percent(None) is None
+    assert S.battery_percent(3.0) == 0
+    assert S.battery_percent(4.5) == 100
+    assert 45 <= S.battery_percent(3.75) <= 55
+
+
+def test_render_draws_qr_frame_and_text_column():
+    fb = _fb()
+    S.render(fb, STATS)
+    assert _count(fb, S.QR_X, S.QR_Y, 98, 98) > 1000          # QR present
+    assert fb.pixel(0, 0) == 1 and fb.pixel(249, 121) == 1    # 1 px frame
+    assert _count(fb, S.COL, 4, 128, 16) > 0                   # 2x headline
+    assert _count(fb, S.COL, 40, 100, 8) > 0                   # RX/TX row
+
+
+def test_render_long_name_truncates_to_eight_chars():
+    fb = _fb()
+    s = dict(STATS, name="AVeryLongNodeName")
+    S.render(fb, s)
+    # 8 chars * 16 px = 128 -> nothing may land right of COL+128 on the headline rows
+    assert _count(fb, S.COL + 128, 4, 250 - S.COL - 129, 16) == 0
+
+
+def test_render_tolerates_unknown_rssi_snr_and_battery():
+    fb = _fb()
+    s = dict(STATS, rssi=None, snr=None, vbat=None)
+    S.render(fb, s)                     # must not raise
+    assert _count(fb, 0, 0, 250, 122) > 1000
+
+
+def test_render_shows_envelope_only_with_messages():
+    a, b = _fb(), _fb()
+    S.render(a, dict(STATS, msgs=0))
+    S.render(b, dict(STATS, msgs=3))
+    assert _count(b, 232, 36, 16, 12) > _count(a, 232, 36, 16, 12)
+
+
 def _run():
     import traceback
     tests = [(n, f) for n, f in sorted(globals().items())
