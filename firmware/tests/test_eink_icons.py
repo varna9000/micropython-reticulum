@@ -135,6 +135,27 @@ def test_render_shows_envelope_only_with_messages():
     assert _count(b, 232, 36, 16, 12) > _count(a, 232, 36, 16, 12)
 
 
+def test_qr_framebuffer_prerender_matches_direct_draw():
+    """The QR is encoded once at boot (the encoder needs several KB of
+    transient heap the running node does not have) and blitted afterwards."""
+    uri = "lxma://" + "ab" * 16 + ":" + "cd" * 64
+    direct = _fb()
+    I.qr_code(direct, 6, 12, uri, 2)
+    qfb = I.qr_framebuffer(uri, 2)
+    assert qfb.width == 98 and qfb.height == 98
+    via = _fb()
+    via.blit(qfb, 6, 12)
+    assert bytes(via.buf) == bytes(direct.buf)
+
+
+def test_render_uses_prerendered_qr_without_encoding():
+    fb = _fb()
+    qfb = I.qr_framebuffer(STATS["uri"], 2)
+    s = dict(STATS, uri="x" * 500)          # far too long to encode: must not be touched
+    S.render(fb, s, qr_fb=qfb)
+    assert _count(fb, S.QR_X, S.QR_Y, 98, 98) > 1000
+
+
 def _run():
     import traceback
     tests = [(n, f) for n, f in sorted(globals().items())

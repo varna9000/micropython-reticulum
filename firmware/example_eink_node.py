@@ -36,6 +36,7 @@ REDRAW_PERIOD_MS = 30_000
 REDRAW_MIN_GAP_MS = 5_000
 
 _msgs = 0            # LXMF messages received since boot
+_qr_fb = None        # QR of our lxma:// URI, rendered once in make_stats_fn()
 
 
 def connect_wifi(ssid, password, timeout=15):
@@ -97,6 +98,12 @@ def _lora_iface(rns):
 def make_stats_fn(rns, dest, lora_cfg):
     uri = "lxma://" + dest.hexhash + ":" + rns.identity.get_public_key().hex()
     t_boot = time.ticks_ms()
+    # Encode the QR once, now, while the heap still has room for the encoder's
+    # temporaries (the running node has ~40 KB free on a PSRAM-less board).
+    global _qr_fb
+    from peripherals import eink_icons
+    _qr_fb = eink_icons.qr_framebuffer(uri, 2)
+    gc.collect()
 
     def stats():
         iface = _lora_iface(rns)
@@ -130,7 +137,7 @@ async def display_loop(get_stats):
         due = first or gap >= REDRAW_PERIOD_MS or (key != last_key and gap >= REDRAW_MIN_GAP_MS)
         if due:
             try:
-                eink_status.render(panel.fb, s)
+                eink_status.render(panel.fb, s, qr_fb=_qr_fb)
                 panel.flush(full=first)
             except OSError as e:
                 print("eink:", e)

@@ -45,13 +45,15 @@ _OFF_MS = 500                 # VEXT off time in the constructor's power cycle
 @micropython.viper
 def _transpose(src: ptr8, dst: ptr8, rot: int, xoff: int):
     """Landscape 250x122 MONO_HLSB (1 = black) -> portrait 128x250 RAM
-    (1 = white). dst must be pre-filled 0xFF; only black pixels clear bits.
+    (1 = white). dst is filled with 0xFF here; black pixels then clear bits.
 
     A rotation is a transpose plus ONE axis flip; a bare transpose mirrors
     the image (verified on glass: mirrored text).
     rot 90 : px = xoff + y        py = 249 - x
     rot 270: px = xoff + 121 - y  py = x
     Shifts only, no division: this loop runs 30 500 times per flush."""
+    for i in range(4000):
+        dst[i] = 0xFF
     for y in range(122):
         srow = y << 5                        # 32-byte stride
         for x in range(250):
@@ -100,7 +102,6 @@ class SSD1682:
         self._buf = bytearray(_FB_STRIDE * _H)
         self.fb = framebuf.FrameBuffer(self._buf, _W, _H, framebuf.MONO_HLSB)
         self._out = bytearray(_RAM_BYTES)
-        self._white = b"\xff" * _RAM_BYTES
 
     # ----- low level ---------------------------------------------------
     def _hw_reset(self):
@@ -209,7 +210,6 @@ class SSD1682:
             full = True                          # unknown glass state
         if self._fast_count >= self.FULL_EVERY:
             full = True
-        self._out[:] = self._white
         _transpose(self._buf, self._out, self._rot, self._xoff)
         if full:
             self._cmd(0x3C, b"\x01")             # border white

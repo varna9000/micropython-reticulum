@@ -133,3 +133,17 @@ def qr_code(fb, x, y, text, scale=2):
             if mods[row + mx]:
                 fb.fill_rect(x + mx * scale, y + my * scale, scale, scale, 1)
     return n * scale
+
+
+def qr_framebuffer(text, scale=2):
+    """Encode once into its own FrameBuffer (side = 49*scale px) for blitting.
+
+    qr.encode() needs several KB of transient heap (module grid, codewords,
+    GF tables); on a PSRAM-less board that is not available once the stack is
+    running, so callers encode at boot and keep this small buffer instead."""
+    from . import qr
+    side = qr.SIZE * scale
+    buf = bytearray(((side + 7) // 8) * side)
+    fb = framebuf.FrameBuffer(buf, side, side, framebuf.MONO_HLSB)
+    qr_code(fb, 0, 0, text, scale)
+    return fb

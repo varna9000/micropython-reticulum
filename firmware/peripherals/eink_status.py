@@ -47,10 +47,15 @@ def _num(v, fmt):
     return "--" if v is None else fmt % v
 
 
-def render(fb, s):
+def render(fb, s, qr_fb=None):
+    """Paint the whole screen. Pass qr_fb (from eink_icons.qr_framebuffer) to
+    blit a QR encoded at boot instead of encoding on every redraw."""
     fb.fill(0)
     fb.rect(0, 0, 250, 122, 1)
-    icons.qr_code(fb, QR_X, QR_Y, s["uri"], 2)
+    if qr_fb is not None:
+        fb.blit(qr_fb, QR_X, QR_Y)
+    else:
+        icons.qr_code(fb, QR_X, QR_Y, s["uri"], 2)
 
     icons.text2x(fb, s["name"][:8], COL, _ROW[0])
     fb.text(s["hash"][:8], COL, _ROW[1], 1)
