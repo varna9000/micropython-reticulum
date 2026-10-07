@@ -39,6 +39,28 @@ _BUSY_TIMEOUT_MS = 10000
 _WARMUP_MS = 300
 
 
+@micropython.viper
+def _transpose(src: ptr8, dst: ptr8, rot: int, xoff: int):
+    """Landscape 250x122 MONO_HLSB (1 = black) -> portrait 128x250 RAM
+    (1 = white). dst must be pre-filled 0xFF; only black pixels clear bits.
+
+    rot 90 : px = xoff + y        py = x
+    rot 270: px = xoff + 121 - y  py = 249 - x
+    Shifts only, no division: this loop runs 30 500 times per flush."""
+    for y in range(122):
+        srow = y << 5                        # 32-byte stride
+        for x in range(250):
+            if (src[srow + (x >> 3)] >> (7 - (x & 7))) & 1:
+                if rot == 90:
+                    px = xoff + y
+                    py = x
+                else:
+                    px = xoff + 121 - y
+                    py = 249 - x
+                i = (py << 4) + (px >> 3)
+                dst[i] = dst[i] & ~(1 << (7 - (px & 7)))
+
+
 class SSD1682:
     WIDTH = _W
     HEIGHT = _H
@@ -161,8 +183,35 @@ class SSD1682:
 
     # ----- public ------------------------------------------------------
     def flush(self, full=False):
+        """Push `fb` to the glass. Blocks ~1.4 s (full) or ~0.5 s (fast)."""
         if not self._began:
             self._begin()
+            full = True                          # unknown glass state
+        if self._fast_count >= self.FULL_EVERY:
+            full = True
+        self._out[:] = self._white
+        _transpose(self._buf, self._out, self._rot, self._xoff)
+        if full:
+            self._cmd(0x3C, b"\x01")             # border white
+            self._ram_area()
+            self._cmd(0x24, self._out)
+            self._ram_area()
+            self._cmd(0x26, self._out)
+            self._cmd(0x22, b"\xF7")
+            self._cmd(0x20)
+            self._wait()
+            self._fast_count = 0
+        else:
+            self._cmd(0x3C, b"\x81")             # border floating (fast mode)
+            self._ram_area()
+            self._cmd(0x24, self._out)
+            self._cmd(0x22, b"\xFF")
+            self._cmd(0x20)
+            self._wait()
+            self._ram_area()                     # make "old" plane = current
+            self._cmd(0x26, self._out)
+            self._fast_count += 1
+        self.power_off()
 
     def clear(self):
         self.fb.fill(0)
