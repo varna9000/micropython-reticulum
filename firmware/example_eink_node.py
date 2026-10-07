@@ -54,21 +54,6 @@ def connect_wifi(ssid, password, timeout=15):
     return wlan.ifconfig()[0]
 
 
-def wifi_off():
-    """Release the WiFi driver's SRAM when this node does not use WiFi.
-
-    WiFi state survives a MicroPython soft reset, and on a PSRAM-less board
-    the driver's ~30 KB comes out of the memory our heap grows into."""
-    try:
-        import network
-        for i in (network.STA_IF, network.AP_IF):
-            w = network.WLAN(i)
-            if w.active():
-                w.active(False)
-    except Exception:
-        pass
-
-
 def needs_wifi(config):
     for iface in config.get("interfaces", []):
         if iface.get("enabled", False) and iface.get("type", "") in (
@@ -165,8 +150,6 @@ def main():
 
     if needs_wifi(CONFIG):
         connect_wifi(WIFI_SSID, WIFI_PASS)
-    else:
-        wifi_off()
     gc.collect()
 
     from urns import Reticulum
