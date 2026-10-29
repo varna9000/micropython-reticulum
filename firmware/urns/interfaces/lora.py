@@ -36,6 +36,10 @@ _REASM_DUP_WINDOW = const(5)
 
 
 class LoRaInterface(Interface):
+    # A 500 B packet + 8 B code is exactly the two-frame limit (508); a larger
+    # code cannot be split, so 8 is both the default (RNode parity) and the cap.
+    DEFAULT_IFAC_SIZE = 8
+    MAX_IFAC_SIZE = 8
 
     def __init__(self, config):
         name = config.get("name", "LoRa SX1262")
@@ -360,11 +364,13 @@ class LoRaInterface(Interface):
         if not self.online or not self._modem:
             return False
 
+        data = self.ifac_sign(data)
+
+        # Measured after signing: the access code is added outside the packet
+        # budget and has to fit the two frames too.
         if len(data) > 2 * _FRAME_PAYLOAD:
             log("LoRa drop: " + str(len(data)) + "B exceeds " + str(2 * _FRAME_PAYLOAD), LOG_DEBUG)
             return False
-
-        data = self.ifac_sign(data)
 
         # RNode-compatible header: random seq in upper nibble.
         # The SX1262 driver sends all bytes faithfully — no FIFO

@@ -18,6 +18,15 @@ class Interface:
     # path. Positive raises affinity, negative lowers it; 0 is neutral.
     DEFAULT_GRAVITY = 0
 
+    # IFAC size (bytes) when the config gives none, and the most this interface
+    # can carry. A code is added outside the 500 B packet budget, so the
+    # interface's own frame limit has to absorb it: TCP has plenty of slack,
+    # a LoRa interface has exactly 8 bytes (two 254 B frames = 508). The
+    # reference defaults to 16 on TCP/UDP and 8 on RNode and never enforces
+    # it; a subclass sets MAX_IFAC_SIZE and setup_ifac clamps to it.
+    DEFAULT_IFAC_SIZE = None
+    MAX_IFAC_SIZE = None
+
     def __init__(self, name="Interface"):
         self.name = name
         self.online = False
@@ -53,11 +62,18 @@ class Interface:
         self.ifac_size = 0
 
     def setup_ifac(self, config):
-        """Derive IFAC keys from network_name/passphrase in config."""
+        """Derive IFAC keys from networkname/passphrase in config. Either one
+        alone enables the code; an empty string counts as unset, as in the
+        reference. With neither set, a code configured earlier is cleared, so
+        re-running this on a live interface after the user blanked both fields
+        turns IFAC off."""
         from .. import const
-        network_name = config.get("networkname")
-        passphrase = config.get("passphrase")
+        network_name = config.get("networkname") or None
+        passphrase = config.get("passphrase") or None
         if network_name is None and passphrase is None:
+            self.ifac_signing_key = None
+            self.ifac_key = None
+            self.ifac_size = 0
             return
 
         from ..crypto.hashes import sha256
@@ -77,7 +93,12 @@ class Interface:
             derive_from=ifac_origin_hash,
             salt=const.IFAC_SALT,
         )
-        self.ifac_size = config.get("ifac_size", const.IFAC_DEFAULT_SIZE)
+        size = config.get("ifac_size") or self.DEFAULT_IFAC_SIZE or const.IFAC_DEFAULT_SIZE
+        if self.MAX_IFAC_SIZE is not None and size > self.MAX_IFAC_SIZE:
+            log("IFAC size " + str(size) + " B exceeds what " + self.name
+                + " can carry, using " + str(self.MAX_IFAC_SIZE), LOG_ERROR)
+            size = self.MAX_IFAC_SIZE
+        self.ifac_size = size
         gc.collect()
 
         # Only need Ed25519 signing key (second 32 bytes of ifac_key)

@@ -419,7 +419,7 @@ Add `networkname` and/or `passphrase` to *any* interface to require authenticati
 }
 ```
 
-The optional `ifac_size` (default 16 bytes) controls the IFAC tag length and must match the server.
+The optional `ifac_size` is in **bytes** (the reference config takes bits: `ifac_size = 128` there is `16` here) and must match the other end. The default is 16, except on `LoRaInterface` where it is 8: a full 500 B packet plus the code has to fit the RNode two-frame limit of 508 B, so the LoRa interface also clamps a larger value to 8 and logs it. An empty string counts as unset, and calling `setup_ifac()` again with neither key clears a code set earlier.
 
 ### Transport mode (full routing — turn a node into a relay)
 
