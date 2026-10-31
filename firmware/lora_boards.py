@@ -143,6 +143,11 @@ LORA_BOARDS = {
         "reset_pin": 4,
         "dio2_rf_sw": True,
         "dio3_tcxo_millivolts": 2400,
+        # DC-DC regulator (SetRegulatorMode 0x96): LoRa RX at 125 kHz drops
+        # from ~10 mA (LDO, boosted gain) to ~5 mA per the SX1262 datasheet,
+        # and the deck listens through every light sleep. LilyGO's factory
+        # firmware already runs this module in DC-DC (RadioLib's default).
+        "use_dcdc": True,
         "spi_baudrate": 8_000_000,
     },
 
