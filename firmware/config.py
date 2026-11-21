@@ -11,6 +11,14 @@ WIFI_SSID = "YOUR_WIFI_SSID"      # <- your WiFi network name
 WIFI_PASS = "YOUR_WIFI_PASSWORD"  # <- your WiFi password
 NODE_NAME = "ESP32s3"
 
+# ---- E-ink panel (example_eink_node.py only) ----
+# Heltec Wireless Paper wiring. VEXT (panel power) is GPIO45 and ACTIVE LOW.
+# "rotate" picks the landscape orientation (90 or 270); "xoff" shifts the 122
+# visible columns inside the 128-wide RAM if the frame looks cut off on one side.
+# "miso" is any unconnected GPIO: the panel has no MISO but machine.SPI wants one.
+EINK = {"sck": 3, "mosi": 2, "cs": 4, "dc": 5, "rst": 6, "busy": 7,
+        "vext": 45, "vext_active": 0, "rotate": 270, "xoff": 0, "miso": 21}
+
 # WebREPL login password (4-9 chars) for over-the-network control at
 # ws://<node-ip>:8266/  (started by boot.py). Change it from the default.
 WEBREPL_PASSWORD = "changeme"
@@ -149,6 +157,7 @@ CONFIG = {
         #
         {
             "type": "LoRaInterface",
+            # "board": "heltec_wireless_paper",   # Heltec Wireless Paper (e-ink)
             "board": "xiao_esp32s3_sx1262",   # XIAO ESP32-S3 + Wio-SX1262 kit
             "name": "LoRa",
             "enabled": True,

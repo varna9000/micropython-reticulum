@@ -18,16 +18,21 @@ that actually has the divider wired. See lora_boards.battery_config().
 """
 
 channels = {}          # name -> (ADC, divider)
+_ctrl = {}             # name -> (Pin, active_level) — ADC enable gate, optional
 _SAMPLES = 8           # averaged per read; the ESP32-S3 ADC is noisy
 
 
-def init(adc_map, dividers=None, atten="11db"):
-    """adc_map = {"battery": 1, "light": 2}; dividers = {"battery": 2.0}.
+def init(adc_map, dividers=None, atten="11db", ctrl=None):
+    """adc_map = {"battery": 1, "light": 2}; dividers = {"battery": 2.0};
+    ctrl = {"battery": (19, 0)} -> GPIO19 must be driven to 0 while reading.
 
     Each channel stores (ADC, divider); divider defaults to 1.0 (direct connect).
+    A ctrl pin is parked at its INACTIVE level between reads so the divider
+    does not drain the battery (Heltec boards gate the divider with a FET).
     """
     from machine import ADC, Pin
     dividers = dividers or {}
+    ctrl = ctrl or {}
     for name, pin_num in adc_map.items():
         adc = ADC(Pin(pin_num))
         try:
@@ -37,6 +42,9 @@ def init(adc_map, dividers=None, atten="11db"):
         except AttributeError:
             pass   # ports without configurable attenuation (e.g. RP2040)
         channels[name] = (adc, float(dividers.get(name, 1.0)))
+        if name in ctrl:
+            cpin, active = ctrl[name]
+            _ctrl[name] = (Pin(cpin, Pin.OUT, value=1 - active), active)
 
 
 def init_battery(config):
@@ -48,14 +56,23 @@ def init_battery(config):
     from lora_boards import battery_config
     bat = battery_config(config)
     if bat:
-        init({"battery": bat["pin"]}, dividers={"battery": bat.get("divider", 1.0)})
+        ctrl = None
+        if "ctrl_pin" in bat:
+            ctrl = {"battery": (bat["ctrl_pin"], bat.get("ctrl_active", 0))}
+        init({"battery": bat["pin"]}, dividers={"battery": bat.get("divider", 1.0)},
+             ctrl=ctrl)
     return bat
 
 
-def _raw(adc):
+def _raw(adc, name=None):
+    gate = _ctrl.get(name)
+    if gate:
+        gate[0].value(gate[1])
     s = 0
     for _ in range(_SAMPLES):
         s += adc.read_u16()
+    if gate:
+        gate[0].value(1 - gate[1])
     return s // _SAMPLES
 
 
@@ -68,7 +85,7 @@ def read_voltage(name):
     if not ch:
         return None
     adc, divider = ch
-    return _raw(adc) * 3.3 / 65535 * divider
+    return _raw(adc, name) * 3.3 / 65535 * divider
 
 
 def battery_voltage():
@@ -77,7 +94,7 @@ def battery_voltage():
 
 
 def _read(name, adc, divider):
-    raw = _raw(adc)
+    raw = _raw(adc, name)
     return "{}: {:.2f}V (raw {})".format(name, raw * 3.3 / 65535 * divider, raw)
 
 

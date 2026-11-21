@@ -1,0 +1,118 @@
+"""Status screen layout for the 250x122 e-ink node (pure drawing, no I/O).
+
+    +------------------------------------------------------+
+    | [QR 98px]  NodeName (2x, max 8 chars)                 |
+    |            ab12cd34                      ((antenna))  |
+    |            RX 123  TX 45                 [envelope]   |
+    |            ▂▄▆█  -87dBm 9.5                           |
+    |            868.8MHz SF8                               |
+    |            up 1h02m                                   |
+    |            [battery]  3.95V 72%                       |
+    +------------------------------------------------------+
+
+render(fb, stats) takes a plain dict so the demo app stays thin and this file
+is testable on the host. Missing values (None) draw as '--'.
+"""
+from . import eink_icons as icons
+
+QR_X = 6
+QR_Y = 12
+COL = 112                     # text column start
+_ROW = (4, 24, 40, 56, 72, 88, 104)
+
+REDRAW_PERIOD_MS = 30_000     # idle redraw
+REDRAW_MIN_GAP_MS = 5_000     # never faster than this, even on change
+
+
+def redraw_due(first, gap, changed, period=REDRAW_PERIOD_MS, min_gap=REDRAW_MIN_GAP_MS):
+    """Redraw on the first call, every `period`, or on a change once `min_gap`
+    has passed since the last draw. `gap` is ms since the last draw (None first)."""
+    if first:
+        return True
+    if gap >= period:
+        return True
+    return changed and gap >= min_gap
+
+
+class DisplayGuard:
+    """Run display work so a dead panel cannot take the radio node down.
+
+    flush() blocks up to 10 s before raising on a stuck BUSY, and a tight heap
+    can raise MemoryError from any draw call. After MAX_FAILURES consecutive
+    failures the display is disabled (run() stops calling fn) and the node
+    keeps routing; a success resets the count."""
+    MAX_FAILURES = 3
+
+    def __init__(self):
+        self.failures = 0
+        self.enabled = True
+
+    def run(self, fn):
+        if not self.enabled:
+            return False
+        try:
+            fn()
+        except Exception as e:                       # noqa: BLE001 - must not escape
+            self.failures += 1
+            print("eink: %r (%d/%d)" % (e, self.failures, self.MAX_FAILURES))
+            if self.failures >= self.MAX_FAILURES:
+                self.enabled = False
+                print("eink: display disabled, node keeps running")
+            return False
+        self.failures = 0
+        return True
+
+
+def format_uptime(ms):
+    s = ms // 1000
+    if s < 60:
+        return "up %ds" % s
+    m = s // 60
+    h = m // 60
+    d = h // 24
+    if d:
+        return "up %dd%02dh" % (d, h % 24)
+    if h:
+        return "up %dh%02dm" % (h, m % 60)
+    return "up %dm" % m
+
+
+def battery_percent(v):
+    """LiPo 3.30 V -> 0 %, 4.20 V -> 100 %, linear, clamped. None -> None."""
+    if v is None:
+        return None
+    p = int((v - 3.3) * 100 / 0.9 + 0.5)
+    return max(0, min(100, p))
+
+
+def _num(v, fmt):
+    return "--" if v is None else fmt % v
+
+
+def render(fb, s, qr_fb=None):
+    """Paint the whole screen. Pass qr_fb (from eink_icons.qr_framebuffer) to
+    blit a QR encoded at boot instead of encoding on every redraw."""
+    fb.fill(0)
+    fb.rect(0, 0, 250, 122, 1)
+    if qr_fb is not None:
+        fb.blit(qr_fb, QR_X, QR_Y)
+    else:
+        icons.qr_code(fb, QR_X, QR_Y, s["uri"], 2)
+
+    icons.text2x(fb, s["name"][:8], COL, _ROW[0])
+    fb.text(s["hash"][:8], COL, _ROW[1], 1)
+    icons.icon(fb, "antenna", 232, _ROW[1] - 4)
+
+    fb.text("RX %d TX %d" % (s["rx"], s["tx"]), COL, _ROW[2], 1)
+    if s.get("msgs"):
+        icons.icon(fb, "envelope", 232, _ROW[2] - 4)
+
+    icons.rssi_bars(fb, COL, _ROW[3] - 3, s["rssi"])
+    fb.text(_num(s["rssi"], "%ddBm") + " " + _num(s["snr"], "%.1f"), COL + 28, _ROW[3], 1)
+
+    fb.text("%.1fMHz SF%d" % (s["freq_khz"] / 1000, s["sf"]), COL, _ROW[4], 1)
+    fb.text(format_uptime(s["uptime_ms"]), COL, _ROW[5], 1)
+
+    pct = battery_percent(s["vbat"])
+    icons.battery(fb, COL, _ROW[6] - 1, pct)
+    fb.text(_num(s["vbat"], "%.2fV") + " " + _num(pct, "%d%%"), COL + 28, _ROW[6], 1)
