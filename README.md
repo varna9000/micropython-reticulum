@@ -246,12 +246,12 @@ Reticulum 1.6 adds proof-of-work **stamps**. A 1.6.1 hub verifies them and 1.6.2
 
 **What µReticulum implements**
 
-- **Own announces**: an 18-byte extension appended inside the signed app_data. The stamp is generated once per destination in the background and stored at `<storage>/stamps/<dest_hex>.dstamp` (reference-compatible msgpack). Announces go out unstamped until it exists; one announce is re-sent when it becomes ready.
+- **Own announces**: an 18-byte extension appended inside the signed app_data. The stamp is generated once per destination in the background and stored at `<storage>/stamps/<dest_hex>.dstamp` (reference-compatible msgpack). Making a stamp takes a few minutes, so until it exists the node keeps announcing without one (hubs that enforce stamps drop those). When it is ready the node sends one extra announce with the stamp instead of waiting for the next scheduled one; after that every announce carries it, also after a reboot.
 - **Inbound announces**: stamped announces are validated at cost 23.5 (`announce_stamp_required`).
 - **Link requests**: when a destination announces a link cost, the link request carries a key stamp. `max_link_stamp_cost` caps what the board will search (default 19 with the native module, 12 without); above it the link fails at once.
 - **Path requests**: stamped at cost 15.8 (`stamp_path_requests`); after `pr_stamp_timeout` (30 s) the unstamped form is sent.
 - **LXMF**: proof-of-work message stamps and tickets. Tickets are preferred; PoW is only the fallback.
-- **Not implemented**: stamp enforcement on inbound path requests.
+- **Not implemented**: rejecting unstamped path requests. A leaf only answers requests for its own addresses, and a relay passes stamps on unchanged (marking unstamped ones), so an enforcing hub further along can still check them; rejecting them here would cut off peers that don't stamp yet. TODO: add it later as an opt-in setting for relays (like the reference's per-interface path-request cost), once RNS 1.6.2 starts enforcing.
 
 **Speed.** Stamping needs the native module (`lib/ed25519_fast_xtensawin.mpy` / `ed25519_iram.mpy`, which provide `hashcash` and `x25519_stamp2`); without it, stamp generation is effectively off. On an ESP32-S3 the SHA hardware accelerator is used automatically (`stamps_hw_sha`, default on), about 4-5x faster than software: measured on a T-Deck Pro, ~260k hashes/s hardware vs ~60k software. It is used when WiFi is fully off or joined and settled, avoided while WiFi is joining or the AP interface is up, and every hardware result is re-verified in software.
 
