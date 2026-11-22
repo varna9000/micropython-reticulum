@@ -156,27 +156,6 @@ def test_forward_and_backward_clock_jumps(r):
     assert a < b
 
 
-@_with_rig(rtc=True)
-def test_legacy_horizon_hours_in_the_future_converges_to_real_time(r):
-    os.makedirs(r.tmp + "/emitted")
-    ahead = T0 + 14040                                   # the test board: ~3.9 h ahead
-    with r.real_open(r.tmp + "/emitted/" + H.hex(), "wb") as f:
-        f.write(ahead.to_bytes(5, "big"))                # legacy 5-byte horizon
-    r.boot()
-    now = T0
-    emitted = []
-    for i in range(8):                                   # hourly announces
-        t = r.emit(now)
-        emitted.append(t)
-        r.boot()
-        now += 3600
-    assert emitted[0] == ahead                           # strictly above everything stored
-    assert emitted == sorted(set(emitted))
-    for i, t in enumerate(emitted):                      # never further ahead than it started (+1 per announce)
-        assert t <= max(ahead + i, T0 + 3600 * i), (i, t)
-    assert emitted[-1] == now - 3600                     # back on real time, no permanent offset
-
-
 def _check_random(seed):
     rnd = random.Random(seed)
     r = Rig(rtc=rnd.random() < 0.6)

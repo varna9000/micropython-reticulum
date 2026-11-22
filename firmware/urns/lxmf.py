@@ -84,6 +84,7 @@ class LXMessage:
     REJECTED    = 0xFD     # the receiver refused the transfer: final
     CANCELLED   = 0xFE
     FAILED      = 0xFF
+    FINAL       = (DELIVERED, REJECTED, CANCELLED, FAILED)
 
     # Delivery methods
     UNKNOWN       = 0x00
@@ -174,12 +175,11 @@ class LXMessage:
         self.sent_on_path = False
         self.sent_on_slow_path = False
         self.awaiting_path = False
-        self.max_delivery_attempts = None
+        self.max_delivery_attempts = LXMRouter.MAX_DELIVERY_ATTEMPTS
         self.next_delivery_attempt = None   # None: never scheduled (always due)
         self.receipt_timeout = None
         self.path_request_retried = False
         self.representation = LXMessage.UNKNOWN
-        self.concluded_callback = None
         self._delivery_link = None
         self.resource_representation = None
         self._pow_pending = False
@@ -291,28 +291,26 @@ class LXMessage:
         running; None when over budget (the message then goes out unstamped)."""
         import uasyncio as asyncio
         from . import stamps
-        stamps.interactive_enter()
-        try:
-            target = stamps.target_from_fp(stamps.cost_to_fp(cost))
-            limit = (1 << int(cost)) * 24 + 4096
-            duty = stamps.Duty(stamps.DUTY_INTERACTIVE, stamps.GRACE_MS)
-            # Budget on the tick source: a wall-clock sync during the search must
-            # neither end it early nor extend it.
-            t0 = const.ticks_ms()
-            tried = 0
-            while tried < limit and const.ticks_diff(const.ticks_ms(), t0) < max_s * 1000:
-                duty.begin()
-                stamp, n = stamps.find_hashcash(self.message_id, target, 32)
-                tried += max(n, 1)
-                if stamp is not None:
-                    log("LXMF stamp (cost " + str(cost) + ") found after " + str(tried) + " tries", LOG_VERBOSE)
-                    return stamp
-                await asyncio.sleep_ms(duty.rest_ms())
-            log("LXMF stamp not found within budget, sending unstamped", LOG_WARNING)
-        except Exception as e:
-            log("LXMF stamp error: " + str(e), LOG_ERROR)
-        finally:
-            stamps.interactive_exit()
+        with stamps.interactive:
+            try:
+                target = stamps.target_from_fp(stamps.cost_to_fp(cost))
+                limit = (1 << int(cost)) * 24 + 4096
+                duty = stamps.Duty(stamps.DUTY_INTERACTIVE, stamps.GRACE_MS)
+                # Budget on the tick source: a wall-clock sync during the search must
+                # neither end it early nor extend it.
+                t0 = const.ticks_ms()
+                tried = 0
+                while tried < limit and const.ticks_diff(const.ticks_ms(), t0) < max_s * 1000:
+                    duty.begin()
+                    stamp, n = stamps.find_hashcash(self.message_id, target, 32)
+                    tried += max(n, 1)
+                    if stamp is not None:
+                        log("LXMF stamp (cost " + str(cost) + ") found after " + str(tried) + " tries", LOG_VERBOSE)
+                        return stamp
+                    await asyncio.sleep_ms(duty.rest_ms())
+                log("LXMF stamp not found within budget, sending unstamped", LOG_WARNING)
+            except Exception as e:
+                log("LXMF stamp error: " + str(e), LOG_ERROR)
         return None
 
     def _pow_deferrable(self, cost):
@@ -450,8 +448,7 @@ class LXMessage:
                     if receipt.status == PacketReceipt.DELIVERED:
                         self._mark_delivered(receipt)
                 else:
-                    link.teardown()
-                    self.state = LXMessage.OUTBOUND
+                    self._link_packet_timed_out()
             else:
                 from .resource import Resource
                 res = Resource(link, self.packed, is_response=False)
@@ -489,16 +486,21 @@ class LXMessage:
         while self._receipts:
             self._drop_receipt(self._receipts.pop(), Transport)
 
-    def _mark_sent(self):
-        if self._sent_fired:
-            return
-        self._sent_fired = True
-        for cb in (self._sent_callback, self._router._sent_cb if self._router else None):
+    def _notify(self, own, rattr):
+        """Call the per-message callback, then the router-wide one (rattr)."""
+        r = self._router
+        for cb in (own, r and getattr(r, rattr)):
             if cb is not None:
                 try:
                     cb(self)
                 except Exception as e:
-                    log("LXMF sent callback error: " + str(e), LOG_ERROR)
+                    log("LXMF callback error: " + str(e), LOG_ERROR)
+
+    def _mark_sent(self):
+        if self._sent_fired:
+            return
+        self._sent_fired = True
+        self._notify(self._sent_callback, "_sent_cb")
 
     def _mark_delivered(self, receipt=None):
         if self.state == LXMessage.DELIVERED:
@@ -514,17 +516,12 @@ class LXMessage:
                 except Exception:
                     pass
         log("LXMF delivery proof received for " + self.destination_hash.hex()[:8], LOG_NOTICE)
-        if self.concluded_callback is not None:
+        if self._router is not None:
             try:
-                self.concluded_callback(self)
+                self._router.outbound_concluded(self)
             except Exception as e:
-                log("LXMF concluded callback error: " + str(e), LOG_ERROR)
-        for cb in (self._delivery_callback, self._router._delivered_cb if self._router else None):
-            if cb is not None:
-                try:
-                    cb(self)
-                except Exception as e:
-                    log("Delivery callback error: " + str(e), LOG_ERROR)
+                log("LXMF concluded error: " + str(e), LOG_ERROR)
+        self._notify(self._delivery_callback, "_delivered_cb")
 
     def _resource_concluded(self, resource):
         from .resource import COMPLETE, REJECTED
@@ -532,13 +529,10 @@ class LXMessage:
             self._mark_delivered()
         elif resource.status == REJECTED:
             self.state = LXMessage.REJECTED
-        elif self.state != LXMessage.CANCELLED:
-            link = self._delivery_link or getattr(resource, "link", None)
-            if link is not None:
-                link.teardown()
-            self.state = LXMessage.OUTBOUND
+        else:
+            self._link_packet_timed_out()
 
-    def _link_packet_timed_out(self, receipt):
+    def _link_packet_timed_out(self, receipt=None):
         if self.state != LXMessage.CANCELLED:
             if self._delivery_link is not None:
                 self._delivery_link.teardown()
@@ -686,7 +680,6 @@ class LXMRouter:
         self.pending_outbound = []
         self.direct_links = {}          # dest_hash -> OutgoingLink we opened
         self.path_request_times = {}    # dest_hash -> last debounced request
-        self._slow_cache = {}
         self._processing = False
         self._again = False
         self._job_task = None
@@ -724,9 +717,6 @@ class LXMRouter:
                 m.next_delivery_attempt = _sh(m.next_delivery_attempt)
         for d in self.path_request_times:
             self.path_request_times[d] = _sh(self.path_request_times[d])
-        for d in list(self._slow_cache):
-            v = self._slow_cache[d]
-            self._slow_cache[d] = (v[0], _sh(v[1]))
         for k in self.delivered_ids:
             self.delivered_ids[k] = _sh(self.delivered_ids[k])
         for p in self.peers.values():
@@ -905,34 +895,24 @@ class LXMRouter:
     # const.py uses for its table sizes. DIRECT links are NOT held idle (the
     # reference keeps them 10 min): see _release_link().
     MAX_PENDING_OUTBOUND   = 8 if const._BIG_RAM else 4
-    _SLOW_CACHE_MAX        = 16      # reference 256
     _PATH_REQ_TIMES_MAX    = 16      # unbounded in the reference
 
     # -- timing helpers ------------------------------------------------
 
     def medium_path_timeout(self):
-        try:
-            return Transport.medium_path_timeout()
-        except Exception:
-            return 0
+        return Transport.medium_path_timeout()
 
     def destination_round_trip(self, destination_hash):
         if not Transport.has_path(destination_hash):
             return self.medium_path_timeout()
-        try:
-            mtu_time = Transport.first_hop_timeout(destination_hash) - const.DEFAULT_PER_HOP_TIMEOUT
-            return 2 * max(mtu_time, 0) + const.DEFAULT_PER_HOP_TIMEOUT
-        except Exception:
-            return 0
+        mtu_time = Transport.first_hop_timeout(destination_hash) - const.DEFAULT_PER_HOP_TIMEOUT
+        return 2 * max(mtu_time, 0) + const.DEFAULT_PER_HOP_TIMEOUT
 
     def path_request_wait(self):
         return max(LXMRouter.PATH_REQUEST_WAIT, self.medium_path_timeout())
 
     def slow_interface_online(self):
-        try:
-            return Transport.slow_interface_online()
-        except Exception:
-            return False
+        return Transport.slow_interface_online()
 
     def request_path(self, destination_hash):
         """Debounced path request (reference LXMRouter.request_path): no second
@@ -949,8 +929,6 @@ class LXMRouter:
                 + str(int(window)) + " s", LOG_DEBUG)
             return False
         times = self.path_request_times
-        for d in [d for d in times if now - times[d] >= window]:
-            del times[d]
         if len(times) >= LXMRouter._PATH_REQ_TIMES_MAX:
             del times[min(times, key=lambda k: times[k])]
         times[destination_hash] = now
@@ -960,11 +938,6 @@ class LXMRouter:
     def path_request_pending(self, destination_hash):
         t = self.path_request_times.get(destination_hash)
         return t is not None and time.time() - t < self.path_request_wait()
-
-    def attempt_limit(self, lxm):
-        if lxm.max_delivery_attempts is None:
-            return LXMRouter.MAX_DELIVERY_ATTEMPTS
-        return lxm.max_delivery_attempts
 
     def attempt_due(self, lxm, destination_hash):
         if lxm.next_delivery_attempt is None:
@@ -1027,15 +1000,7 @@ class LXMRouter:
         return 0
 
     def slow_path(self, destination_hash):
-        now = time.time()
-        cached = self._slow_cache.get(destination_hash)
-        if cached and now - cached[1] < LXMRouter.PROCESSING_INTERVAL:
-            return cached[0]
-        if len(self._slow_cache) >= LXMRouter._SLOW_CACHE_MAX:
-            self._slow_cache = {}
-        slow = self.destination_round_trip(destination_hash) > LXMRouter.DELIVERY_RETRY_WAIT
-        self._slow_cache[destination_hash] = (slow, now)
-        return slow
+        return self.destination_round_trip(destination_hash) > LXMRouter.DELIVERY_RETRY_WAIT
 
     def slow_path_in_flight(self, lxm):
         if not lxm.sent_on_slow_path:
@@ -1055,8 +1020,7 @@ class LXMRouter:
         for other in self.pending_outbound:
             if other is lxm:
                 ahead = False
-            elif other.state in (LXMessage.DELIVERED, LXMessage.FAILED,
-                                 LXMessage.CANCELLED, LXMessage.REJECTED):
+            elif other.state in LXMessage.FINAL:
                 continue
             elif ahead and other.destination_hash == target_hash:
                 return True
@@ -1068,7 +1032,7 @@ class LXMRouter:
         """A message was delivered: leave the queue now (not at the next 4 s tick),
         free its DIRECT link when nothing else needs it, and let whatever a slow
         path was holding up go."""
-        if lxm.state == LXMessage.DELIVERED and self._dequeue(lxm):
+        if self._dequeue(lxm):
             Transport.mark_in_use(lxm.destination_hash)
             self._later(0, lambda: self._release_link(lxm.destination_hash))
         if lxm.sent_on_slow_path:
@@ -1139,12 +1103,7 @@ class LXMRouter:
             # in event-loop slices; the message is skipped by processing until
             # the stamp is attached.
             msg._pow_pending = True
-            coro = self._pow_task(msg)
-            try:
-                import uasyncio as asyncio
-                asyncio.create_task(coro)
-            except Exception:
-                coro.close()
+            if self._spawn(self._pow_task(msg)) is None:
                 msg._pow_pending = False
                 msg.finish_pow(msg._pow_stamp(msg.stamp_cost))   # no loop: inline
 
@@ -1168,7 +1127,6 @@ class LXMRouter:
                 + msg.destination_hash.hex()[:8] + " rejected", LOG_WARNING)
             return None
         msg.state = LXMessage.OUTBOUND
-        msg.concluded_callback = self.outbound_concluded
         msg._router = self
         h = msg.destination_hash
 
@@ -1204,7 +1162,7 @@ class LXMRouter:
         for m in list(self.pending_outbound):
             if m.state == LXMessage.DELIVERED:
                 self._dequeue(m)
-            elif m.state in (LXMessage.FAILED, LXMessage.CANCELLED, LXMessage.REJECTED):
+            elif m.state in LXMessage.FINAL:
                 self._process_one(m)
 
     def fail_message(self, msg):
@@ -1217,12 +1175,7 @@ class LXMRouter:
         self._release_link(msg.destination_hash)
 
     def _exec_failed(self, msg):
-        for cb in (msg._failed_callback, self._failed_cb):
-            if cb is not None:
-                try:
-                    cb(msg)
-                except Exception as e:
-                    log("LXMF failed callback error: " + str(e), LOG_ERROR)
+        msg._notify(msg._failed_callback, "_failed_cb")
 
     def cancel_outbound(self, message_id):
         """Cancel a queued message by its message_id/hash. True if found."""
@@ -1245,15 +1198,18 @@ class LXMRouter:
                 return msg.progress
         return None
 
-    def _ensure_job(self):
-        if self._job_task is not None:
-            return
-        coro = self._job_loop()
+    @staticmethod
+    def _spawn(coro):
+        """Start a task; None (coro closed) when no loop runs (host tests)."""
         try:
             import uasyncio as asyncio
-            self._job_task = asyncio.create_task(coro)
+            return asyncio.create_task(coro)
         except Exception:
-            coro.close()      # no loop (host tests): the caller drives process_outbound()
+            coro.close()
+
+    def _ensure_job(self):
+        if self._job_task is None:
+            self._job_task = self._spawn(self._job_loop())    # no loop: the caller drives process_outbound()
 
     async def _job_loop(self):
         import uasyncio as asyncio
@@ -1275,12 +1231,7 @@ class LXMRouter:
                 fn()
             except Exception as e:
                 log("LXMF deferred call error: " + str(e), LOG_ERROR)
-        coro = run()
-        try:
-            import uasyncio as asyncio
-            asyncio.create_task(coro)
-        except Exception:
-            coro.close()
+        if self._spawn(run()) is None:
             fn()
 
     def process_outbound(self):
@@ -1312,37 +1263,28 @@ class LXMRouter:
         if msg not in self.pending_outbound:
             return          # already reaped (delivered promptly, or a re-entrant pass)
         st = msg.state
-        if st == LXMessage.DELIVERED:
-            log("Delivery has occurred for LXMF message to " + msg.destination_hash.hex()[:8]
-                + ", removing from outbound queue", LOG_DEBUG)
+        if st in LXMessage.FINAL:
             self._dequeue(msg)
-            Transport.mark_in_use(msg.destination_hash)
-            self._release_link(msg.destination_hash)
-            return
-        if st == LXMessage.CANCELLED or st == LXMessage.FAILED:
-            self._dequeue(msg)
-            self._exec_failed(msg)
-            self._release_link(msg.destination_hash)
-            return
-        if st == LXMessage.REJECTED:
-            log("Receiver rejected LXMF message to " + msg.destination_hash.hex()[:8], LOG_NOTICE)
-            self._dequeue(msg)
-            self._exec_failed(msg)
+            if st == LXMessage.DELIVERED:
+                Transport.mark_in_use(msg.destination_hash)
+            else:
+                if st == LXMessage.REJECTED:
+                    log("Receiver rejected LXMF message to " + msg.destination_hash.hex()[:8], LOG_NOTICE)
+                self._exec_failed(msg)
             self._release_link(msg.destination_hash)
             return
         if msg._pow_pending:
             return          # proof-of-work stamp still being searched
 
         h = msg.destination_hash
-        if msg.progress is None or msg.progress < 0.01:
-            msg.progress = 0.01
+        msg.progress = max(msg.progress, 0.01)
 
         if msg._destination is None:
             # PORT: peer identity not known yet. Each due attempt is a (debounced)
             # path request -- the answer carries the identity -- counted like
             # the reference's pathless path requests.
             if not self._resolve(msg):
-                if msg.delivery_attempts <= self.attempt_limit(msg):
+                if msg.delivery_attempts <= msg.max_delivery_attempts:
                     if self.attempt_due(msg, h):
                         msg.awaiting_path = False
                         msg.delivery_attempts += 1
@@ -1356,7 +1298,13 @@ class LXMRouter:
             if msg._pow_pending:
                 return
 
-        if msg.method == LXMessage.OPPORTUNISTIC:
+        if self.slow_path_held(msg, h):
+            return
+        if msg.delivery_attempts > msg.max_delivery_attempts:
+            if self.attempt_due(msg, h):
+                log("Max delivery attempts reached for LXMF message to " + h.hex()[:8], LOG_DEBUG)
+                self.fail_message(msg)
+        elif msg.method == LXMessage.OPPORTUNISTIC:
             self._process_opportunistic(msg, h)
         elif msg.method == LXMessage.DIRECT:
             self._process_direct(msg, h)
@@ -1365,70 +1313,61 @@ class LXMRouter:
             self.fail_message(msg)
 
     def _process_opportunistic(self, msg, h):
-        held = self.slow_path_held(msg, h)
-        if not held and msg.delivery_attempts <= self.attempt_limit(msg):
-            if not self.attempt_due(msg, h):
+        if not self.attempt_due(msg, h):
+            return
+        path_known = Transport.has_path(h)
+        msg.awaiting_path = False
+        if msg.delivery_attempts >= LXMRouter.MAX_PATHLESS_TRIES and not path_known:
+            log("Requesting path to " + h.hex()[:8] + " after " + str(msg.delivery_attempts) + " pathless tries", LOG_DEBUG)
+            msg.delivery_attempts += 1
+            msg.sent_on_path = False
+            self.request_path(h)
+            self.schedule_attempt(msg, h, path_request=True)
+            msg.progress = 0.01
+        elif msg.delivery_attempts == LXMRouter.MAX_PATHLESS_TRIES + 1 and path_known and msg.sent_on_path:
+            # Only rediscover if the previous attempt was actually sent from same path
+            msg.delivery_attempts += 1
+            msg.sent_on_path = False
+            msg.awaiting_path = True
+            if not self.path_request_pending(h):
+                log("No proof from " + h.hex()[:8] + ", rediscovering path", LOG_DEBUG)
+                self.path_request_times[h] = time.time()
+                Transport.expire_path(h)
+                self._later(0.5, lambda: Transport.request_path(h))
+            msg.next_delivery_attempt = time.time() + self.path_request_wait()
+            msg.progress = 0.01
+        else:
+            prev_on_path = msg.sent_on_path
+            msg.delivery_attempts += 1
+            msg.sent_on_path = path_known
+            msg.sent_on_slow_path = self.slow_path(h)
+            self.schedule_attempt(msg, h)
+            log("Opportunistic delivery attempt " + str(msg.delivery_attempts) + " to " + h.hex()[:8], LOG_DEBUG)
+            try:
+                sent = msg.send()
+            except Exception as e:
+                log("Error while sending LXMF message: " + str(e), LOG_ERROR)
+                self.fail_message(msg)
                 return
-            path_known = Transport.has_path(h)
-            msg.awaiting_path = False
-            if msg.delivery_attempts >= LXMRouter.MAX_PATHLESS_TRIES and not path_known:
-                log("Requesting path to " + h.hex()[:8] + " after " + str(msg.delivery_attempts) + " pathless tries", LOG_DEBUG)
-                msg.delivery_attempts += 1
-                msg.sent_on_path = False
-                self.request_path(h)
-                self.schedule_attempt(msg, h, path_request=True)
-                msg.progress = 0.01
-            elif msg.delivery_attempts == LXMRouter.MAX_PATHLESS_TRIES + 1 and path_known and msg.sent_on_path:
-                # Only rediscover if the previous attempt was actually sent from same path
-                msg.delivery_attempts += 1
-                msg.sent_on_path = False
-                msg.awaiting_path = True
-                if self.path_request_pending(h):
-                    log("Opportunistic delivery to " + h.hex()[:8] + " still unsuccessful after "
-                        + str(msg.delivery_attempts) + " attempts, path already being rediscovered", LOG_DEBUG)
-                else:
-                    log("Opportunistic delivery to " + h.hex()[:8] + " still unsuccessful after "
-                        + str(msg.delivery_attempts) + " attempts, rediscovering path", LOG_DEBUG)
-                    self.path_request_times[h] = time.time()
-                    Transport.expire_path(h)
-                    self._later(0.5, lambda: Transport.request_path(h))
-                msg.next_delivery_attempt = time.time() + self.path_request_wait()
-                msg.progress = 0.01
-            else:
-                prev_on_path = msg.sent_on_path
-                msg.delivery_attempts += 1
-                msg.sent_on_path = path_known
-                msg.sent_on_slow_path = self.slow_path(h)
-                self.schedule_attempt(msg, h)
-                log("Opportunistic delivery attempt " + str(msg.delivery_attempts) + " to " + h.hex()[:8], LOG_DEBUG)
-                try:
-                    sent = msg.send()
-                except Exception as e:
-                    log("Error while sending LXMF message: " + str(e), LOG_ERROR)
+            if sent is False:
+                # PORT (the reference counts the attempt and calls it SENT even when
+                # Packet.send() transmitted nothing): a send that never left the node
+                # is not an attempt. Undo the bookkeeping so it neither burns one of the
+                # attempts nor counts as "sent on this path" (which would trigger route
+                # rediscovery), and try again at the next tick -- i.e. as soon as an
+                # interface is back. Bounded: MAX_UNSENT_TICKS consecutive failures fail it.
+                msg.delivery_attempts -= 1
+                msg.sent_on_path = prev_on_path
+                msg.sent_on_slow_path = False
+                msg.next_delivery_attempt = None
+                msg.receipt_timeout = None
+                msg.unsent_ticks += 1
+                if msg.unsent_ticks >= LXMRouter.MAX_UNSENT_TICKS:
+                    log("LXMF message to " + h.hex()[:8] + " could not be transmitted for "
+                        + str(msg.unsent_ticks) + " ticks, giving up", LOG_NOTICE)
                     self.fail_message(msg)
-                    return
-                if sent is False:
-                    # PORT (the reference counts the attempt and calls it SENT even when
-                    # Packet.send() transmitted nothing): a send that never left the node
-                    # is not an attempt. Undo the bookkeeping so it neither burns one of the
-                    # attempts nor counts as "sent on this path" (which would trigger route
-                    # rediscovery), and try again at the next tick -- i.e. as soon as an
-                    # interface is back. Bounded: MAX_UNSENT_TICKS consecutive failures fail it.
-                    msg.delivery_attempts -= 1
-                    msg.sent_on_path = prev_on_path
-                    msg.sent_on_slow_path = False
-                    msg.next_delivery_attempt = None
-                    msg.receipt_timeout = None
-                    msg.unsent_ticks += 1
-                    if msg.unsent_ticks >= LXMRouter.MAX_UNSENT_TICKS:
-                        log("LXMF message to " + h.hex()[:8] + " could not be transmitted for "
-                            + str(msg.unsent_ticks) + " ticks, giving up", LOG_NOTICE)
-                        self.fail_message(msg)
-                else:
-                    msg.unsent_ticks = 0
-        elif not held and self.attempt_due(msg, h):
-            log("Max delivery attempts reached for opportunistic LXMF message to " + h.hex()[:8], LOG_DEBUG)
-            self.fail_message(msg)
+            else:
+                msg.unsent_ticks = 0
 
     def _new_link(self, msg, h):
         from .link import OutgoingLink
@@ -1451,72 +1390,59 @@ class LXMRouter:
         return link
 
     def _process_direct(self, msg, h):
-        held = self.slow_path_held(msg, h)
-        if not held and msg.delivery_attempts <= self.attempt_limit(msg):
-            link = self.direct_links.get(h)
-            if link is not None:
-                if link.status == 0x01:              # ACTIVE
-                    if msg.progress is None or msg.progress < 0.05:
-                        msg.progress = 0.05
-                    if msg.state == LXMessage.OUTBOUND:
-                        log("Starting transfer of LXMF message to " + h.hex()[:8] + " on link " + link.link_id.hex()[:8], LOG_DEBUG)
-                        msg.sent_on_slow_path = self.slow_path(h)
-                        msg._delivery_link = link
-                        try:
-                            msg.send()
-                        except Exception as e:
-                            log("Error while sending LXMF message: " + str(e), LOG_ERROR)
-                            self.fail_message(msg)
-                    elif msg.representation == LXMessage.RESOURCE:
-                        res = msg.resource_representation
-                        if res is not None:
-                            try:
-                                msg.progress = 0.10 + res.get_progress() * 0.90
-                            except Exception:
-                                pass
-                elif link.status == 0x02:            # CLOSED
-                    if getattr(link, "close_reason", None) == "stamp":
-                        # The link-request stamp search failed or was refused as
-                        # too expensive: another attempt would repeat it.
-                        log("LXMF DIRECT link stamp failed, not retrying", LOG_ERROR)
-                        self.direct_links.pop(h, None)
+        link = self.direct_links.get(h)
+        if link is not None:
+            if link.status == 0x01:              # ACTIVE
+                msg.progress = max(msg.progress, 0.05)
+                if msg.state == LXMessage.OUTBOUND:
+                    msg.sent_on_slow_path = self.slow_path(h)
+                    msg._delivery_link = link
+                    try:
+                        msg.send()
+                    except Exception as e:
+                        log("Error while sending LXMF message: " + str(e), LOG_ERROR)
                         self.fail_message(msg)
-                        return
-                    if link.activated_at is not None:
-                        log("The link to " + h.hex()[:8] + " was closed unexpectedly, retrying path request...", LOG_DEBUG)
-                        self.request_path(h)
-                    elif not msg.path_request_retried:
-                        log("The link to " + h.hex()[:8] + " was never activated, retrying path request...", LOG_DEBUG)
-                        self.request_path(h)
-                        msg.path_request_retried = True
-                    else:
-                        log("The link to " + h.hex()[:8] + " was never activated", LOG_DEBUG)
-                    msg._delivery_link = None
+                elif msg.representation == LXMessage.RESOURCE:
+                    res = msg.resource_representation
+                    if res is not None:
+                        try:
+                            msg.progress = 0.10 + res.get_progress() * 0.90
+                        except Exception:
+                            pass
+            elif link.status == 0x02:            # CLOSED
+                if link.close_reason == "stamp":
+                    # The link-request stamp search failed or was refused as
+                    # too expensive: another attempt would repeat it.
+                    log("LXMF DIRECT link stamp failed, not retrying", LOG_ERROR)
                     self.direct_links.pop(h, None)
-                    if msg.delivery_attempts + 1 < self.attempt_limit(msg):
-                        self.schedule_attempt(msg, h)
-                # else: pending -- wait for it to become active or close
-            elif self.attempt_due(msg, h):
-                msg.delivery_attempts += 1
-                msg.awaiting_path = False
-                self.schedule_attempt(msg, h)
-                if msg.delivery_attempts < self.attempt_limit(msg):
-                    if Transport.has_path(h):
-                        log("Establishing link to " + h.hex()[:8] + " for delivery attempt " + str(msg.delivery_attempts), LOG_DEBUG)
-                        self._new_link(msg, h)
-                        msg.progress = 0.03
-                    else:
-                        log("No path known for delivery attempt " + str(msg.delivery_attempts) + " to " + h.hex()[:8]
-                            + ". Requesting path...", LOG_DEBUG)
-                        self.request_path(h)
-                        self.schedule_attempt(msg, h, path_request=True)
-                        msg.progress = 0.01
-                else:
-                    log("Max delivery attempts reached for direct LXMF message to " + h.hex()[:8], LOG_DEBUG)
                     self.fail_message(msg)
-        elif not held and self.attempt_due(msg, h):
-            log("Max delivery attempts reached for direct LXMF message to " + h.hex()[:8], LOG_DEBUG)
-            self.fail_message(msg)
+                    return
+                if link.activated_at is not None or not msg.path_request_retried:
+                    log("LXMF link to " + h.hex()[:8] + " closed, retrying path request", LOG_DEBUG)
+                    self.request_path(h)
+                    if link.activated_at is None:
+                        msg.path_request_retried = True
+                msg._delivery_link = None
+                self.direct_links.pop(h, None)
+                if msg.delivery_attempts + 1 < msg.max_delivery_attempts:
+                    self.schedule_attempt(msg, h)
+            # else: pending -- wait for it to become active or close
+        elif self.attempt_due(msg, h):
+            msg.delivery_attempts += 1
+            msg.awaiting_path = False
+            self.schedule_attempt(msg, h)
+            if msg.delivery_attempts < msg.max_delivery_attempts:
+                if Transport.has_path(h):
+                    log("Establishing link to " + h.hex()[:8] + " for delivery attempt " + str(msg.delivery_attempts), LOG_DEBUG)
+                    self._new_link(msg, h)
+                    msg.progress = 0.03
+                else:
+                    self.request_path(h)
+                    self.schedule_attempt(msg, h, path_request=True)
+                    msg.progress = 0.01
+            else:
+                log("Max delivery attempts reached for direct LXMF message to " + h.hex()[:8], LOG_DEBUG)
+                self.fail_message(msg)
 
     def _find_active_link_for(self, destination_hash):
         """An ACTIVE OutgoingLink we opened to this LXMF peer, or None. Only
@@ -1558,13 +1484,12 @@ class LXMRouter:
             self.process_outbound()
 
     def _link_resource_concluded(self, resource):
-        msg = getattr(resource, "lxm", None)
-        if msg is not None and getattr(resource, "is_initiator", False):
-            msg._resource_concluded(resource)
-        elif not getattr(resource, "is_initiator", False):
+        if not resource.is_initiator:
             # A Resource the PEER sent back over a link we opened (the resource
             # layer already proved it): hand it to the delivery path.
             self._handle_resource_concluded(resource)
+        elif getattr(resource, "lxm", None) is not None:
+            resource.lxm._resource_concluded(resource)
 
     def _own_link_packet(self, link, plaintext, packet):
         """An LXMF packet the peer sent over a link WE opened: deliver it like
@@ -1588,8 +1513,7 @@ class LXMRouter:
             return
         for m in self.pending_outbound:
             if (m.destination_hash == h and m.method == LXMessage.DIRECT
-                    and m.state not in (LXMessage.DELIVERED, LXMessage.FAILED,
-                                        LXMessage.CANCELLED, LXMessage.REJECTED)):
+                    and m.state not in LXMessage.FINAL):
                 return
         del self.direct_links[h]
         if link.status != 0x02:
@@ -1695,147 +1619,55 @@ class LXMRouter:
         link.resource_concluded_callback = self._handle_resource_concluded
         if self._progress_callback:
             link.resource_started_callback = self._on_resource_started
-        log("LXMF link established: " + link.link_id.hex()[:8], LOG_DEBUG)
 
     def _on_resource_started(self, resource):
         """Wire the router's progress callback into a just-accepted resource."""
         resource.progress_callback = self._progress_callback
 
     def _link_packet_received(self, plaintext, packet):
-        """Handle single-packet LXMF message received on a link (CTX_NONE)."""
-        try:
-            # DIRECT delivery sends full packed: dest_hash + source_hash + sig + payload
-            # (unlike OPPORTUNISTIC which strips dest_hash)
-            lxmf_data = plaintext
-            log("LXMF link packet: " + str(len(lxmf_data)) + "B", LOG_DEBUG)
-
-            message = LXMessage.unpack_from_bytes(lxmf_data)
-            message.transport_encrypted = True
-            message.transport_encryption = "Curve25519"
-            self.remember_ticket(message)
-
-            if message.signature_validated:
-                log("LXMF link message from " + message.source_hash.hex()[:8] +
-                    ": " + (message.content_as_string() or "(binary)"), LOG_NOTICE)
-            else:
-                reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
-                log("LXMF unverified link message (" + reason + ") from " +
-                    message.source_hash.hex()[:8], LOG_NOTICE)
-
-            # Dedup check
-            if message.hash in self.delivered_ids:
-                log("LXMF duplicate ignored: " + message.hash.hex()[:8], LOG_DEBUG)
-                return
-
-            self.delivered_ids[message.hash] = time.time()
-            self._clean_delivered_ids()
-
-            if self._delivery_callback:
-                try:
-                    self._delivery_callback(message)
-                except Exception as e:
-                    log("LXMF delivery callback error: " + str(e), LOG_ERROR)
-
-        except Exception as e:
-            log("LXMF link packet error: " + str(e), LOG_ERROR)
+        """Single-packet LXMF message on a link (CTX_NONE): the full packed
+        form (dest + source + sig + payload), unlike OPPORTUNISTIC."""
+        self._inbound(plaintext, "link")
 
     def _handle_resource_concluded(self, resource):
-        """Called when a Resource transfer completes on a link."""
+        """A Resource transfer concluded on a link."""
         from .resource import COMPLETE
-        if resource.status != COMPLETE:
-            log("LXMF resource not complete, ignoring", LOG_DEBUG)
+        data = resource.data
+        if (resource.status != COMPLETE or resource.request_id is not None    # a response, not a delivery
+                or data is None or len(data) < 2 * LXMessage.DESTINATION_LENGTH + LXMessage.SIGNATURE_LENGTH):
             return
-
-        try:
-            data = resource.data
-            if data is None or len(data) < 2 * LXMessage.DESTINATION_LENGTH + LXMessage.SIGNATURE_LENGTH:
-                log("LXMF resource data too short", LOG_DEBUG)
-                return
-
-            # Check if this is a response (request_id set) — not LXMF delivery
-            if resource.request_id is not None:
-                log("LXMF resource is a response, not a delivery", LOG_DEBUG)
-                return
-
-            # DIRECT delivery sends full packed: dest_hash + source_hash + sig + payload
-            lxmf_data = data
-            log("LXMF resource unpacking: " + str(len(lxmf_data)) + "B", LOG_DEBUG)
-
-            message = LXMessage.unpack_from_bytes(lxmf_data)
-            message.transport_encrypted = True
-            message.transport_encryption = "Curve25519"
-            self.remember_ticket(message)
-
-            if message.signature_validated:
-                log("LXMF resource message from " + message.source_hash.hex()[:8] +
-                    ": " + (message.content_as_string() or "(binary)"), LOG_NOTICE)
-            else:
-                reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
-                log("LXMF unverified resource message (" + reason + ") from " +
-                    message.source_hash.hex()[:8], LOG_NOTICE)
-
-            # Remember which LXMF peer this link carries (see _link_packet_received).
-            link = getattr(resource, "link", None)
-            if link is not None:
-                link.lxmf_source_hash = message.source_hash
-
-            # Dedup check
-            if message.hash in self.delivered_ids:
-                log("LXMF duplicate ignored: " + message.hash.hex()[:8], LOG_DEBUG)
-                return
-
-            self.delivered_ids[message.hash] = time.time()
-            self._clean_delivered_ids()
-
-            if self._delivery_callback:
-                try:
-                    self._delivery_callback(message)
-                except Exception as e:
-                    log("LXMF delivery callback error: " + str(e), LOG_ERROR)
-
-        except Exception as e:
-            log("LXMF resource delivery error: " + str(e), LOG_ERROR)
+        self._inbound(data, "resource", resource.link)
 
     def _delivery_packet(self, data, packet):
-        """Handle incoming opportunistic LXMF packet"""
+        """Opportunistic LXMF packet: the destination hash is the packet's, not in the payload."""
+        self._inbound(self.delivery_destination.hash + data, "opportunistic")
+
+    def _inbound(self, lxmf_data, how, link=None):
+        # The proof is sent by Transport for every packet (PROVE_ALL, see
+        # register_delivery_identity), duplicates included.
         try:
-            log("LXMF delivery_packet: " + str(len(data)) + "B", LOG_DEBUG)
-
-            # For opportunistic delivery, prepend destination hash
-            # (it's inferred from the packet destination, not included in payload)
-            dest_hash = self.delivery_destination.hash
-            lxmf_data = dest_hash + data
-
-            log("LXMF unpacking: " + str(len(lxmf_data)) + "B total", LOG_DEBUG)
             message = LXMessage.unpack_from_bytes(lxmf_data)
+            if how != "opportunistic":     # link packets and Resources arrive link-encrypted
+                message.transport_encrypted = True
+                message.transport_encryption = "Curve25519"
             self.remember_ticket(message)
-
             if message.signature_validated:
-                log("LXMF message from " + message.source_hash.hex()[:8] +
+                log("LXMF " + how + " message from " + message.source_hash.hex()[:8] +
                     ": " + (message.content_as_string() or "(binary)"), LOG_NOTICE)
             else:
-                reason = "unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature"
-                log("LXMF unverified message (" + reason + ") from " +
-                    message.source_hash.hex()[:8], LOG_NOTICE)
-
-            # Dedup check (the proof is sent by Transport for every packet:
-            # proof_strategy PROVE_ALL, see register_delivery_identity)
+                log("LXMF unverified " + how + " message (" + ("unknown source" if message.unverified_reason == LXMessage.SOURCE_UNKNOWN else "invalid signature") +
+                    ") from " + message.source_hash.hex()[:8], LOG_NOTICE)
+            if link is not None:
+                # Which LXMF peer this link carries.
+                link.lxmf_source_hash = message.source_hash
             if message.hash in self.delivered_ids:
-                log("LXMF duplicate ignored: " + message.hash.hex()[:8], LOG_DEBUG)
                 return
-
             self.delivered_ids[message.hash] = time.time()
             self._clean_delivered_ids()
-
-            # Deliver to application
             if self._delivery_callback:
-                try:
-                    self._delivery_callback(message)
-                except Exception as e:
-                    log("LXMF delivery callback error: " + str(e), LOG_ERROR)
-
+                self._delivery_callback(message)
         except Exception as e:
-            log("LXMF delivery packet error: " + str(e), LOG_ERROR)
+            log("LXMF inbound error: " + str(e), LOG_ERROR)
 
     def _announce_handler(self, destination_hash, app_data, packet):
         """Called by Transport when any announce is received"""
@@ -1865,11 +1697,24 @@ class LXMRouter:
         if app_data:
             display_name = self._parse_display_name(app_data)
 
-        self.peers[destination_hash] = {
-            "name": display_name,
-            "timestamp": time.time(),
-            "stamp_cost": self._parse_stamp_cost(app_data),
-        }
+        peers = self.peers
+        store = True
+        if destination_hash not in peers and len(peers) >= const.MAX_DESTINATIONS:
+            # Bounded like the other tables (every announce on a busy hub adds a
+            # peer): drop the least recently heard one, never a destination we
+            # still have a message queued for (its stamp cost is read at send time).
+            busy = [m.destination_hash for m in self.pending_outbound]
+            idle = [k for k in peers if k not in busy]
+            if idle:
+                del peers[min(idle, key=lambda k: peers[k]["timestamp"])]
+            else:
+                store = False
+        if store:
+            peers[destination_hash] = {
+                "name": display_name,
+                "timestamp": time.time(),
+                "stamp_cost": self._parse_stamp_cost(app_data),
+            }
 
         log("LXMF peer: " + (display_name or "?") +
             " [" + destination_hash.hex()[:8] + "]", LOG_VERBOSE)

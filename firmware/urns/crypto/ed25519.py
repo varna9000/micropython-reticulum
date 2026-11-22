@@ -23,33 +23,23 @@ def _try_native():
     #    MemoryError (IRAM exhausted) and ValueError (mpy ABI mismatch) fall
     #    through to the built-in, so a bad or missing file only costs speed.
     # Several candidates can be present at once (a stale ed25519_iram.mpy next
-    # to a rebuilt ed25519_fast_xtensawin.mpy is a real deployment mistake), so
-    # collect all that import and prefer one that has the stamp functions.
-    found = []
-    try:
-        import ed25519_iram
-        found.append(ed25519_iram)
-    except (ImportError, MemoryError, ValueError, OSError):
-        pass
-    # 2. Built-in / platform C modules (flash XIP on esp32 - slow but present)
-    names = ("ed25519_fast_xtensawin",) if sys.platform == "esp32" else (
-        ("ed25519_fast_armv6m",) if sys.platform == "rp2" else ("ed25519_fast",))
-    for n in names + ("ed25519_fast",):
-        if found and hasattr(found[0], "hashcash") and hasattr(found[0], "x25519_stamp2"):
-            break  # already have a current one; do not load more
+    # to a rebuilt ed25519_fast_xtensawin.mpy is a real deployment mistake): take
+    # the first that has the stamp functions, else the first that imports.
+    plat = ("ed25519_fast_xtensawin" if sys.platform == "esp32"
+            else "ed25519_fast_armv6m" if sys.platform == "rp2" else "ed25519_fast")
+    mod = None
+    for n in ("ed25519_iram", plat, "ed25519_fast"):
         try:
             m = __import__(n)
         except (ImportError, MemoryError, ValueError, OSError):
             continue
-        if m not in found:
-            found.append(m)
-    mod = found[0] if found else None
-    for m in found:
         if hasattr(m, "hashcash") and hasattr(m, "x25519_stamp2"):
-            if m is not mod:
+            if mod is not None and mod is not m:
                 _note = "stale native module skipped, using a newer one"
             mod = m
             break
+        if mod is None:
+            mod = m
     _native = mod
 
 _try_native()

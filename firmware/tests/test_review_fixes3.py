@@ -53,7 +53,10 @@ if PHASE == "announce":
     from urns import identity as idm
     p = dest.announce(app_data=b"app", send=False)
     p.pack()
-    out["ext"] = p.data[-18:].hex() if p.data[-18] == 0xC1 else None
+    # app_data is b"app": stamped = b"app" + 18-byte tail starting 0xC1. Checking
+    # only data[-18] == 0xC1 misfired ~1 in 256 runs on a random signature byte.
+    stamped = p.data[-21:-18] == b"app" and p.data[-18] == 0xC1
+    out["ext"] = p.data[-18:].hex() if stamped else None
     out["stamp"] = p.data[-16:-2].hex()
     out["stamp_modules"] = sorted(m for m in sys.modules if m.endswith("stamps"))
     # receive side: validate that stamped announce as a peer would (key not known yet)
@@ -455,18 +458,60 @@ class _TickClock:
 
 def test_x8_u8_constant_and_resumable_ladder_match_the_x25519_implementation():
     P = stamps_mod._P
-    lad = stamps_mod._Ladder(8, 9)
-    assert lad.run() is True
-    assert lad.x2 * pow(lad.z2, P - 2, P) % P == stamps_mod._U8
+    steps = list(stamps_mod._ladder(8, 9))
+    x2, z2 = steps[-1]
+    assert x2 * pow(z2, P - 2, P) % P == stamps_mod._U8
     import random
     for _ in range(3):
         k = random.getrandbits(255) & ~7 | (1 << 254)
         ref = x25519_mod._raw_curve25519(9, k)
-        l = stamps_mod._Ladder(k, 9)
+        steps = list(stamps_mod._ladder(k, 9))
+        assert steps[:-1] == [None] * 255 and len(steps) == 256     # one resumable step per bit
+        x2, z2 = steps[-1]
+        assert x2 * pow(z2, P - 2, P) % P == ref
+
+
+def test_x8_ladder_that_raises_midway_is_dropped_and_its_stage_restarted():
+    # A MemoryError inside a big-integer step finishes the generator; resuming it
+    # would give nothing (a stale or unbound point). The stage must restart clean.
+    stamps_mod._native_state = -1
+    stamps_mod.reset_search()
+    s = stamps_mod._PySearch()
+    ref_prev = list(stamps_mod._ladder(s.k0 - 8, 9))[-1]
+    ref_cur = list(stamps_mod._ladder(s.k0, 9))[-1]
+    real_gc = stamps_mod.gc
+    calls = [0]
+
+    class _Gc:
+        @staticmethod
+        def collect():
+            calls[0] += 1
+            if calls[0] == 40:                    # well inside the second ladder (k0)
+                raise MemoryError("injected")
+    clk = _TickClock(5)
+    stamps_mod.gc = _Gc
+    try:
         n = 0
-        while not l.run(budget_ms=1, t0=const.ticks_ms() - 1):    # one iteration per call
+        while not s.prepare(init_ms=100):
             n += 1
-        assert n == 254 and l.x2 * pow(l.z2, P - 2, P) % P == ref
+            assert n < 1000, "start-up ladders never finished"
+        assert calls[0] >= 40
+        assert s.lad is None and s.lad_fails == 0
+        assert s.prev == ref_prev and s.cur == ref_cur, "stale or unbound point after the failure"
+        # a persistent failure surfaces instead of looping forever
+        s2 = stamps_mod._PySearch()
+        _Gc.collect = staticmethod(lambda: (_ for _ in ()).throw(MemoryError("always")))
+        raised = False
+        try:
+            for _ in range(10):
+                s2.prepare(init_ms=100)
+        except MemoryError:
+            raised = True
+        assert raised
+    finally:
+        stamps_mod.gc = real_gc
+        clk.close()
+        stamps_mod.reset_search()
 
 
 def test_x8_search_state_is_built_incrementally_one_slice_per_call():

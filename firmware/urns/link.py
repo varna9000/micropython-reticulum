@@ -37,6 +37,25 @@ def _link_mdu(mtu):
             * const.AES128_BLOCKSIZE) - 1
 
 
+def _resource_cancelled(link, plaintext, receiver_cancel):
+    """The peer cancelled resource `plaintext` (its hash). signal=False: echoing
+    a cancel back at it is pure wasted airtime. A receiver-side cancel (RCL) of a
+    resource WE are sending is a rejection (final) only while it is still merely
+    advertised; after parts were requested it is a failed transfer and retried
+    (Resource.rejected())."""
+    for r in list(link.incoming_resources):
+        if r.hash == plaintext:
+            r.cancel(signal=False)
+            return
+    for r in list(link.outgoing_resources):
+        if r.hash == plaintext:
+            if receiver_cancel:
+                r.rejected()
+            else:
+                r.cancel(signal=False)
+            return
+
+
 _crypto_grace = None
 
 
@@ -549,20 +568,7 @@ class Link:
                 return
 
     def _handle_resource_cancel(self, plaintext, receiver_cancel=False):
-        """Handle resource cancel from remote side."""
-        # plaintext = resource hash. signal=False: the peer initiated this
-        # cancellation, so echoing a cancel back at it is pure wasted airtime.
-        for r in list(self.incoming_resources):
-            if r.hash == plaintext:
-                r.cancel(signal=False)
-                return
-        for r in list(self.outgoing_resources):
-            if r.hash == plaintext:
-                if receiver_cancel:
-                    r.rejected()
-                else:
-                    r.cancel(signal=False)
-                return
+        _resource_cancelled(self, plaintext, receiver_cancel)
 
     def register_incoming_resource(self, resource):
         self.incoming_resources.append(resource)
@@ -727,13 +733,18 @@ class OutgoingLink:
     rebalanced    = None
 
     # Link-request key stamp (Reticulum 1.6): while the X25519 key is still
-    # being searched the link is PENDING with _stamp_deadline set and no request
-    # on the wire; None otherwise. stamp_timeout is the whole-search budget.
+    # being searched the link is PENDING with _stamp_deadline set (an "active"
+    # marker, True) and no request on the wire; None otherwise. stamp_timeout is
+    # the whole-search budget, counted on the tick clock (_stamp_spent_ms of
+    # _stamp_budget_ms): an NTP step of the wall clock must neither fail a search
+    # at once nor leave it unbounded.
     STAMP_TIMEOUT = 120
     # Waiting for another link's turn at the pure-Python search costs none of the
     # STAMP_TIMEOUT budget, but the whole wait+search is bounded by this multiple.
     STAMP_QUEUE_FACTOR = 4
     _stamp_deadline = None
+    _stamp_budget_ms = 0
+    _stamp_spent_ms = 0
     _stamp_material = None
     _stamp_waiting = False
     _stamp_start_ms = 0
@@ -837,7 +848,6 @@ class OutgoingLink:
             # safe; the pending list is also how the stamp timeout is serviced.
             self.link_id = self.hash = b"\x00" * (const.TRUNCATED_HASHLENGTH // 8)
             self._stamp_cost = cost
-            self._stamp_tried = 0
             from . import stamps as _st
             limit = OutgoingLink.max_stamp_cost
             if limit is None:
@@ -848,11 +858,12 @@ class OutgoingLink:
                 return
             self._make_sig_keys()
             budget = self.STAMP_TIMEOUT if stamp_timeout is None else stamp_timeout
-            self._stamp_deadline = time.time() + budget
+            self._stamp_deadline = True
+            self._stamp_budget_ms = int(budget * 1000)
+            self._stamp_spent_ms = 0
             self._stamp_start_ms = self._stamp_mark = const.ticks_ms()
-            self._stamp_hard_ms = int(budget * self.STAMP_QUEUE_FACTOR * 1000)
+            self._stamp_hard_ms = self._stamp_budget_ms * self.STAMP_QUEUE_FACTOR
             self._stamp_material = destination.hash + self._sig_pub_bytes
-            self.link_id = self.hash = b"\x00" * (const.TRUNCATED_HASHLENGTH // 8)
             Transport.pending_links.append(self)
             log("OutLink stamp search for " + destination.hexhash[:8] + " cost " + str(cost), LOG_VERBOSE)
             self._start_stamp_search()
@@ -942,21 +953,21 @@ class OutgoingLink:
         """One slice. True when finished (key found and request sent, or failed)."""
         from . import stamps
         if self.status != OutgoingLink.PENDING or self._stamp_deadline is None:
-            stamps.search_release(self, self._stamp_material)
-            return True
+            return True                  # closed (_close freed the turn) or the request is already out
         now = const.ticks_ms()
         self._stamp_waiting = not stamps.search_turn(self)
         if self._stamp_waiting:
             # Queued behind another pure-Python search: the wait does not burn
-            # this link's budget (pushed out by what elapsed), up to the hard bound.
-            self._stamp_deadline += const.ticks_diff(now, self._stamp_mark) / 1000.0
+            # this link's budget (only time spent searching is counted), up to
+            # the hard bound on the whole wait + search.
             self._stamp_mark = now
             if const.ticks_diff(now, self._stamp_start_ms) > self._stamp_hard_ms:
                 self._stamp_failed("timeout (queued behind other searches)")
                 return True
             return False
+        self._stamp_spent_ms += const.ticks_diff(now, self._stamp_mark)
         self._stamp_mark = now
-        if time.time() > self._stamp_deadline:
+        if self._stamp_spent_ms > self._stamp_budget_ms:
             self._stamp_failed("timeout")
             return True
         prv, pub, tried = stamps.find_link_key(dest_hash, self._sig_pub_bytes,
@@ -965,6 +976,7 @@ class OutgoingLink:
         if prv is None:
             return False
         stamps.search_release(self, self._stamp_material)
+        self._stamp_material = None      # the turn is freed: _close() must not release it again
         try:
             from .crypto import X25519PrivateKey
             key = X25519PrivateKey.from_private_bytes(prv)
@@ -983,8 +995,7 @@ class OutgoingLink:
         import uasyncio as asyncio
         from . import stamps
         duty = stamps.Duty(stamps.DUTY_INTERACTIVE, stamps.GRACE_MS)
-        stamps.interactive_enter()
-        try:
+        with stamps.interactive:
             while True:
                 try:
                     duty.begin()
@@ -994,17 +1005,12 @@ class OutgoingLink:
                     self._stamp_failed(str(e))
                     return
                 await asyncio.sleep_ms(250 if self._stamp_waiting else duty.rest_ms())
-        finally:
-            stamps.interactive_exit()
 
     def _stamp_run_sync(self, dest_hash):
         from . import stamps
-        stamps.interactive_enter()
-        try:
+        with stamps.interactive:
             while not self._stamp_step(dest_hash):
                 pass
-        finally:
-            stamps.interactive_exit()
 
     def _stamp_failed(self, why):
         """Search timed out or failed: close through the normal closed-callback
@@ -1013,12 +1019,7 @@ class OutgoingLink:
             + " candidates", LOG_NOTICE)
         self._stamp_deadline = None
         self.close_reason = "stamp"
-        try:
-            from . import stamps
-            stamps.search_release(self, self._stamp_material)
-        except Exception:
-            pass
-        self._close()
+        self._close()                    # also frees the search turn
 
     def validate_proof(self, packet):
         """Validate server's link proof, complete ECDH handshake, send RTT."""
@@ -1444,22 +1445,7 @@ class OutgoingLink:
                 return
 
     def _handle_resource_cancel(self, plaintext, receiver_cancel=False):
-        # signal=False: the peer initiated this cancellation, so echoing a
-        # cancel back at it is pure wasted airtime. A receiver-side cancel
-        # (RCL) of a resource WE are sending is a rejection (final) only while
-        # the resource is still merely advertised; after parts were requested
-        # it is a failed transfer and retried (Resource.rejected()).
-        for r in list(self.incoming_resources):
-            if r.hash == plaintext:
-                r.cancel(signal=False)
-                return
-        for r in list(self.outgoing_resources):
-            if r.hash == plaintext:
-                if receiver_cancel:
-                    r.rejected()
-                else:
-                    r.cancel(signal=False)
-                return
+        _resource_cancelled(self, plaintext, receiver_cancel)
 
     def register_incoming_resource(self, resource):
         self.incoming_resources.append(resource)
@@ -1583,9 +1569,17 @@ class OutgoingLink:
         if self.status == OutgoingLink.PENDING:
             if self._stamp_deadline is not None:
                 # Request not sent yet: only the stamp budget applies (the
-                # search task also checks it; this covers a starved loop).
-                if time.time() > self._stamp_deadline:
+                # search task also checks it; this covers a starved loop, so
+                # the time since the last accounting point counts too unless
+                # the link is only queued).
+                now = const.ticks_ms()
+                spent = self._stamp_spent_ms
+                if not self._stamp_waiting:
+                    spent += const.ticks_diff(now, self._stamp_mark)
+                if spent > self._stamp_budget_ms:
                     self._stamp_failed("timeout")
+                elif const.ticks_diff(now, self._stamp_start_ms) > self._stamp_hard_ms:
+                    self._stamp_failed("timeout (queued behind other searches)")
                 return
             if time.time() - self.request_time > self.establishment_timeout:
                 self._establishment_timed_out()
@@ -1631,11 +1625,8 @@ class OutgoingLink:
             self.status = OutgoingLink.CLOSED
             log("OutLink " + self.link_id.hex()[:8] + " closed", LOG_VERBOSE)
             if self._stamp_material is not None:      # a key search was started: free its turn
-                try:
-                    from . import stamps
-                    stamps.search_release(self, self._stamp_material)
-                except Exception:
-                    pass
+                from . import stamps
+                stamps.search_release(self, self._stamp_material)
                 self._stamp_material = None
             # Fail in-flight requests first so requesters see the failure
             # before the link-closed notification.

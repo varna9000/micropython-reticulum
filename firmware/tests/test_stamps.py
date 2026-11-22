@@ -564,7 +564,7 @@ def test_stamp_deadline_serviced_by_job_loop_check():
     async def main():
         ol = link.OutgoingLink(_Dest(), closed_callback=lambda l: closed.append(l))
         assert not closed
-        ol._stamp_deadline = time.time() - 1          # budget used up while the loop was starved
+        ol._stamp_spent_ms = ol._stamp_budget_ms + 1  # budget used up while the loop was starved
         ol.check_timeout()
         return ol
 
@@ -573,6 +573,106 @@ def test_stamp_deadline_serviced_by_job_loop_check():
     finally:
         link.OutgoingLink.max_stamp_cost = None
     assert closed and ol.status == link.OutgoingLink.CLOSED
+
+
+class _IntClock:
+    """Whole-second wall clock (MicroPython time.time) plus a separate ms tick
+    source, so a test can step the wall clock without moving the ticks."""
+
+    def __init__(self, ms=5_000_000):
+        import time
+        self.time = time
+        self.ms = ms
+        self.wall_offset = 0
+        self.real = (time.time, const.ticks_ms)
+        time.time = lambda: self.ms // 1000 + self.wall_offset
+        const.ticks_ms = lambda: self.ms
+
+    def close(self):
+        self.time.time, const.ticks_ms = self.real
+
+
+def _manual_stamp_link(budget, cost=40.0):
+    """A real OutgoingLink whose key search is driven by hand (_stamp_step)."""
+    _force_pure()
+    _link_setup()
+    harness.Identity.link_costs[DEST] = cost
+    link.OutgoingLink.max_stamp_cost = 100.0
+    real = link.OutgoingLink._start_stamp_search
+    link.OutgoingLink._start_stamp_search = lambda self: None
+    try:
+        return link.OutgoingLink(_Dest(), stamp_timeout=budget)
+    finally:
+        link.OutgoingLink._start_stamp_search = real
+        link.OutgoingLink.max_stamp_cost = None
+
+
+def _step_for(clk, ol, seconds):
+    """Advance the tick clock one second at a time, stepping the search."""
+    for _ in range(seconds):
+        clk.ms += 1000
+        if ol.status != link.OutgoingLink.PENDING:
+            return
+        ol._stamp_step(DEST)
+
+
+def test_stamp_budget_survives_a_forward_wall_clock_jump():
+    # An ntptime.settime() by the application (outside Transport, so no
+    # clock-shift hook) jumps the wall clock by years: the budget must not
+    # notice, a search that is within budget on the tick clock must go on.
+    clk = _IntClock()
+    real_slice = stamps.slice_size
+    stamps.slice_size = lambda: 32
+    try:
+        ol = _manual_stamp_link(budget=10)
+        _step_for(clk, ol, 3)
+        assert ol.status == link.OutgoingLink.PENDING
+        clk.wall_offset += 40 * 365 * 86400               # NTP sync: 40 years forward
+        _step_for(clk, ol, 3)
+        ol.check_timeout()
+        assert ol.status == link.OutgoingLink.PENDING, "a wall-clock step failed a running search"
+        _step_for(clk, ol, 6)                              # now > 10 s of searching on the tick clock
+        assert ol.status == link.OutgoingLink.CLOSED and ol.close_reason == "stamp"
+    finally:
+        stamps.slice_size = real_slice
+        stamps.reset_search()
+        clk.close()
+
+
+def test_stamp_budget_is_bounded_when_the_wall_clock_steps_back():
+    clk = _IntClock()
+    clk.wall_offset = 40 * 365 * 86400                     # clock was already synced...
+    real_slice = stamps.slice_size
+    stamps.slice_size = lambda: 32
+    try:
+        ol = _manual_stamp_link(budget=10)
+        _step_for(clk, ol, 3)
+        clk.wall_offset = -clk.ms // 1000 + 100            # ...then steps back (RTC reset, bad NTP)
+        _step_for(clk, ol, 3)
+        assert ol.status == link.OutgoingLink.PENDING
+        _step_for(clk, ol, 6)
+        assert ol.status == link.OutgoingLink.CLOSED, "search left unbounded by a backward step"
+        assert ol.close_reason == "stamp"
+    finally:
+        stamps.slice_size = real_slice
+        stamps.reset_search()
+        clk.close()
+
+
+def test_stamp_budget_is_enforced_by_check_timeout_on_the_tick_clock():
+    clk = _IntClock()
+    try:
+        ol = _manual_stamp_link(budget=10)
+        clk.wall_offset -= 10 ** 9                         # wall clock far in the past
+        clk.ms += 9_000
+        ol.check_timeout()
+        assert ol.status == link.OutgoingLink.PENDING
+        clk.ms += 2_000                                    # starved loop: no step ran, 11 s elapsed
+        ol.check_timeout()
+        assert ol.status == link.OutgoingLink.CLOSED and ol.close_reason == "stamp"
+    finally:
+        stamps.reset_search()
+        clk.close()
 
 
 def test_default_stamp_timeout_is_120s():

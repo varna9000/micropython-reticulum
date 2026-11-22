@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness  # noqa: F401  (installs shims + synthetic urns package)
 
 import urns.interfaces.tcp as tcp  # noqa: E402
+from urns import const  # noqa: E402
 from urns.interfaces.tcp import TCPClientInterface  # noqa: E402
 
 _failures = []
@@ -31,8 +32,8 @@ def check(name, cond, detail=""):
 
 # Controllable millisecond clock for the watchdog.
 _now = [0]
-tcp._ticks_ms = lambda: _now[0]
-tcp._ticks_diff = lambda a, b: a - b
+const.ticks_ms = lambda: _now[0]
+const.ticks_diff = lambda a, b: a - b
 
 
 class FakeSock:

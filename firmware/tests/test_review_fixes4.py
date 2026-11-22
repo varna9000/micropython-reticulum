@@ -224,11 +224,11 @@ def _run_job_loop(validate_ms, queue_len, run_ms=60_000, tick_validate_ms=None):
     events = []
     free = [0]
     blocked = [0]
-    real = (time.time, transport_mod._ticks_ms, asyncio.sleep_ms, Transport._handle_announce,
-            transport_mod._ticks_diff)
+    real = (time.time, const.ticks_ms, asyncio.sleep_ms, Transport._handle_announce,
+            const.ticks_diff)
     time.time = lambda: vt[0] // 1000                        # integer-second wall clock
-    transport_mod._ticks_ms = lambda: vt[0]
-    transport_mod._ticks_diff = lambda a, b: a - b
+    const.ticks_ms = lambda: vt[0]
+    const.ticks_diff = lambda a, b: a - b
 
     async def sleep_ms(ms):
         events.append("sleep")
@@ -252,8 +252,8 @@ def _run_job_loop(validate_ms, queue_len, run_ms=60_000, tick_validate_ms=None):
     try:
         asyncio.run(Transport.job_loop())
     finally:
-        (time.time, transport_mod._ticks_ms, asyncio.sleep_ms, Transport._handle_announce,
-         transport_mod._ticks_diff) = real
+        (time.time, const.ticks_ms, asyncio.sleep_ms, Transport._handle_announce,
+         const.ticks_diff) = real
         Transport._jobs_running = False
         Transport.announce_inline = True
         Transport.announce_ingress = []

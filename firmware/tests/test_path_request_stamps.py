@@ -15,6 +15,7 @@ import harness
 from harness import const, packet, Transport, MockInterface, reset_transport, set_identity
 
 stamps = importlib.import_module("urns.stamps")
+stamp_hw = importlib.import_module("urns.stamp_hw")
 
 # (dest, tid, tag, stamp, reference stamp value, 64-byte request data)
 VECTORS = [
@@ -408,7 +409,7 @@ def test_hw_sha_switch_default_off_and_s3_only():
     old_nat, old = getattr(ed, "_native", None), stamps.HW_SHA
     ed._native = _HwFake()
     stamps.reset_native_probe()
-    stamps.hw_reset()
+    stamp_hw.hw_reset()
     assert stamps.HW_SHA is False and stamps._hw() == 0
     stamps.HW_SHA = True
     try:
@@ -429,7 +430,7 @@ def test_hw_sha_switch_default_off_and_s3_only():
         stamps.HW_SHA = old
         ed._native = old_nat
         stamps.reset_native_probe()
-        stamps.hw_reset()
+        stamp_hw.hw_reset()
 
 
 def test_hw_flag_reaches_native_searches_only_when_on():
@@ -438,7 +439,7 @@ def test_hw_flag_reaches_native_searches_only_when_on():
     old_nat, old_hw = getattr(ed, "_native", None), stamps.HW_SHA
     ed._native = _HwFake(seen)
     stamps.reset_native_probe()
-    stamps.hw_reset()
+    stamp_hw.hw_reset()
     stamps.set_table_size(4)
     try:
         stamps.HW_SHA = False
@@ -463,7 +464,7 @@ def test_hw_flag_reaches_native_searches_only_when_on():
         ed._native = old_nat
         stamps.HW_SHA = old_hw
         stamps.reset_native_probe()
-        stamps.hw_reset()
+        stamp_hw.hw_reset()
         stamps.set_table_size(64)
 
 

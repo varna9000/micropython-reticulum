@@ -5,6 +5,7 @@ import os
 import time
 import socket
 from . import Interface
+from .. import const
 from ..log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
 
 # HDLC framing constants (inlined to keep module self-contained)
@@ -14,9 +15,6 @@ ESC      = 0x7D
 ESC_MASK = 0x20
 _FLAG_BYTES = b"\x7e"
 
-# Millisecond monotonic clock: MicroPython ticks_ms, host-CPython fallback.
-_ticks_ms = getattr(time, "ticks_ms", None) or (lambda: int(time.time() * 1000))
-_ticks_diff = getattr(time, "ticks_diff", None) or (lambda a, b: a - b)
 
 
 def hdlc_escape(data):
@@ -104,9 +102,8 @@ class TCPClientInterface(Interface):
         self._recv_mv = memoryview(self._recv_buf)
         self._reconnect_count = 0
         self._last_reconnect = 0
-        self._last_rx = _ticks_ms()
+        self._last_rx = const.ticks_ms()
         self._connected_at = None
-        self._healthy = False         # this connection has already stayed up BACKOFF_HEALTHY_S
         self._local_fails = 0         # consecutive attempts that never reached the hub
         self._assess = False          # a drop/failure not yet judged for the back-off
         self._delay = self.reconnect_wait
@@ -133,13 +130,12 @@ class TCPClientInterface(Interface):
             pass
 
         self._socket = s
-        self._last_rx = _ticks_ms()
+        self._last_rx = const.ticks_ms()
         self._frame = None
         self._frame_overflow = False
         self.online = True
         self._reconnect_count = 0
-        self._connected_at = _ticks_ms()
-        self._healthy = False
+        self._connected_at = const.ticks_ms()
         self._local_fails = 0
         self._assess = True
         log("TCP connected to " + self.target_host + ":" + str(self.target_port), LOG_NOTICE)
@@ -152,17 +148,6 @@ class TCPClientInterface(Interface):
                 pass
             self._socket = None
 
-    def _note_alive(self):
-        """Called every poll iteration while online: remember the moment the
-        connection has stayed up long enough to count as healthy. The lifetime
-        is only ever measured below BACKOFF_HEALTHY_S, because ticks_diff wraps
-        after ~6.2 days and would turn a week-old connection into a negative
-        (short) one."""
-        if (not self._healthy and self._connected_at is not None
-                and _ticks_diff(_ticks_ms(), self._connected_at)
-                >= self.BACKOFF_HEALTHY_S * 1000):
-            self._healthy = True
-
     def _judge_drop(self, now):
         """First look at a drop (or failed attempt): adjust the back-off."""
         self._assess = False
@@ -174,16 +159,16 @@ class TCPClientInterface(Interface):
             self._last_reconnect = now
             return
         self._local_fails = 0
-        if self._healthy:
+        # ticks_diff wraps after ~12.4 days (period 2**30 ms): a connection older than
+        # that reads as its age modulo the period. Half of it reads negative (healthy
+        # here); the rare remainder below BACKOFF_SHORT_S (~3e-5 of connections that
+        # old) is misjudged as short and costs ONE extra doubling of the delay.
+        lived = const.ticks_diff(now, self._connected_at) // 1000
+        if lived < 0 or lived >= self.BACKOFF_HEALTHY_S:
             self._delay = self.reconnect_wait
-        else:
-            lived = _ticks_diff(_ticks_ms(), self._connected_at) // 1000
-            if lived >= self.BACKOFF_HEALTHY_S:
-                self._delay = self.reconnect_wait
-            elif lived < self.BACKOFF_SHORT_S:
-                self._delay = min(self._delay * 2, self.BACKOFF_MAX_S)
+        elif lived < self.BACKOFF_SHORT_S:
+            self._delay = min(self._delay * 2, self.BACKOFF_MAX_S)
         self._connected_at = None
-        self._healthy = False
         jitter = (os.urandom(1)[0] * self._delay) // 2560     # up to ~10%
         self._cur_wait = self._delay + jitter
         self._last_reconnect = now
@@ -191,10 +176,10 @@ class TCPClientInterface(Interface):
             log("TCP remote is refusing connections; backing off " + str(self._cur_wait) + " s", LOG_NOTICE)
 
     def _reconnect(self):
-        now = time.time()
+        now = const.ticks_ms()        # ticks, not the wall clock: a clock step must not stall reconnects
         if self._assess:
             self._judge_drop(now)
-        if now - self._last_reconnect < self._cur_wait:
+        if const.ticks_diff(now, self._last_reconnect) < self._cur_wait * 1000:
             return
         self._last_reconnect = now
 
@@ -251,7 +236,6 @@ class TCPClientInterface(Interface):
             # so that case does not apply here.)
             if len(data) >= 19 and (data[0] & 0x40) == 0x00 and (data[0] & 0x03) != 0x01:
                 from ..transport import Transport
-                from .. import const
                 _entry = Transport.path_table.get(data[2:18])
                 if _entry and _entry[const.IDX_PT_HOPS] > 1:
                     # Set HDR_2 (bit 6) + TRANSPORT (bit 4), keep other bits
@@ -357,8 +341,7 @@ class TCPClientInterface(Interface):
                 continue
 
             got = 0
-            t0 = _ticks_ms()
-            self._note_alive()
+            t0 = const.ticks_ms()
             try:
                 # Re-assert non-blocking before every drain — ESP32 lwIP
                 # bug: send() corrupts the socket's non-blocking state.
@@ -379,9 +362,9 @@ class TCPClientInterface(Interface):
                         self.online = False
                         break
                     got += n
-                    self._last_rx = _ticks_ms()
+                    self._last_rx = const.ticks_ms()
                     self._feed(self._recv_mv[:n])
-                    if _ticks_diff(_ticks_ms(), t0) >= self.RX_SLICE_MS:
+                    if const.ticks_diff(const.ticks_ms(), t0) >= self.RX_SLICE_MS:
                         break
             except OSError as e:
                 if e.args[0] == 11:  # EAGAIN
@@ -397,14 +380,14 @@ class TCPClientInterface(Interface):
                 log("TCP poll error: " + str(e), LOG_ERROR)
 
             if (not got and self.online and self.rx_idle_timeout
-                    and _ticks_diff(_ticks_ms(), self._last_rx)
+                    and const.ticks_diff(const.ticks_ms(), self._last_rx)
                         >= self.rx_idle_timeout * 1000):
                 log("TCP no data for " + str(self.rx_idle_timeout)
                     + "s, assuming dead connection; reconnecting", LOG_NOTICE)
                 self.online = False
 
             if got and (got >= self.RX_BUDGET
-                        or _ticks_diff(_ticks_ms(), t0) >= self.RX_SLICE_MS):
+                        or const.ticks_diff(const.ticks_ms(), t0) >= self.RX_SLICE_MS):
                 await asyncio.sleep(0)          # backlog likely: yield only
             elif got:
                 await asyncio.sleep(0.002)

@@ -8,12 +8,6 @@ from .log import log, LOG_VERBOSE, LOG_DEBUG, LOG_ERROR, LOG_NOTICE
 from .identity import Identity
 from .crypto.hashes import sha256
 
-# Millisecond monotonic clock for round timing. Device time.time() is whole
-# seconds — dividing rate math by it is a ZeroDivisionError on any fast round.
-# Same host-CPython fallback pattern as transport.py.
-_ticks_ms = getattr(time, "ticks_ms", None) or (lambda: int(time.time() * 1000))
-_ticks_diff = getattr(time, "ticks_diff", None) or (lambda a, b: a - b)
-
 
 # Constants (wire-compatible with reference RNS)
 MAPHASH_LEN = 4
@@ -51,14 +45,13 @@ MAX_RETRIES     = 16   # receiver retry budget — spent on timeouts only,
                        # refunded by progress (any received part)
 MAX_ADV_RETRIES = 4
 # Overall give-up, RTT-scaled to match reference RNS (which has no fixed
-# ceiling): rtt * TRAFFIC_TIMEOUT_FACTOR * MAX_RETRIES + a fixed grace (sender
+# ceiling): rtt * const.TRAFFIC_TIMEOUT_FACTOR * MAX_RETRIES + a fixed grace (sender
 # grace + the cumulative per-retry backoff). Clamped so a slow LoRa link is not
 # abandoned early (floor) yet a stalled transfer can't pin RAM forever (cap).
 # Applied in BOTH directions: outgoing via the link watchdog, incoming via
 # check_request_timeout. The old flat 120 s was only ever checked outgoing, so
 # a trickling receiver (each part refunds the retry budget) never gave up and
 # hung until the app's own cap.
-TRAFFIC_TIMEOUT_FACTOR = 6     # reference Link.TRAFFIC_TIMEOUT_FACTOR
 SENDER_GRACE_TIME      = 10    # reference Resource.SENDER_GRACE_TIME
 TIMEOUT_MIN = 120              # floor (the previous flat ceiling)
 TIMEOUT_MAX = 600              # cap MCU RAM commitment (~10 min)
@@ -429,7 +422,7 @@ class Resource:
         self.round_rx_bytes = 0
         self.round_first_sampled = False
         self.last_request_at = time.time()
-        self.req_sent_ms = _ticks_ms()
+        self.req_sent_ms = const.ticks_ms()
         self.req_sent_bytes = len(req_data) + _WIRE_OVERHEAD_REQ
         self.link.send(req_data, const.CTX_RESOURCE_REQ)
         log("Resource request: " + str(len(missing)) + " parts (window "
@@ -514,7 +507,7 @@ class Resource:
                 if not self.round_first_sampled and self.req_sent_ms:
                     # First response of the round: request->first-part rate
                     # (reference req_resp sample; feeds the fast counter only).
-                    el = _ticks_diff(_ticks_ms(), self.req_sent_ms) / 1000
+                    el = const.ticks_diff(const.ticks_ms(), self.req_sent_ms) / 1000
                     if el > 0:
                         self._rate_sample(
                             (self.req_sent_bytes + len(data) + _WIRE_OVERHEAD_PART) / el,
@@ -548,7 +541,7 @@ class Resource:
             if (self.window - self.window_min) > (self.window_flexibility - 1):
                 self.window_min += 1
         if self.req_sent_ms:
-            el = _ticks_diff(_ticks_ms(), self.req_sent_ms) / 1000
+            el = const.ticks_diff(const.ticks_ms(), self.req_sent_ms) / 1000
             if el > 0:
                 rate = self.round_rx_bytes / el
                 self._rate_sample(rate, full_round=True)
@@ -807,7 +800,7 @@ class Resource:
     def is_timed_out(self):
         # RTT-scaled overall ceiling (reference-style), clamped to [MIN, MAX].
         rtt = getattr(self.link, "rtt", 0) or 0
-        ceiling = rtt * TRAFFIC_TIMEOUT_FACTOR * MAX_RETRIES + _TIMEOUT_GRACE
+        ceiling = rtt * const.TRAFFIC_TIMEOUT_FACTOR * MAX_RETRIES + _TIMEOUT_GRACE
         if ceiling < TIMEOUT_MIN:
             ceiling = TIMEOUT_MIN
         elif ceiling > TIMEOUT_MAX:

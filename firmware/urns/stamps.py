@@ -6,13 +6,12 @@
 
 import gc
 import os
-import sys
 import time
 from .crypto import sha256
 
 from . import const
 from .stamp_check import (COST_FP_BITS, COST_FP, MANTISSA_BITS, STAMP_COST_CAP, _FP_CAP,
-                          _MAX_TARGET, _TAB, _tab, cost_to_fp, target_from_fp, _lz_bits,
+                          _MAX_TARGET, _TAB, _tab, cost_to_fp, target_from_fp, cost_target, _lz_bits,
                           stamp_valid, stamp_value)
 
 # --- key-stamp search ------------------------------------------------------
@@ -36,30 +35,11 @@ HASHCASH_NATIVE = 2000          # first native hashcash slice
 HASHCASH_PY = 32                # first pure-Python hashcash slice
 TABLE_N = 64                    # native table entries (buffer = 16 + 120*(n+1) B)
 
-# Opt-in ESP32-S3 SHA accelerator for the native searches (default OFF). It is
-# driven by direct register access from the native module and coordinates with
-# the firmware's own users of the engine (WiFi key derivation, TLS) only
-# heuristically, so a board that wants the speed-up must ask for it:
-# config key "stamps_hw_sha": True (Reticulum.setup_interfaces sets HW_SHA).
-# Ignored on anything but an ESP32-S3 and when the native module lacks it.
-#
-# Resilience (all in this file, the hardware is never trusted blindly):
-#   - before first use a start-up check runs: HW_CHECK_N hashes compared against
-#     software, and proof that the firmware's own engine reset (any hashlib call)
-#     clears the native module's ownership sentinel (the whole coordination with
-#     the firmware depends on that). Failure -> hardware off for the session.
-#   - after every hardware slice the native counters are read: any digest
-#     mismatch disables hardware for the session; each busy/lost event (the
-#     firmware had or took the engine) starts a HW_HOLDOFF_S pause and more than
-#     HW_MAX_EVENTS of them within HW_WINDOW_S disables it for the session.
-#   - no hardware while WiFi is down or for HW_WIFI_SETTLE_S after it came up.
-#   - every hit is verified in software regardless (native and find_hashcash).
+# Opt-in ESP32-S3 SHA accelerator for the native searches (default OFF; config key
+# "stamps_hw_sha": True sets HW_SHA in Reticulum.setup_interfaces). The whole policy
+# (start-up check, session disable, hold-off, WiFi gating) is in stamp_hw.py, which is
+# only imported when this flag is on.
 HW_SHA = False
-HW_CHECK_N = 256                # hashes compared in the start-up check
-HW_HOLDOFF_S = 5                # software only for this long after a busy/lost event
-HW_WINDOW_S = 300               # sliding window for the event limit
-HW_MAX_EVENTS = 3               # busy/lost events tolerated per window
-HW_WIFI_SETTLE_S = 5            # software only for this long after WiFi (re)connected
 
 # --- duty-cycle pacing ---------------------------------------------------------
 #
@@ -81,15 +61,19 @@ GRACE_MS = 1000
 _interactive = 0
 
 
-def interactive_enter():
-    global _interactive
-    _interactive += 1
+class _Interactive:
+    """`with stamps.interactive:` for the whole life of an interactive search."""
+    def __enter__(self):
+        global _interactive
+        _interactive += 1
+
+    def __exit__(self, *exc):
+        global _interactive
+        if _interactive > 0:
+            _interactive -= 1
 
 
-def interactive_exit():
-    global _interactive
-    if _interactive > 0:
-        _interactive -= 1
+interactive = _Interactive()
 
 
 def interactive_active():
@@ -123,150 +107,36 @@ class Duty:
 
 _ticks_us = getattr(time, "ticks_us", None) or (lambda: int(time.perf_counter() * 1000000))   # only the pacing needs microseconds
 
-# hardware session state: reason string once disabled, None while usable
-_hw_off = None
-_hw_checked = False
-_hw_hold_until = None           # ticks_ms until which hardware is paused
-_hw_events = []                 # ticks_ms of recent busy/lost events
-_hw_last = (0, 0, 0, 0)         # last seen native hwstats (n, mismatches, busy, lost)
-_wifi_up_at = None              # ticks_ms when the STA interface was last seen coming up
-
-
-def hw_disabled():
-    """Reason the hardware path was switched off for this session, else None."""
-    return _hw_off
-
-
-def hw_disable(reason):
-    global _hw_off
-    if _hw_off is None:
-        _hw_off = reason
-        try:
-            from .log import log, LOG_WARNING
-            log("Stamp SHA hardware disabled: " + reason, LOG_WARNING)
-        except Exception:
-            pass
-
-
-def hw_reset():
-    """Forget the hardware session state (tests, or after the owner re-enables)."""
-    global _hw_off, _hw_checked, _hw_hold_until, _hw_events, _hw_last, _wifi_up_at
-    _hw_off = None
-    _hw_checked = False
-    _hw_hold_until = None
-    _hw_events = []
-    _hw_last = (0, 0, 0, 0)
-    _wifi_up_at = None
-
-
-def _wifi_state():
-    """True/False for the STA interface; None when there is no WiFi API (host)."""
-    try:
-        import network
-        return bool(network.WLAN(network.STA_IF).isconnected())
-    except Exception:
-        return None
-
-
-def _hw_selfcheck(nm):
-    """Start-up check. Returns None when the engine is usable, else the reason."""
-    global _hw_last
-    st = getattr(nm, "hwselftest", None)
-    probe = getattr(nm, "hwprobe", None)
-    if st is None or probe is None or not hasattr(nm, "hwstats"):
-        return "native module too old for the start-up check"
-    try:
-        bad, badw, done = st(os.urandom(48), HW_CHECK_N)
-    except Exception as e:
-        return "self-test error " + repr(e)
-    if done == 0:
-        return "engine busy at the start-up check"   # retried later: caller treats as transient
-    if bad or done < HW_CHECK_N:
-        return "self-test: %d/%d hashes differ" % (bad, done) if bad else "self-test lost the engine"
-    # firmware coordination: its engine reset must clear our ownership sentinel
-    try:
-        if not probe(0):
-            return "engine busy at the coordination check"
-        try:
-            from hashlib import sha256 as _fw_sha     # firmware acquire + reset + release
-        except ImportError:
-            from .crypto import sha256 as _fw_sha
-        _fw_sha(b"x").digest()
-        owned = probe(1)
-        probe(2)
-    except Exception as e:
-        try:
-            probe(2)
-        except Exception:
-            pass
-        return "coordination check error " + repr(e)
-    if owned:
-        return "firmware engine reset does not clear the ownership sentinel"
-    _hw_last = tuple(nm.hwstats(False))
-    return None
-
-
-def _hw_account(nm):
-    """After a hardware slice: read the counters, apply the session policy."""
-    global _hw_last, _hw_hold_until
-    try:
-        cur = tuple(nm.hwstats(False))
-    except Exception:
-        return
-    last = _hw_last
-    _hw_last = cur
-    if cur[1] > last[1]:
-        hw_disable("%d digest mismatch(es) against software" % (cur[1] - last[1]))
-        return
-    ev = (cur[2] - last[2]) + (cur[3] - last[3])
-    if ev > 0:
-        now = const.ticks_ms()
-        _hw_hold_until = now + HW_HOLDOFF_S * 1000
-        _hw_events.append(now)
-        while _hw_events and const.ticks_diff(now, _hw_events[0]) > HW_WINDOW_S * 1000:
-            _hw_events.pop(0)
-        if len(_hw_events) > HW_MAX_EVENTS:
-            hw_disable("engine contention: %d busy/lost events in %d s" % (len(_hw_events), HW_WINDOW_S))
+_hw_mod = None                  # stamp_hw once imported; False if that import failed (not retried)
 
 
 def _hw(nm=None):
     """1 when this slice may use the accelerator, else 0 (never raises)."""
-    global _hw_checked, _hw_hold_until, _wifi_up_at
-    if not HW_SHA or _hw_off is not None:
+    global _hw_mod
+    if not HW_SHA or _hw_mod is False:
         return 0
-    try:
-        if "ESP32S3" not in sys.implementation._machine.replace("-", "").replace(" ", ""):
+    if _hw_mod is None:
+        try:
+            from . import stamp_hw
+            _hw_mod = stamp_hw
+        except Exception:           # ImportError, MemoryError (no heap for the module), ...
+            _hw_mod = False
             return 0
-    except Exception:
-        return 0
-    now = const.ticks_ms()
-    w = _wifi_state()
-    if w is False:
-        _wifi_up_at = None
-        return 0
-    if w and _wifi_up_at is None:
-        _wifi_up_at = now
-    if _wifi_up_at is not None and const.ticks_diff(now, _wifi_up_at) < HW_WIFI_SETTLE_S * 1000:
-        return 0
-    if _hw_hold_until is not None:
-        if const.ticks_diff(now, _hw_hold_until) < 0:
-            return 0
-        _hw_hold_until = None
-    if nm is None:
-        nm = _native_hc() or _native()
+    nm = nm or _native_hc() or _native()
     if nm is None:
         return 0
-    if not _hw_checked:
-        why = _hw_selfcheck(nm)
-        if why is None:
-            _hw_checked = True
-        elif why.startswith("engine busy"):
-            _hw_hold_until = now + HW_HOLDOFF_S * 1000     # transient: try the check again later
-            return 0
-        else:
-            hw_disable(why)
-            return 0
-    return 1
+    return _hw_mod.usable(nm)
+
+
+def _native_call(nm, fn, *args):
+    """Run a native search function, with the accelerator when the policy allows it
+    (the optional last argument), and account its counters afterwards."""
+    hw = _hw(nm)
+    if not hw:
+        return fn(*args)
+    r = fn(*args, hw)
+    _hw_mod.account(nm)
+    return r
 
 
 class Pace:
@@ -382,56 +252,36 @@ def _gc_mask():
         return 7
 
 
-class _Ladder:
-    """RFC 7748 Montgomery ladder as a resumable state machine: run(budget_ms, t0) executes
-    iterations (one bit, ~5 ms in pure Python on an ESP32) until finished or the budget is
-    used up, so the event loop is never blocked for more than the budget plus one iteration.
-    Result: (x2, z2) projective, in self.x2 / self.z2."""
-
-    def __init__(self, k, u):
-        self.k = k
-        self.u = u
-        self.t = 254
-        self.x2, self.z2, self.x3, self.z3 = 1, 0, u, 1
-        self.swap = 0
-
-    def run(self, budget_ms=None, t0=None):
-        P = _P
-        k = self.k
-        x1 = self.u
-        x2, z2, x3, z3, swap = self.x2, self.z2, self.x3, self.z3, self.swap
-        t = self.t
-        mask = _gc_mask()
-        while t >= 0:
-            kt = (k >> t) & 1
-            swap ^= kt
-            if swap:
-                x2, x3, z2, z3 = x3, x2, z3, z2
-            swap = kt
-            A = (x2 + z2) % P
-            AA = A * A % P
-            B = (x2 - z2) % P
-            BB = B * B % P
-            E = (AA - BB) % P
-            C = (x3 + z3) % P
-            D = (x3 - z3) % P
-            DA = D * A % P
-            CB = C * B % P
-            x3 = (DA + CB) ** 2 % P
-            z3 = x1 * (DA - CB) ** 2 % P
-            x2 = AA * BB % P
-            z2 = E * (AA + _A24 * E) % P
-            if t & mask == 0:
-                gc.collect()
-            t -= 1
-            if budget_ms is not None and t >= 0 and const.ticks_diff(const.ticks_ms(), t0) >= budget_ms:
-                break
-        self.x2, self.z2, self.x3, self.z3, self.swap, self.t = x2, z2, x3, z3, swap, t
-        if t >= 0:
-            return False
+def _ladder(k, u):
+    """RFC 7748 Montgomery ladder (x-only) as a generator: yields None after each bit
+    (~5 ms in pure Python on an ESP32, so a caller can stop between bits and resume
+    later), then the projective result (x2, z2)."""
+    P = _P
+    x2, z2, x3, z3, swap = 1, 0, u, 1, 0
+    mask = _gc_mask()
+    for t in range(254, -1, -1):
+        kt = (k >> t) & 1
+        swap ^= kt
         if swap:
-            self.x2, self.z2 = x3, z3
-        return True
+            x2, x3, z2, z3 = x3, x2, z3, z2
+        swap = kt
+        A = (x2 + z2) % P
+        AA = A * A % P
+        B = (x2 - z2) % P
+        BB = B * B % P
+        E = (AA - BB) % P
+        C = (x3 + z3) % P
+        D = (x3 - z3) % P
+        DA = D * A % P
+        CB = C * B % P
+        x3 = (DA + CB) ** 2 % P
+        z3 = u * (DA - CB) ** 2 % P
+        x2 = AA * BB % P
+        z2 = E * (AA + _A24 * E) % P
+        if t & mask == 0:
+            gc.collect()
+        yield None
+    yield (x3, z3) if swap else (x2, z2)
 
 
 class _PySearch:
@@ -455,6 +305,7 @@ class _PySearch:
         self.i = 0
         self.stage = 0               # 0: ladder for k0-8, 1: ladder for k0, 2: ready
         self.lad = None
+        self.lad_fails = 0
         self.prev = self.cur = None
 
     def prepare(self, init_ms=None):
@@ -462,11 +313,30 @@ class _PySearch:
         t0 = const.ticks_ms()
         while self.stage < 2:
             if self.lad is None:
-                self.lad = _Ladder(self.k0 - 8 if self.stage == 0 else self.k0, 9)
-            if not self.lad.run(init_ms, t0):
+                self.lad = _ladder(self.k0 - 8 if self.stage == 0 else self.k0, 9)
+            pt = None
+            try:
+                for pt in self.lad:
+                    if pt is not None:
+                        break
+                    if init_ms is not None and const.ticks_diff(const.ticks_ms(), t0) >= init_ms:
+                        return False
+            except Exception:
+                # A generator that raised (MemoryError in a big-integer step) is
+                # finished: resuming it would yield nothing and leave pt stale or
+                # unbound. Drop it so this stage restarts from its first bit on the
+                # next slice; a persistent failure surfaces after a few tries.
+                self.lad = None
+                self.lad_fails += 1
+                if self.lad_fails > 3:
+                    raise
+                gc.collect()
                 return False
-            pt = (self.lad.x2, self.lad.z2)
+            if pt is None:              # defensive: a ladder that ended without a result
+                self.lad = None
+                return False
             self.lad = None
+            self.lad_fails = 0
             if self.stage == 0:
                 self.prev = pt
             else:
@@ -540,19 +410,11 @@ def find_link_key(dest_hash, sig_pub, cost, budget_candidates):
     32-candidate batches."""
     global _py, _py_material
     material = dest_hash + sig_pub
-    target = target_from_fp(cost_to_fp(cost))
+    target = cost_target(cost)
     nm = _native()
     if nm is not None:
         t0 = _ticks_us()
-        hw = _hw(nm)
-        if hw:
-            try:
-                r = nm.x25519_stamp2(os.urandom(32), material, target, budget_candidates, _nbuf, hw)
-            except TypeError:           # older module without the hw argument
-                r = nm.x25519_stamp2(os.urandom(32), material, target, budget_candidates, _nbuf)
-            _hw_account(nm)
-        else:
-            r = nm.x25519_stamp2(os.urandom(32), material, target, budget_candidates, _nbuf)
+        r = _native_call(nm, nm.x25519_stamp2, os.urandom(32), material, target, budget_candidates, _nbuf)
         _ks_pace.update(r[2], const.ticks_diff(_ticks_us(), t0))
         return r[0], r[1], r[2]
     if _py is None or _py_material != material:
@@ -672,12 +534,7 @@ def find_hashcash(material, target, slen, budget=None, background=False):
     if nm is not None:
         if budget is None:
             budget = hc_pace.n
-        hw = _hw(nm)
-        if hw:
-            stamp, tried = nm.hashcash(material, target, slen, budget, os.urandom(32), hw)
-            _hw_account(nm)
-        else:
-            stamp, tried = nm.hashcash(material, target, slen, budget, os.urandom(32))
+        stamp, tried = _native_call(nm, nm.hashcash, material, target, slen, budget, os.urandom(32))
         hc_pace.update(tried, const.ticks_diff(_ticks_us(), t0))
     else:
         if budget is None:
@@ -710,6 +567,6 @@ def validate_pr_stamp(stamp, dest_hash, tag, cost=PR_COST):
 
 def find_pr_stamp(dest_hash, tag, cost=PR_COST, budget=None):
     """One slice of the path-request stamp search -> (stamp or None, tried)."""
-    return find_hashcash(pr_material(dest_hash, tag), target_from_fp(cost_to_fp(cost)),
+    return find_hashcash(pr_material(dest_hash, tag), cost_target(cost),
                          PR_STAMP_LEN, budget)
 

@@ -76,8 +76,6 @@ def reset():
             t.cancel()
         except Exception:
             pass
-    global _current
-    _current = None
     del _queue[:]
     _cache.clear()
     _tasks.clear()
@@ -108,14 +106,6 @@ def _path(dest_hash):
     return _dir() + "/" + dest_hash.hex() + ".dstamp"
 
 
-def _exists(path):
-    try:
-        os.stat(path)
-        return True
-    except OSError:
-        return False
-
-
 def _remember(dest_hash, stamp):
     if dest_hash not in _cache and len(_cache) >= MAX_ENTRIES:
         for k in _cache:
@@ -126,12 +116,13 @@ def _remember(dest_hash, stamp):
 
 def load(dest):
     """Stamp from storage if the file exists and validates, else None."""
-    path = _path(dest.hash)
-    if not _exists(path):
-        return None
     try:
+        try:
+            f = open(_path(dest.hash), "rb")
+        except OSError:
+            return None             # no stored stamp: the normal case
         from . import umsgpack
-        with open(path, "rb") as f:
+        with f:
             entry = umsgpack.unpackb(f.read())
         if entry.get("v") != FILE_VERSION:
             return None
@@ -213,7 +204,7 @@ def for_announce(dest):
 
 def request(dest):
     """Log the material once and, when enabled, start background generation for
-    a destination that has no stamp."""
+    a destination that has no stamp (or only one below VALUE)."""
     h = dest.hash
     if h in _tasks or h in _pending:
         return
@@ -232,19 +223,13 @@ def request(dest):
             log("Stored announce stamp for " + dest.hexhash[:8] + " is below announce_stamp_value "
                 + str(VALUE) + ": still used, " + ("generating a new one" if ENABLED else
                 "stamp generation is off so it stays"), LOG_NOTICE)
-        if not ENABLED or len(_tasks) + len(_pending) >= MAX_ENTRIES:
-            return
-        _pending[h] = dest
-        kick()
-        return
-    if h not in _logged:
+    elif h not in _logged:
         _logged[h] = True
         log("No announce stamp for " + dest.hexhash + "; stamp material "
             + material(dest).hex(), LOG_INFO)
-    if not ENABLED or len(_tasks) + len(_pending) >= MAX_ENTRIES:
-        return
-    _pending[h] = dest
-    kick()
+    if ENABLED and len(_tasks) + len(_pending) < MAX_ENTRIES:
+        _pending[h] = dest
+        kick()
 
 
 def kick():
@@ -262,23 +247,20 @@ def kick():
             return
 
 
-_queue = []             # dest hashes waiting for their turn (FIFO)
-_current = None         # dest hash being generated right now (one at a time)
+_queue = []             # dest hashes in generation order: the head is the one running
 
 
 async def _generate(dest):
-    global _current
     import uasyncio as asyncio
     from . import stamps
     h = dest.hash
     _queue.append(h)
     try:
         # One generation at a time: the rest wait their turn.
-        while _current is not None or _queue[0] != h:
+        while _queue[0] != h:
             await asyncio.sleep_ms(250)
-        _current = h
         mat = material(dest)
-        target = stamps.target_from_fp(stamps.cost_to_fp(VALUE))
+        target = stamps.cost_target(VALUE)
         duty = stamps.Duty(DUTY)
         t0 = const.ticks_ms()
         tried_total = 0
@@ -316,8 +298,6 @@ async def _generate(dest):
     except Exception as e:
         log("Announce stamp generation failed: " + repr(e), LOG_ERROR)
     finally:
-        if _current == h:
-            _current = None
         if h in _queue:
             _queue.remove(h)
         _tasks.pop(h, None)

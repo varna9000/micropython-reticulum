@@ -294,7 +294,6 @@ def reset_transport():
     T.reverse_table = {}
     T.link_table = {}
     T.packet_cache = {}
-    T.path_states = {}
     T.announce_table = {}
     T.reachable_destinations = {}
     T.discovery_path_requests = {}
@@ -306,7 +305,6 @@ def reset_transport():
     T._path_request_times = {}
     T._path_waiters = {}
     T._in_use = {}
-    T._seen_emit = {}
     T._seen_blob = {}
     T._pr_stamping = {}
     T.relayed_announces = T.relayed_data = T.relayed_links = T.relayed_proofs = 0

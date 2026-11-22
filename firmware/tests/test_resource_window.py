@@ -18,15 +18,15 @@ import importlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness  # noqa: F401
-from harness import Transport, MockInterface, reset_transport
+from harness import Transport, MockInterface, reset_transport, const
 
 resource_mod = importlib.import_module("urns.resource")
 Resource = resource_mod.Resource
 
 LINK_ID = b"\x30" * 16
 
-_REAL_TICKS = resource_mod._ticks_ms
-_REAL_DIFF = resource_mod._ticks_diff
+_REAL_TICKS = const.ticks_ms
+_REAL_DIFF = const.ticks_diff
 
 
 class _PassToken:
@@ -75,14 +75,14 @@ class _Clock:
 
 def _fake_clock():
     clk = _Clock()
-    resource_mod._ticks_ms = lambda: clk.ms
-    resource_mod._ticks_diff = lambda a, b: a - b
+    const.ticks_ms = lambda: clk.ms
+    const.ticks_diff = lambda a, b: a - b
     return clk
 
 
 def _restore_clock():
-    resource_mod._ticks_ms = _REAL_TICKS
-    resource_mod._ticks_diff = _REAL_DIFF
+    const.ticks_ms = _REAL_TICKS
+    const.ticks_diff = _REAL_DIFF
 
 
 def _mkpair(data_len=6000, rx_rtt=0.05):

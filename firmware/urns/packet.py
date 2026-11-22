@@ -325,8 +325,6 @@ class LinkDestination:
     (OutgoingLink.send(create_receipt=True)) it also carries what a PacketReceipt
     needs: the link's rtt (timeout) and the remote destination whose identity
     signs the proof."""
-    traffic_timeout_factor = const.TRAFFIC_TIMEOUT_FACTOR
-
     def __init__(self, link_id, link=None):
         self.hash = link_id
         self.link_id = link_id
@@ -369,7 +367,7 @@ class PacketReceipt:
         # and a measured rtt.
         dest = packet.destination
         if getattr(dest, "type", None) == const.DEST_LINK:
-            self.timeout = max((getattr(dest, "rtt", 0) or 0) * LinkDestination.traffic_timeout_factor,
+            self.timeout = max((getattr(dest, "rtt", 0) or 0) * const.TRAFFIC_TIMEOUT_FACTOR,
                                const.LINK_RECEIPT_MIN_TIMEOUT)
         else:
             from .transport import Transport

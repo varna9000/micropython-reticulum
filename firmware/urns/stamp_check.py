@@ -74,10 +74,14 @@ def target_from_fp(fp):
     return t.to_bytes(32, "big")
 
 
+def cost_target(cost):
+    return target_from_fp(cost_to_fp(cost))
+
+
 def stamp_valid(stamp, cost, material):
     """sha256(material + stamp) <= target(cost). Big-endian byte strings
     compare like the integers they encode."""
-    return sha256(material + stamp) <= target_from_fp(cost_to_fp(cost))
+    return sha256(material + stamp) <= cost_target(cost)
 
 
 def _lz_bits(d):

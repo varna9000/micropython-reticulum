@@ -14,12 +14,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import harness  # noqa: F401
 
 import urns.interfaces.tcp as tcp  # noqa: E402
+from urns import const  # noqa: E402
 from urns.interfaces.tcp import TCPClientInterface  # noqa: E402
 
 _now = [0]
-tcp._ticks_ms = lambda: _now[0]
+const.ticks_ms = lambda: _now[0]
 # wrap-safe like MicroPython's ticks_diff (period 2**30, signed half-range)
-tcp._ticks_diff = lambda a, b: ((a - b + (1 << 29)) % (1 << 30)) - (1 << 29)
+const.ticks_diff = lambda a, b: ((a - b + (1 << 29)) % (1 << 30)) - (1 << 29)
 
 
 class _FT:
@@ -148,6 +149,27 @@ def test_week_old_connection_is_healthy_despite_ticks_wrap():
     iface.online = False                     # the hub finally closes it
     iface._reconnect()
     assert iface._delay == 5, "long-lived connection misjudged as short: %r" % iface._delay
+
+
+def test_connection_older_than_the_tick_period_costs_one_extra_doubling():
+    # Accepted trade-off of the simplified judge: ticks_diff has a period of
+    # 2**30 ms (~12.4 days). A connection exactly one period + 10 s old reads
+    # as 10 s old, i.e. "short", and doubles the delay once (about 3e-5 of
+    # connections that old). It is bounded (BACKOFF_MAX_S) and self-healing.
+    iface, mod = _mk()
+    assert iface._delay == 5
+    _now[0] = (1 << 30) + 10_000
+    FakeTime.t += (1 << 30) // 1000 + 10
+    iface.online = False
+    iface._reconnect()
+    assert iface._delay == 10, iface._delay
+    # the next healthy connection resets it
+    iface, mod = _mk()
+    iface._delay = 40
+    _now[0] = 200_000
+    iface.online = False
+    iface._reconnect()
+    assert iface._delay == 5
 
 
 if __name__ == "__main__":

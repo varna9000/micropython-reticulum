@@ -218,19 +218,9 @@ def test_f9_newer_emission_over_longer_path_is_validated_but_route_kept():
         assert calls == [2000, 1500]
         Transport.inbound(build_announce_hdr1(dest, data=build_announce_data(emitted=1500), hops=6), iface)
         assert Transport.announce_ingress == []          # now a true duplicate
-        assert len(Transport._seen_emit) <= const.MAX_PATH_TABLE * 2
     finally:
         Identity.validate_announce = real
         Transport.announce_inline = True
-
-
-def test_f9_seen_emission_memory_is_bounded():
-    reset_transport()
-    for i in range(const.MAX_PATH_TABLE * 6):
-        d = i.to_bytes(2, "big") + b"\x00" * 14
-        Transport.path_table[d] = [0, d, 1, 1e12, None, None, 0]
-        Transport._note_emission(d, 1000 + i)
-    assert len(Transport._seen_emit) <= const.MAX_PATH_TABLE * 2
 
 
 # ---------------------------------------------------------------- F5 ----
@@ -335,13 +325,10 @@ def test_f7_background_generation_yields_to_interactive_searches():
     stamps.find_hashcash = spy
 
     async def main():
-        stamps.interactive_enter()
-        try:
+        with stamps.interactive:
             A.request(dests[0])
             await asyncio.sleep(0.4)
             during = len(calls)
-        finally:
-            stamps.interactive_exit()
         t0 = time.time()
         while A._tasks and time.time() - t0 < 20:
             await asyncio.sleep(0.01)

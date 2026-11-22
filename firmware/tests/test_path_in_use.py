@@ -212,6 +212,54 @@ def test_lxmf_send_and_verified_receive_mark_the_peer_in_use():
             del TL.FakeIdentity.validate
 
 
+def test_refused_newcomer_is_not_left_reachable_when_the_path_table_is_full_of_in_use_routes():
+    # MAX_DESTINATIONS (reachability set) is larger than MAX_PATH_TABLE on a
+    # real board (64 vs 32): the newcomer used to be added to
+    # reachable_destinations BEFORE the path table refused it, so has_path()
+    # claimed a route that does not exist and the caller skipped the path
+    # request and sent a link request nobody forwards.
+    iface = _setup()
+    saved = (const.MAX_PATH_TABLE, const.MAX_DESTINATIONS)
+    const.MAX_PATH_TABLE, const.MAX_DESTINATIONS = 4, 64
+    try:
+        keep = [_d(900 + i) for i in range(4)]
+        for k in keep:
+            _announce(k, iface)
+            Transport.mark_in_use(k)
+        newcomer = _d(7)
+        _announce(newcomer, iface, emitted=4000)
+        assert newcomer not in Transport.path_table
+        assert not Transport.has_path(newcomer), "has_path() lies for a refused announce"
+        assert newcomer not in Transport.reachable_destinations
+        assert all(Transport.has_path(k) for k in keep)
+    finally:
+        const.MAX_PATH_TABLE, const.MAX_DESTINATIONS = saved
+
+
+def test_sweep_receipts_survives_a_timeout_callback_that_edits_the_list():
+    reset_transport()
+    log = []
+
+    class R:
+        keep = False
+
+        def __init__(self, name, remove=None):
+            self.name, self.remove, self.status = name, remove, 1
+
+        def check_timeout(self):
+            log.append(self.name)
+            if self.remove is not None and self.remove in Transport.receipts:
+                Transport.receipts.remove(self.remove)
+            self.status = 0
+
+    c = R("c")
+    a, b = R("a", remove=c), R("b")
+    Transport.receipts[:] = [a, b, c]
+    Transport._sweep_receipts()
+    assert log == ["a", "b", "c"] or log == ["a", "b"], log     # c checked or removed, but b never skipped
+    assert "b" in log
+
+
 if __name__ == "__main__":
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

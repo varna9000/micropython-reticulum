@@ -33,17 +33,12 @@ class Destination:
 
     stamp_announces = False         # set by Reticulum.setup_interfaces (background generation)
     stamp_config = None             # announce_stamps.configure() kwargs, applied when the module first loads
-    stamp_dir = None                # override of the stamps DIRECTORY itself (None: <Identity.storagepath>/stamps)
-    STAMP_SUBDIR = "/stamps"        # <storage>/stamps/<dest_hex>.dstamp; tools/gen_announce_stamp.py writes the same
 
     @staticmethod
     def stamps_dir():
-        """The one place that says where announce stamps live (announce_stamps
-        and the cheap stored-stamp probe both use it)."""
-        d = Destination.stamp_dir
-        if d is None:
-            d = Identity.storagepath + Destination.STAMP_SUBDIR
-        return d
+        """Where announce stamps live: <storage>/stamps/<dest_hex>.dstamp
+        (tools/gen_announce_stamp.py writes the same layout)."""
+        return Identity.storagepath + "/stamps"
 
     @staticmethod
     def _announce_stamps():
@@ -192,11 +187,6 @@ class Destination:
             return None
 
     @staticmethod
-    def _rtc_get(dest_hash):
-        d = Destination._rtc_read()
-        return d.get(dest_hash) if d else None
-
-    @staticmethod
     def _rtc_put(dest_hash, t):
         d = Destination._rtc_read() or {}
         d[dest_hash] = t
@@ -223,8 +213,6 @@ class Destination:
                 raw = f.read(6)
         except Exception:
             return None
-        if len(raw) == 5:               # legacy: "every emission is below this horizon"
-            return (int.from_bytes(raw, "big") - 1, 1)
         if len(raw) == 6 and raw[0] in (0, 1):
             return (int.from_bytes(raw[1:6], "big"), raw[0])
         return None
@@ -232,7 +220,6 @@ class Destination:
     @staticmethod
     def _flash_write(dest_hash, value, mode):
         try:
-            import os
             d = Identity.storagepath + "/emitted"
             try:
                 os.stat(d)
@@ -265,7 +252,7 @@ class Destination:
         (about once per PERSIST_EVERY = 10 min of emission time), when a real clock
         takes over from a ceiling, and in ceiling mode in blocks of PERSIST_EVERY, so
         a reboot cannot reuse a value. A persisted value in the future of a valid
-        clock (an old 5-byte "horizon" file, or an unset-clock run) is continued from
+        clock (an unset-clock run) is continued from
         in +1 steps - peers hold an announce that new, so a lower time would be ignored -
         and the emission falls back to real time as soon as the clock passes it
         (about one announce interval per second of surplus)."""
@@ -277,7 +264,8 @@ class Destination:
                 D._stored[dest_hash] = st
             else:
                 D._stored.pop(dest_hash, None)
-            last = D._rtc_get(dest_hash)
+            rtc = D._rtc_read()
+            last = rtc.get(dest_hash) if rtc else None
             if last is None:
                 if st is None:
                     last = 0

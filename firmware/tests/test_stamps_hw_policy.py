@@ -10,6 +10,7 @@ import types
 import harness  # noqa: F401  (puts firmware/ on sys.path)
 
 stamps = importlib.import_module("urns.stamps")
+stamp_hw = importlib.import_module("urns.stamp_hw")
 ed = importlib.import_module("urns.crypto.ed25519")
 
 CLK = [100000]
@@ -60,7 +61,8 @@ class Env:
         stamps.const.ticks_ms = lambda: CLK[0]
         sys.implementation._machine = "Generic ESP32S3 module with ESP32S3"
         sys.modules.pop("network", None)
-        stamps.hw_reset()
+        stamp_hw.hw_reset()
+        stamps._hw_mod = None
         stamps.reset_native_probe()
         stamps.set_table_size(4)
         return self
@@ -69,7 +71,7 @@ class Env:
         self.fake = fake
         ed._native = fake
         stamps.reset_native_probe()
-        stamps.hw_reset()
+        stamp_hw.hw_reset()
         return fake
 
     def __exit__(self, *a):
@@ -82,7 +84,8 @@ class Env:
             sys.modules.pop("network", None)
         else:
             sys.modules["network"] = net
-        stamps.hw_reset()
+        stamp_hw.hw_reset()
+        stamps._hw_mod = None
         stamps.reset_native_probe()
         stamps.set_table_size(64)
 
@@ -109,21 +112,21 @@ def test_healthy_start_checks_once_then_uses_hardware():
     with Env() as e:
         f = e.use(Fake())
         assert stamps._hw() == 1 and stamps._hw() == 1
-        assert [c for c in f.calls if c[0] == "selftest"] == [("selftest", stamps.HW_CHECK_N)]
+        assert [c for c in f.calls if c[0] == "selftest"] == [("selftest", stamp_hw.HW_CHECK_N)]
         assert f.probes == [0, 1, 2]                      # claim, owned?, release
-        assert stamps.hw_disabled() is None
+        assert stamp_hw.hw_disabled() is None
         _slice()
         assert f.calls[-1] == ("hc", (1,))
 
 
 def test_selftest_mismatch_disables_for_the_session():
     with Env() as e:
-        f = e.use(Fake(selftest=(3, 5, stamps.HW_CHECK_N)))
+        f = e.use(Fake(selftest=(3, 5, stamp_hw.HW_CHECK_N)))
         assert stamps._hw() == 0
-        assert "differ" in stamps.hw_disabled()
+        assert "differ" in stamp_hw.hw_disabled()
         _slice()
         assert f.calls[-1] == ("hc", ())                  # software call, no hw argument
-        assert [c for c in f.calls if c[0] == "selftest"] == [("selftest", stamps.HW_CHECK_N)]   # not retried
+        assert [c for c in f.calls if c[0] == "selftest"] == [("selftest", stamp_hw.HW_CHECK_N)]   # not retried
 
 
 def test_old_native_module_without_check_disables():
@@ -136,22 +139,22 @@ def test_old_native_module_without_check_disables():
             return None, None, a[3]
     with Env() as e:
         e.use(Old())
-        assert stamps._hw() == 0 and "too old" in stamps.hw_disabled()
+        assert stamps._hw() == 0 and "too old" in stamp_hw.hw_disabled()
 
 
 def test_sentinel_surviving_firmware_reset_disables():
     with Env() as e:
         e.use(Fake(owned_after_reset=1))
-        assert stamps._hw() == 0 and "sentinel" in stamps.hw_disabled()
+        assert stamps._hw() == 0 and "sentinel" in stamp_hw.hw_disabled()
 
 
 def test_engine_busy_at_check_is_retried_later_not_disabled():
     with Env() as e:
         f = e.use(Fake(selftest=(0, 0, 0)))
-        assert stamps._hw() == 0 and stamps.hw_disabled() is None
+        assert stamps._hw() == 0 and stamp_hw.hw_disabled() is None
         assert stamps._hw() == 0                           # still in the hold-off
         f.selftest = None
-        CLK[0] += stamps.HW_HOLDOFF_S * 1000 + 1
+        CLK[0] += stamp_hw.HW_HOLDOFF_S * 1000 + 1
         assert stamps._hw() == 1
 
 
@@ -161,7 +164,7 @@ def test_mismatch_after_a_slice_disables():
         _slice()
         f.stats[1] = 1
         _slice()
-        assert "mismatch" in stamps.hw_disabled()
+        assert "mismatch" in stamp_hw.hw_disabled()
         assert stamps._hw() == 0
 
 
@@ -171,9 +174,9 @@ def test_busy_or_lost_event_holds_off_then_resumes():
         _slice()
         f.stats[2] += 1                                   # found busy
         _slice()
-        assert stamps.hw_disabled() is None
+        assert stamp_hw.hw_disabled() is None
         assert stamps._hw() == 0                          # hold-off
-        CLK[0] += stamps.HW_HOLDOFF_S * 1000 - 1
+        CLK[0] += stamp_hw.HW_HOLDOFF_S * 1000 - 1
         assert stamps._hw() == 0
         CLK[0] += 2
         assert stamps._hw() == 1
@@ -183,20 +186,20 @@ def test_too_many_events_in_window_disables_but_old_events_expire():
     with Env() as e:
         f = e.use(Fake())
         _slice()
-        for _ in range(stamps.HW_MAX_EVENTS):
+        for _ in range(stamp_hw.HW_MAX_EVENTS):
             f.stats[3] += 1                               # taken from us
-            CLK[0] += stamps.HW_HOLDOFF_S * 1000 + 1
+            CLK[0] += stamp_hw.HW_HOLDOFF_S * 1000 + 1
             _slice()
-        assert stamps.hw_disabled() is None               # exactly the tolerated number
-        CLK[0] += stamps.HW_WINDOW_S * 1000               # old events leave the window
+        assert stamp_hw.hw_disabled() is None               # exactly the tolerated number
+        CLK[0] += stamp_hw.HW_WINDOW_S * 1000               # old events leave the window
         f.stats[3] += 1
         _slice()
-        assert stamps.hw_disabled() is None
-        for _ in range(stamps.HW_MAX_EVENTS):
+        assert stamp_hw.hw_disabled() is None
+        for _ in range(stamp_hw.HW_MAX_EVENTS):
             f.stats[2] += 1
-            CLK[0] += stamps.HW_HOLDOFF_S * 1000 + 1
+            CLK[0] += stamp_hw.HW_HOLDOFF_S * 1000 + 1
             _slice()
-        assert "contention" in stamps.hw_disabled()
+        assert "contention" in stamp_hw.hw_disabled()
 
 
 def test_wifi_gating_and_settle_time():
@@ -207,7 +210,7 @@ def test_wifi_gating_and_settle_time():
         assert stamps._hw() == 0                          # WiFi down
         up[0] = True
         assert stamps._hw() == 0                          # just came up
-        CLK[0] += stamps.HW_WIFI_SETTLE_S * 1000 - 1
+        CLK[0] += stamp_hw.HW_WIFI_SETTLE_S * 1000 - 1
         assert stamps._hw() == 0
         CLK[0] += 2
         assert stamps._hw() == 1
@@ -215,7 +218,7 @@ def test_wifi_gating_and_settle_time():
         assert stamps._hw() == 0
         up[0] = True
         assert stamps._hw() == 0                          # reconnect restarts the settle time
-        CLK[0] += stamps.HW_WIFI_SETTLE_S * 1000 + 1
+        CLK[0] += stamp_hw.HW_WIFI_SETTLE_S * 1000 + 1
         assert stamps._hw() == 1
 
 
@@ -241,6 +244,30 @@ def _run():
             traceback.print_exc()
     print("\n%d/%d passed" % (len(tests) - failed, len(tests)))
     return failed
+
+
+def test_failed_lazy_import_never_raises_and_is_not_retried():
+    # stamp_hw is imported on first use; on a board without the heap for it the
+    # import fails: the search must carry on in software, and the failure must
+    # be remembered so the import is not attempted on every slice.
+    with Env() as e:
+        f = e.use(Fake())
+        real = sys.modules["urns.stamp_hw"]
+        pkg = sys.modules["urns"]
+        delattr(pkg, "stamp_hw")                         # `from . import` checks the package attribute first
+        sys.modules["urns.stamp_hw"] = None              # ... then the module table -> ImportError
+        try:
+            for _ in range(3):
+                assert _slice() == (None, 10)            # software slice, no exception
+                assert stamps._hw(f) == 0
+            assert stamps._hw_mod is False
+            sys.modules["urns.stamp_hw"] = real          # importable again: still not retried
+            assert stamps._hw(f) == 0 and stamps._hw_mod is False
+        finally:
+            sys.modules["urns.stamp_hw"] = real
+            pkg.stamp_hw = real
+        assert [c for c in f.calls if c[0] == "hc"] == [("hc", ())] * 3
+        assert [c for c in f.calls if c[0] == "selftest"] == []
 
 
 if __name__ == "__main__":

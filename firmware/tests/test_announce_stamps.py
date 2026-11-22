@@ -243,6 +243,23 @@ def test_invalid_files_rejected():
     shutil.rmtree(tmp)
 
 
+def test_load_survives_a_non_oserror_while_opening():
+    # storage not configured / garbage path: open()/path building may raise
+    # something other than OSError (TypeError here); a stored-stamp probe must
+    # never raise into the announce path.
+    d = S.make_destination()
+    A.reset()
+    A.configure(storage_dir=None)
+    old = A.storage
+    A.storage = 5
+    try:
+        assert A.load(d) is None
+        assert A.get_stamp(d) is None
+    finally:
+        A.storage = old
+        A.reset()
+
+
 def test_cache_is_bounded():
     A.reset()
     for i in range(A.MAX_ENTRIES + 5):

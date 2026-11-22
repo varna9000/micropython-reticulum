@@ -446,9 +446,12 @@ def _search_link(budget=120, cost=10.0):
     ol._sig_pub_bytes = os.urandom(32)
     ol._stamp_cost = cost
     ol._stamp_tried = 0
-    ol._stamp_deadline = time.time() + budget
+    ol._stamp_deadline = True
+    ol._stamp_budget_ms = int(budget * 1000)
+    ol._stamp_spent_ms = 0
+    ol._stamp_waiting = False
     ol._stamp_start_ms = ol._stamp_mark = const.ticks_ms()
-    ol._stamp_hard_ms = int(budget * RealOL.STAMP_QUEUE_FACTOR * 1000)
+    ol._stamp_hard_ms = ol._stamp_budget_ms * RealOL.STAMP_QUEUE_FACTOR
     ol._stamp_material = b"D" * 16 + ol._sig_pub_bytes
     ol.pending_requests = {}
     ol.incoming_resources, ol.outgoing_resources = [], []
@@ -511,7 +514,7 @@ def test_r9_closing_a_queued_link_keeps_the_running_searchs_state_and_waiting_is
         clk.ms += 25_000                                  # b queues for 25 s: longer than its 10 s budget
         b._stamp_step(b"D" * 16)
         assert b.status == RealOL.PENDING, "waiting for another search's turn must not burn the budget"
-        assert b._stamp_deadline > time.time()
+        assert b._stamp_spent_ms == 0, "queue time is not charged to the budget"
         assert stamps._py is state, "a queued link must not evict the running search"
         b._stamp_failed("cancelled")                      # b closes: only ITS state may be dropped
         assert stamps._py is state, "closing b reset a's search"

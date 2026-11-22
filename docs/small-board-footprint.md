@@ -56,6 +56,30 @@ key search); first large message: `resource` (+9,869 B, same as before the branc
 Worst case on a stamping board: eager total + `resource` + `stamps` + `stamp_check` + `announce_stamps` =
 159,380 B (HEAD: 119,274 B).
 
+## Update: simplification round (measured with the same method, `-march=xtensawin`, same relative paths)
+
+Before = commit 5870adc, after = working tree with the reviewed simplifications. Eager set unchanged (same 25 files).
+
+| module | before | after | delta |
+|---|---:|---:|---:|
+| `lxmf` | 23,821 | 21,341 | -2,480 |
+| `transport` | 28,236 | 27,451 | -785 |
+| `destination` | 7,613 | 7,487 | -126 |
+| `link` | 20,089 | 20,034 | -55 |
+| `crypto.ed25519` | 1,504 | 1,409 | -95 |
+| `packet` | 5,931 | 5,894 | -37 |
+| **eager total** | **132,936** | **129,358** | **-3,578** |
+| `resource` (on demand) | 9,724 | 9,613 | -111 |
+| `stamps` (on demand) | 7,425 | 5,463 | -1,962 |
+| `stamp_hw` (new, only with `stamps_hw_sha`) | - | 1,929 | +1,929 |
+| `stamp_check` | 2,089 | 2,122 | +33 |
+| `announce_stamps` | 4,052 | 3,890 | -162 |
+| `interfaces.tcp` | 4,510 | 4,281 | -229 |
+
+The hardware-SHA policy moved out of `stamps.py` into `stamp_hw.py`, which only loads when `stamps_hw_sha` is on: a board
+without the accelerator never loads those 1,929 B (`stamps` itself is 1,962 B smaller). Worst case on a stamping board
+without the accelerator: eager + `resource` + `stamps` + `stamp_check` + `announce_stamps` = 129,358 + 9,613 + 5,463 + 2,122 + 3,890 = 150,446 B.
+
 ## Where the growth is, and what could be lazy or left out of a leaf profile (not done)
 
 Of the +25,923 B eager growth, `lxmf` is +11,966 B, `transport` +5,534 B, `link` +2,662 B and `destination` +2,732 B.
