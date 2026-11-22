@@ -116,9 +116,15 @@ LINK_ECPUBSIZE        = const(32)  # bytes
 # permanently and every page open becomes a fresh path request ("path not
 # found" while the node list is full). Gate on measured free heap, not on
 # sys.platform: a plain no-PSRAM ESP32 must keep the small caps.
+# Threshold 1 MiB: any ESP32-S3 with PSRAM (even 2 MB: ~1.8-2.06 MB free at
+# boot) is big; boards without PSRAM (~100-300 KB) stay small. It was 2 MiB,
+# which put 2 MB-PSRAM boards (2.06 MB free) in the small class: on a busy hub
+# their 160-entry known-destination table forgot a peer within minutes
+# (unverified messages, replies sent without the peer's stamp cost).
+_BIG_RAM_MIN_FREE = 1024 * 1024
 try:
     import gc as _gc
-    _BIG_RAM = _gc.mem_free() > 2 * 1024 * 1024
+    _BIG_RAM = _gc.mem_free() > _BIG_RAM_MIN_FREE
 except (ImportError, AttributeError):
     _BIG_RAM = False       # host CPython (tests): keep the small, pinned caps
 
