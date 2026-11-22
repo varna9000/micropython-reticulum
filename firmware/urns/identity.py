@@ -87,7 +87,7 @@ class Identity:
     @staticmethod
     def _evict_oldest(table, ts_idx):
         """Delete the entry with the oldest timestamp (entry[ts_idx]) that no conversation
-        is using; False when every entry is in use. One min-scan per insert (~10ms at the
+        is using and (known_destinations) nobody retained; False when every entry is in use. One min-scan per insert (~10ms at the
         cap): a batched sorted() amortizes to less total work but spikes >100ms in one tick,
         which reads as UI jank on the T-Deck."""
         try:
@@ -103,6 +103,10 @@ class Identity:
                 continue
             if in_use is not None and in_use(k):
                 continue            # a peer we are using keeps its key
+            if ts_idx == 0:
+                e = table[k]
+                if len(e) > 5 and e[5] is not None and e[5] < 0:
+                    continue        # retained (a contact, retain_destination) keeps its key too
             oldest_ts = ts
             oldest = k
         if oldest is None:

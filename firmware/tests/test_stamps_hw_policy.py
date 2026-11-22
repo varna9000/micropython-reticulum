@@ -240,6 +240,101 @@ def test_first_look_with_wifi_long_up_does_not_wait_out_the_settle_time():
         assert stamps._hw() == 1
 
 
+def _fake_network2(sta, ap=None):
+    """sta/ap: [active, connected] lists the test mutates."""
+    ap = ap if ap is not None else [False, False]
+    n = types.ModuleType("network")
+    n.STA_IF = 0
+    n.AP_IF = 1
+
+    class W:
+        def __init__(self, i):
+            self.s = sta if i == 0 else ap
+
+        def active(self):
+            return self.s[0]
+
+        def isconnected(self):
+            return self.s[0] and self.s[1]
+    n.WLAN = W
+    sys.modules["network"] = n
+    return ap
+
+
+def test_station_never_started_uses_hardware():
+    # LoRa-only board (T-Deck): no supplicant, nothing else drives the engine but hashlib,
+    # which the sentinel handles. Measured on a T-Deck Pro: 195k H/s vs 34k software.
+    with Env() as e:
+        _fake_network2([False, False])
+        e.use(Fake())
+        CLK[0] = 10 * 60 * 1000
+        assert stamps._hw() == 1
+
+
+def test_station_switched_on_mid_search_falls_back_until_joined_and_settled():
+    with Env() as e:
+        sta = [False, False]
+        _fake_network2(sta)
+        e.use(Fake())
+        CLK[0] = 10 * 60 * 1000
+        assert stamps._hw() == 1
+        sta[0] = True                                     # app turned WiFi on: joining
+        assert stamps._hw() == 0
+        sta[1] = True                                     # joined: settle time applies
+        assert stamps._hw() == 0
+        CLK[0] += stamp_hw.HW_WIFI_SETTLE_S * 1000 + 1
+        assert stamps._hw() == 1
+        sta[0] = sta[1] = False                           # switched off again
+        assert stamps._hw() == 1
+
+
+def test_station_off_then_joined_later_still_waits_the_settle_time():
+    # Off is a "down" state: a join seen afterwards is fresh, even long after boot.
+    with Env() as e:
+        sta = [False, False]
+        _fake_network2(sta)
+        e.use(Fake())
+        CLK[0] = 10 * 60 * 1000
+        assert stamps._hw() == 1
+        sta[0] = sta[1] = True                            # joined between two looks
+        assert stamps._hw() == 0
+        CLK[0] += stamp_hw.HW_WIFI_SETTLE_S * 1000 + 1
+        assert stamps._hw() == 1
+
+
+def test_access_point_active_keeps_software():
+    with Env() as e:
+        ap = _fake_network2([False, False], [True, False])
+        e.use(Fake())
+        CLK[0] = 10 * 60 * 1000
+        assert stamps._hw() == 0                          # AP does WPA for its clients
+        ap[0] = False
+        assert stamps._hw() == 1
+
+
+def test_boot_held_sha_clock_is_released_before_the_selftest():
+    # Measured on a T-Deck Pro: the SHA clock is on from boot until the first firmware SHA
+    # use. With no hashlib call yet (WiFi off, early search) the native busy check saw the
+    # engine as held forever. The start-up check makes one firmware hash first.
+    with Env() as e:
+        _fake_network2([False, False])
+        released = [False]
+
+        class BootHeld(Fake):
+            def hwselftest(self, material, n):
+                self.calls.append(("selftest", n))
+                return (0, 0, n) if released[0] else (0, 0, 0)    # done=0: engine busy
+
+        f = e.use(BootHeld())
+        real = stamp_hw._fw_sha256
+        stamp_hw._fw_sha256 = lambda data: released.__setitem__(0, True) or real(data)
+        try:
+            CLK[0] = 10 * 60 * 1000
+            assert stamps._hw() == 1, f.calls
+        finally:
+            stamp_hw._fw_sha256 = real
+
+
 def test_off_by_default_never_touches_the_module():
     with Env() as e:
         f = e.use(Fake())

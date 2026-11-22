@@ -176,17 +176,36 @@ def test_peers_are_capped_and_never_evict_a_destination_with_queued_messages():
         r.handle_announce(pending, None)
         m = LXMessage(destination_hash=pending, source_hash=b"\x01" * 16, content=b"x")
         r.pending_outbound.append(m)
+        batch = LXMRouter._peer_evict_batch()
+        scans = [0]
+        real_evict = r._evict_peers
+
+        def counting():
+            scans[0] += 1
+            return real_evict()
+
+        r._evict_peers = counting
         for _ in range(5000):
             t[0] += 1
             r.handle_announce(bytes(rnd.getrandbits(8) for _ in range(16)), None)
             assert len(r.peers) <= const_mod.MAX_DESTINATIONS
         assert pending in r.peers, "evicted a destination with a queued message"
-        assert len(r.peers) == const_mod.MAX_DESTINATIONS
-        # the least recently heard idle peer goes first
+        assert const_mod.MAX_DESTINATIONS - batch < len(r.peers) <= const_mod.MAX_DESTINATIONS
+        # Batched: one table scan per `batch` new peers, not one per announce. Found on a
+        # T-Deck Pro on a busy hub: a per-announce min() over 512 peers grew
+        # handle_announce from ~5 ms to ~45 ms once the table filled.
+        new_after_full = 5001 - const_mod.MAX_DESTINATIONS
+        assert batch > 1 and scans[0] <= new_after_full // batch + 1, (scans[0], batch)
+        # the least recently heard idle peer goes first (fill to the cap, then one more)
+        while len(r.peers) < const_mod.MAX_DESTINATIONS:
+            t[0] += 1
+            r.handle_announce(bytes(rnd.getrandbits(8) for _ in range(16)), None)
         oldest = min((k for k in r.peers if k != pending), key=lambda k: r.peers[k]["timestamp"])
+        newest = max(r.peers, key=lambda k: r.peers[k]["timestamp"])
         t[0] += 1
         r.handle_announce(b"\x77" * 16, None)
         assert oldest not in r.peers and b"\x77" * 16 in r.peers
+        assert newest in r.peers and pending in r.peers
         # a re-announce of a known peer never evicts
         n = len(r.peers)
         r.handle_announce(b"\x77" * 16, None)

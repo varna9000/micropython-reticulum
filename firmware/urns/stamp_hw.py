@@ -21,7 +21,9 @@ from . import const
 #     mismatch disables hardware for the session; each busy/lost event (the
 #     firmware had or took the engine) starts a HW_HOLDOFF_S pause and more than
 #     HW_MAX_EVENTS of them within HW_WINDOW_S disables it for the session.
-#   - no hardware while WiFi is down or for HW_WIFI_SETTLE_S after it came up.
+#   - no hardware while WiFi is joining (STA active, not connected), while the AP interface
+#     is active, or for HW_WIFI_SETTLE_S after a join; with WiFi switched off entirely
+#     (LoRa-only boards) the hardware is used.
 #   - every hit is verified in software regardless (native and find_hashcash).
 HW_CHECK_N = 256                # hashes compared in the start-up check
 HW_HOLDOFF_S = 5                # software only for this long after a busy/lost event
@@ -69,13 +71,43 @@ def hw_reset():
     _wifi_down_seen = False
 
 
+_OFF = "off"
+
+
 def _wifi_state():
-    """True/False for the STA interface; None when there is no WiFi API (host)."""
+    """True: STA connected. False: a WiFi stack that may be using the engine right now --
+    STA active but not connected (joining: WPA key derivation is thousands of SHA rounds)
+    or the AP interface active (WPA for its clients). _OFF: both interfaces inactive, no
+    supplicant runs and only hashlib (handled by the sentinel) uses the engine -- measured
+    on a T-Deck Pro with WiFi never started: self-test clean, 195k H/s vs 34k software.
+    None: no WiFi API (host)."""
     try:
         import network
-        return bool(network.WLAN(network.STA_IF).isconnected())
+        sta = network.WLAN(network.STA_IF)
+        act = getattr(sta, "active", None)
+        sta_on = True if act is None else bool(act())
+        ap_on = False
+        if hasattr(network, "AP_IF"):
+            try:
+                ap_on = bool(network.WLAN(network.AP_IF).active())
+            except Exception:
+                ap_on = False
+        if not sta_on:
+            return False if ap_on else _OFF
+        if ap_on:
+            return False
+        return bool(sta.isconnected())
     except Exception:
         return None
+
+
+def _fw_sha256(data):
+    """One hash through the FIRMWARE's SHA path (IDF acquire, engine reset, release)."""
+    try:
+        from hashlib import sha256 as _s
+    except ImportError:
+        from .crypto import sha256 as _s
+    return _s(data).digest()
 
 
 def _hw_selfcheck(nm):
@@ -85,6 +117,14 @@ def _hw_selfcheck(nm):
     probe = getattr(nm, "hwprobe", None)
     if st is None or probe is None or not hasattr(nm, "hwstats"):
         return "native module too old for the start-up check"
+    # The SHA bus clock is on from boot until the firmware first uses the engine, which the
+    # native busy check (clock bit set = somebody holds it) cannot tell from a real holder.
+    # One firmware hash acquires and releases it through IDF's lock, leaving the clock off
+    # unless someone really holds the engine (seen on a T-Deck Pro with WiFi never started).
+    try:
+        _fw_sha256(b"")
+    except Exception:
+        pass
     try:
         bad, badw, done = st(os.urandom(48), HW_CHECK_N)
     except Exception as e:
@@ -97,11 +137,7 @@ def _hw_selfcheck(nm):
     try:
         if not probe(0):
             return "engine busy at the coordination check"
-        try:
-            from hashlib import sha256 as _fw_sha     # firmware acquire + reset + release
-        except ImportError:
-            from .crypto import sha256 as _fw_sha
-        _fw_sha(b"x").digest()
+        _fw_sha256(b"x")                              # firmware acquire + reset + release
         owned = probe(1)
         probe(2)
     except Exception as e:
@@ -151,6 +187,12 @@ def usable(nm):
         return 0
     now = const.ticks_ms()
     w = _wifi_state()
+    if w == _OFF:
+        # No WiFi stack running: the engine is ours between hashlib calls. Counts as a
+        # down state, so a join seen later gets the settle time.
+        _wifi_up_at = None
+        _wifi_down_seen = True
+        w = None
     if w is False:
         _wifi_up_at = None
         _wifi_down_seen = True

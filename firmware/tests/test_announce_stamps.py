@@ -367,6 +367,64 @@ def test_request_without_loop_defers_then_kick_starts():
     shutil.rmtree(tmp)
 
 
+def test_hold_pauses_generation_until_released():
+    # A battery board (T-Deck) sets A.hold to "not on USB power": generation must not
+    # hash while it returns True, and must finish once it returns False.
+    d = S.make_destination()
+    tmp = _tmp()
+    A.configure(enabled=True, value=12, allow_low=True)
+    held = [True]
+    calls = [0]
+    real_find = stamps.find_hashcash
+
+    def counting(*a, **k):
+        calls[0] += 1
+        return real_find(*a, **k)
+
+    stamps.find_hashcash = counting
+    A.hold = lambda: held[0]
+
+    async def main():
+        A.request(d)
+        await asyncio.sleep(0.4)
+        assert calls[0] == 0 and d.hash in A._tasks            # held: not one slice ran
+        held[0] = False
+        t0 = time.time()
+        while d.hash in A._tasks and time.time() - t0 < 60:
+            await asyncio.sleep(0.01)
+
+    try:
+        asyncio.run(main())
+    finally:
+        stamps.find_hashcash = real_find
+    assert calls[0] > 0 and A.get_stamp(d) is not None
+    A.reset()
+    assert A.hold is None                                      # reset clears the hook
+    shutil.rmtree(tmp)
+
+
+def test_raising_hold_does_not_stop_generation():
+    d = S.make_destination()
+    tmp = _tmp()
+    A.configure(enabled=True, value=10, allow_low=True)
+
+    def bad():
+        raise OSError("i2c")
+
+    A.hold = bad
+
+    async def main():
+        A.request(d)
+        t0 = time.time()
+        while d.hash in A._tasks and time.time() - t0 < 60:
+            await asyncio.sleep(0.01)
+
+    asyncio.run(main())
+    assert A.get_stamp(d) is not None
+    A.reset()
+    shutil.rmtree(tmp)
+
+
 def test_disabled_generation_only_logs_material_once():
     d = S.make_destination()
     tmp = _tmp()

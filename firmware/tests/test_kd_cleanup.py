@@ -182,6 +182,24 @@ def test_loaded_four_and_five_element_files_still_work():
         assert c.run_pass(const.KD_UNUSED_LINGER + 1) == 2
 
 
+
+def test_retained_entries_survive_cap_eviction():
+    # A contact (T-Deck favourite) must not be pushed out of known_destinations by
+    # a flood of unsolicited announces at the table cap.
+    with Clock():
+        kd = Identity.known_destinations
+        contact = b"c" * 16
+        kd[contact] = [T0 - 10_000, b"pk", PUB, None]          # the oldest entry
+        assert Identity.retain_destination(contact)
+        for i in range(4):
+            kd[bytes([i]) * 16] = [T0 + i, b"pk", PUB, None]
+        assert Identity._evict_oldest(kd, 0)
+        assert contact in kd and (b"\x00" * 16) not in kd     # next-oldest went instead
+        # all remaining entries retained: nothing can go
+        for k in list(kd):
+            Identity.retain_destination(k)
+        assert Identity._evict_oldest(kd, 0) is False and contact in kd
+
 if __name__ == "__main__":
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

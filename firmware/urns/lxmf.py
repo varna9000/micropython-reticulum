@@ -1696,6 +1696,30 @@ class LXMRouter:
         self.handle_announce(destination_hash, app_data)
 
     @staticmethod
+    def _peer_evict_batch():
+        return max(1, const.MAX_DESTINATIONS // 16)
+
+    def _evict_peers(self):
+        """The peers table is full: drop the least recently heard peers, a batch
+        of 1/16 of the cap at once (more on a tie at the cut-off second), never a
+        destination we still have a message queued for (its stamp cost is read at
+        send time). Batched because this runs on EVERY new announce at the cap: a
+        min() with a Python key over 512 peers cost ~40 ms per announce on an
+        ESP32-S3 on a busy hub (~4 new peers/s); one scan per batch, with the sort
+        on plain numbers done in C, amortizes to well under 1 ms. Returns False
+        when every peer is busy (the newcomer is then not stored)."""
+        peers = self.peers
+        busy = set(m.destination_hash for m in self.pending_outbound)
+        ts = [v["timestamp"] for k, v in peers.items() if k not in busy]
+        if not ts:
+            return False
+        ts.sort()
+        cut = ts[min(self._peer_evict_batch(), len(ts)) - 1]
+        for k in [k for k, v in peers.items() if v["timestamp"] <= cut and k not in busy]:
+            del peers[k]
+        return True
+
+    @staticmethod
     def _parse_stamp_cost(app_data):
         """Inbound stamp cost a peer announces: msgpack [name, cost, ...]."""
         try:
@@ -1722,15 +1746,7 @@ class LXMRouter:
         peers = self.peers
         store = True
         if destination_hash not in peers and len(peers) >= const.MAX_DESTINATIONS:
-            # Bounded like the other tables (every announce on a busy hub adds a
-            # peer): drop the least recently heard one, never a destination we
-            # still have a message queued for (its stamp cost is read at send time).
-            busy = [m.destination_hash for m in self.pending_outbound]
-            idle = [k for k in peers if k not in busy]
-            if idle:
-                del peers[min(idle, key=lambda k: peers[k]["timestamp"])]
-            else:
-                store = False
+            store = self._evict_peers()
         if store:
             peers[destination_hash] = {
                 "name": display_name,

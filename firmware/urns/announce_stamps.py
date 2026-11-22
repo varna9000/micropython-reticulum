@@ -21,6 +21,8 @@
 # receive-side twin of announce_stamp_allow_low -- a private network sets both).
 # A stored stamp below announce_stamp_value is used until a new one at the
 # configured value has been generated in the background and replaces it.
+# `hold` (set by the application, not config): a callable that pauses generation
+# while it returns True -- a battery board hashes only on USB power.
 
 import os
 import time
@@ -41,6 +43,8 @@ VALUE = VALUE_DEFAULT           # target value of generated stamps
 MIN = MIN_COST                  # a stored stamp must reach at least this
 DUTY = 50
 storage = None                  # base dir; defaults to Identity.storagepath
+hold = None                     # optional callable: True pauses generation (e.g. a battery
+                                # board on battery power); an exception counts as False
 
 _cache = {}                     # dest_hash -> stamp bytes
 _tasks = {}                     # dest_hash -> asyncio task
@@ -70,7 +74,7 @@ def configure(enabled=None, value=None, allow_low=False, duty=None, storage_dir=
 
 def reset():
     """Forget all state (tests)."""
-    global ENABLED, VALUE, MIN, DUTY, storage
+    global ENABLED, VALUE, MIN, DUTY, storage, hold
     for t in list(_tasks.values()):
         try:
             t.cancel()
@@ -89,6 +93,7 @@ def reset():
     MIN = MIN_COST
     DUTY = 50
     storage = None
+    hold = None
 
 
 def material(dest):
@@ -232,6 +237,15 @@ def request(dest):
         kick()
 
 
+def _held():
+    if hold is None:
+        return False
+    try:
+        return bool(hold())
+    except Exception:
+        return False
+
+
 def kick():
     """Create generation tasks for pending destinations (needs an event loop;
     Reticulum.run() calls this again once it is running)."""
@@ -270,6 +284,9 @@ async def _generate(dest):
             if stamps.interactive_active():
                 # an interactive search owns the CPU: background work yields entirely
                 await asyncio.sleep_ms(100)
+                continue
+            if _held():
+                await asyncio.sleep_ms(1000)
                 continue
             duty.begin()
             stamp, tried = stamps.find_hashcash(mat, target, STAMP_LEN, background=True)
