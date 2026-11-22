@@ -122,11 +122,15 @@ def connect_wifi(ssid, password, timeout=15):
                 raise RuntimeError("WiFi connection timed out")
             time.sleep(0.5)
 
-    # Disable WiFi power management to reliably receive broadcast UDP
-    if platform == "esp32":
-        wlan.config(pm=0)
-    elif platform == "rp2":
-        wlan.config(pm=0xa11140)
+    # WiFi power saving and TX power from config.py (WIFI_POWER_SAVE,
+    # WIFI_TX_POWER; see wifi_power.py). Power saving stays off only when a
+    # UDPInterface is enabled (broadcast reception needs the modem awake).
+    try:
+        import config as _config
+    except ImportError:
+        _config = None
+    import wifi_power
+    wifi_power.apply(wlan, _config, log=print if DEBUG >= 1 else None)
 
     ip = wlan.ifconfig()[0]
     if DEBUG >= 1:

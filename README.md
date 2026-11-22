@@ -117,6 +117,7 @@ On a board with a small filesystem (a 4 MB ESP32-S3 has ~2 MB for files) copy on
 ```bash
 mpremote cp -r firmware/urns :                # then remove any __pycache__ / .DS_Store on the board
 mpremote cp firmware/lib/ed25519_iram.mpy firmware/lib/ed25519_fast_xtensawin.mpy firmware/lib/bz2_fast_xtensawin.mpy :lib/
+mpremote cp firmware/wifi_power.py firmware/config.py firmware/lora_boards.py :   # plus the example you run
 ```
 
 ### Step 3 — Configure WiFi
@@ -130,6 +131,11 @@ NODE_NAME = "MyNode"
 ```
 
 If you'll use LoRa or TCP instead of WiFi, also enable the matching block in the `CONFIG["interfaces"]` list. See [Interfaces](#interfaces) below for the full reference.
+
+WiFi power is set from `config.py` as well (applied by `wifi_power.py`, used by `boot.py` and every example):
+
+- `WIFI_POWER_SAVE = "auto"` turns modem power saving on, unless an enabled `UDPInterface` needs reliable broadcast reception (then it stays off). `True`/`False` force it. On an ESP32-S3 node on a busy TCP hub the chip ran at ~69 °C with power saving off and ~55 °C with it on, with no slower replies or disconnects.
+- `WIFI_TX_POWER = 13` sets the transmit power in dBm (the ESP32 firmware default is 20). Raise it for a node far from its access point; `None` leaves the firmware default.
 
 ### Step 4 — Run
 
@@ -290,10 +296,11 @@ done
 for f in path/to/micropython-lib/lora/*.py; do $MPY -march=xtensawin -o stage/lib/lora/$(basename ${f%.py}).mpy $f; done
 $MPY -march=xtensawin -o stage/example_eink_node.mpy firmware/example_eink_node.py
 $MPY -march=xtensawin -o stage/lora_boards.mpy firmware/lora_boards.py
+$MPY -march=xtensawin -o stage/wifi_power.mpy firmware/wifi_power.py
 cp firmware/config.py stage/   # edit NODE_NAME, board, radio params first
 cp firmware/lib/bz2_fast_xtensawin.mpy stage/lib/
 mpremote connect /dev/cu.usbserial-0001 fs cp -r stage/urns stage/peripherals stage/lib :/
-mpremote connect /dev/cu.usbserial-0001 fs cp stage/example_eink_node.mpy stage/lora_boards.mpy stage/config.py :/
+mpremote connect /dev/cu.usbserial-0001 fs cp stage/example_eink_node.mpy stage/lora_boards.mpy stage/wifi_power.mpy stage/config.py :/
 ```
 
 ## Interfaces

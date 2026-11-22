@@ -11,6 +11,15 @@ WIFI_SSID = "YOUR_WIFI_SSID"      # <- your WiFi network name
 WIFI_PASS = "YOUR_WIFI_PASSWORD"  # <- your WiFi password
 NODE_NAME = "ESP32s3"
 
+# ---- WiFi power (see wifi_power.py) ----
+# Modem power saving: "auto" = on unless an enabled UDPInterface needs reliable
+# broadcast reception (then off). True/False force it. Measured on an ESP32-S3
+# on a busy hub: ~69 C chip temperature with it off, ~55 C with it on.
+WIFI_POWER_SAVE = "auto"
+# Transmit power in dBm (ESP32 firmware default: 20). 13 dBm is plenty near an
+# access point; raise it for a distant AP, None = leave the firmware default.
+WIFI_TX_POWER = 13
+
 # ---- E-ink panel (example_eink_node.py only) ----
 # Heltec Wireless Paper wiring. VEXT (panel power) is GPIO45 and ACTIVE LOW.
 # "rotate" picks the landscape orientation (90 or 270); "xoff" shifts the 122

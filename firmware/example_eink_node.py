@@ -42,7 +42,6 @@ def connect_wifi(ssid, password, timeout=15):
     import network
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
-    wlan.config(pm=0)
     network.WLAN(network.AP_IF).active(False)
     if not wlan.isconnected():
         wlan.connect(ssid, password)
@@ -51,6 +50,13 @@ def connect_wifi(ssid, password, timeout=15):
             if time.time() - t0 > timeout:
                 raise RuntimeError("WiFi connect timeout")
             time.sleep(0.5)
+    # WiFi power saving / TX power from config.py (see wifi_power.py)
+    try:
+        import config as _config
+    except ImportError:
+        _config = None
+    import wifi_power
+    wifi_power.apply(wlan, _config)
     return wlan.ifconfig()[0]
 
 

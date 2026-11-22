@@ -43,8 +43,13 @@ def _wifi_up():
                     print("boot: WiFi timeout -> booting without network")
                     return None
                 time.sleep(0.5)
-        if sys.platform == "esp32":
-            wlan.config(pm=0)             # power-save off (reliable broadcast RX)
+        # Power saving / TX power from config.py (WIFI_POWER_SAVE, WIFI_TX_POWER;
+        # see wifi_power.py): power saving stays off only with a UDPInterface.
+        try:
+            import wifi_power
+            wifi_power.apply(wlan, config, log=print)
+        except ImportError:
+            pass
         ip = wlan.ifconfig()[0]
         print("boot: WiFi up ->", ip)
         return ip
