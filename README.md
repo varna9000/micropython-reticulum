@@ -163,523 +163,265 @@ To run a different example, replace `example_node` with `example_nomadnet_node`,
 
 ### 1 — Chat node (`example_node.py`)
 
-The default example. The node receives LXMF messages, echoes them back, and can drive the onboard NeoPixel from chat commands.
+The default example. Receives LXMF messages, echoes them back, and can drive the onboard NeoPixel (GPIO 21 on the Waveshare S3-Zero) from chat commands. Needs any ESP32-S3 with WiFi and standard MicroPython.
 
-- **Hardware**: any supported ESP32-S3 board (WiFi). The onboard NeoPixel is on GPIO 21 on the Waveshare S3-Zero.
-- **Firmware**: standard MicroPython.
-- **Config**: WiFi SSID/password + a WiFi interface enabled in `CONFIG["interfaces"]`.
-- **Usage from MeshChat**:
+| You send | What happens |
+|----------|--------------|
+| `red` / `green` / `blue` | Onboard LED changes colour |
+| `off` | LED turns off |
+| anything else | Echoed back to you |
 
-  | You send | What happens |
-  |----------|--------------|
-  | `red` | Onboard LED turns red |
-  | `green` | LED turns green |
-  | `blue` | LED turns blue |
-  | `off` | LED turns off |
-  | anything else | Echoed back to you |
-
-Commands are case-insensitive. The same pattern can drive relays, motors, or any GPIO-attached hardware — see the [`gpio_control` peripheral](#peripherals).
+Commands are case-insensitive. The same pattern can drive relays, motors, or any GPIO-attached hardware — see [Peripherals](#peripherals).
 
 ### 2 — NomadNet page server (`example_nomadnet_node.py`)
 
-Serves [micron-format](https://github.com/markqvist/NomadNet) pages over Reticulum Links. Think of it as a tiny web server reachable only via Reticulum.
+Serves [micron-format](https://github.com/markqvist/NomadNet) pages over Reticulum Links, a tiny web server reachable only via Reticulum. Any ESP32-S3 (WiFi, LoRa or TCP), standard MicroPython, optional I²C/UART/ADC sensors.
 
-- **Hardware**: any supported ESP32-S3 board. Optional sensors connected via I²C, UART, or ADC.
-- **Firmware**: standard MicroPython.
-- **Config**: WiFi (or LoRa / TCP) interface enabled.
-- **How to use**: open NomadNet or MeshChat on another machine, wait for the announce as `nomadnetwork.node`, then browse to the node. The default landing page is `firmware/pages/index.mu`. Drop more `.mu` files into `firmware/pages/` to add more pages.
+Open NomadNet or MeshChat on another machine, wait for the `nomadnetwork.node` announce, and browse to the node. The landing page is `firmware/pages/index.mu`; drop more `.mu` files into `firmware/pages/` to add pages. Template variables: `{node_name}`, `{mem_free}`, `{uptime}`, and `{sensor}` (readings from active [peripherals](#peripherals)).
 
-Template variables you can use inside a `.mu` page:
-
-| Variable | Example output |
-|----------|----------------|
-| `{node_name}` | `MyNode` |
-| `{mem_free}` | `7.6 MB` |
-| `{uptime}` | `2h 15m 30s` |
-| `{sensor}` | `Temperature: 24.44C, Pressure: 995.45hPa, Humidity: 100.00%` |
-
-Pages under ~417 bytes ride a single encrypted link packet. Larger pages and downloadable files (up to 16 KB) are transferred automatically via the Resource protocol. Files dropped into `firmware/files/` are served at `/file/<name>` — link to them from a page with `` [label`:/file/name] ``.
+Pages under ~417 bytes ride a single encrypted link packet; larger pages and files (up to 16 KB) use the Resource protocol automatically. Files in `firmware/files/` are served at `/file/<name>`; link to them with `` [label`:/file/name] ``.
 
 ### 3 — Camera node (`example_camera_node.py`)
 
-Captures a photo with an OV2640 and ships it back as an LXMF image attachment. By
-default it sends a **VGA (640 × 480) WebP** (~7 KB) — small enough for LoRa yet far
-higher resolution than a same-size JPEG — and falls back to JPEG if the WebP encoder
-isn't installed.
+Captures a photo with an OV2640 and returns it as an LXMF image attachment, by default a **VGA (640 × 480) WebP** (~7 KB, small enough for LoRa), falling back to JPEG if the WebP encoder isn't installed.
 
 ![camera demo](images/image2-cam.png "Camera Module Demo")
 
-- **Hardware**: an ESP32-S3-CAM board with an OV2640 camera + PSRAM.
-- **Firmware**: **camera-enabled MicroPython is mandatory** (see [Step 1](#step-1--flash-micropython-to-your-board)). Standard MicroPython will fail at `import camera`.
-- **Config**: WiFi creds.
-- **How to use**: send `image` from MeshChat / Sideband to get a photo back (delivered via a Link + Resource transfer). Send `help` or `settings` to see the live controls.
-- **Image format & quality**: resolution, WebP quality, downscale, exposure, flash and night mode are all adjustable at runtime by messaging the node — see **[Camera image settings (JPEG & WebP)](docs/CAMERA_WEBP.md)** for every parameter and the size/quality trade-offs.
-- **WebP encoder**: the optional native module `webp_fast.mpy` in `/lib` (built from [`tools/natmod/webp_fast/`](tools/natmod/webp_fast/)). Without it the node simply sends JPEG. *Note: builds before July 2026 swapped red/blue in every image (pink skies, blue foliage) — a BGR/RGB mismatch in the JPEG decoder, since fixed; update `/lib/webp_fast_xtensawin.mpy` if your photos look like that.*
+- **Hardware**: ESP32-S3-CAM with OV2640 and PSRAM.
+- **Firmware**: **camera-enabled MicroPython is mandatory** (see [Step 1](#step-1--flash-micropython-to-your-board)); standard MicroPython fails at `import camera`.
+- **Usage**: send `image` from MeshChat / Sideband (delivered via Link + Resource). Send `help` or `settings` for the live controls.
+- **Settings**: resolution, WebP quality, exposure, flash and night mode are adjustable at runtime; see [Camera image settings](docs/CAMERA_WEBP.md).
+- **WebP encoder**: optional native module `webp_fast.mpy` in `/lib` (source in [`tools/natmod/webp_fast/`](tools/natmod/webp_fast/)). Builds before July 2026 swapped red/blue (pink skies); update `/lib/webp_fast_xtensawin.mpy` if your photos look like that.
 
-For direct (non-LXMF) capture you can also use the peripheral module from the REPL:
-
-```python
-from peripherals.camera import capture
-
-# Save to flash
-capture(resolution="cif", quality=30)
-
-# In-memory only (for LXMF transmission)
-img_bytes = capture(path=None, resolution="qvga", quality=15)
-```
-
-Available resolutions: `qqvga` (160 × 120), `qvga` (320 × 240), `cif` (400 × 296), `hvga` (480 × 320), `vga` (640 × 480), and several larger options.
+For direct capture from the REPL: `from peripherals.camera import capture`, then `capture(resolution="cif", quality=30)` saves to flash and `capture(path=None, resolution="qvga", quality=15)` returns the bytes. Resolutions run from `qqvga` (160 × 120) to `vga` (640 × 480) and larger.
 
 ### 4 — Sensor node with deepsleep (`example_sensor.py`)
 
-A minimal LXMF client that boots, takes a reading, sends it to a fixed "hub" address, and goes back to deepsleep on a timer. Battery-friendly.
-
-- **Hardware**: any supported ESP32-S3 + sensor (e.g. BME280 on I²C, SDS011 on UART).
-- **Firmware**: standard MicroPython.
-- **Config**: WiFi creds + `SENSOR_HUB = "<hex destination hash>"` in `config.py` (the LXMF address of your collector node — copy it from your collector's boot log or MeshChat).
-- **How to use**: `import example_sensor`. Save as `main.py` for automatic restart-on-wake.
-
-The deepsleep timer is set inside the example; change it to suit your duty cycle.
+A minimal LXMF client that boots, reads a sensor (e.g. BME280, SDS011), sends the reading to a fixed hub address, and goes back to deepsleep. Set `SENSOR_HUB = "<hex destination hash>"` in `config.py` (the collector's LXMF address, from its boot log or MeshChat). `import example_sensor`, or save it as `main.py` to restart on every wake. The sleep interval is set inside the example.
 
 ### 5 — USB serial ↔ LoRa chat bridge (`example_proxy.py`)
 
-Turns an RP2040 with an attached LoRa radio (E32 or SX1262) into a transparent USB-to-Reticulum bridge — chat over LoRa from any laptop without installing MeshChat.
-
-- **Hardware**: RP2040 (e.g. Waveshare RP2040-Zero) + a LoRa interface.
-- **Firmware**: standard MicroPython for RP2040.
-- **Config**: LoRa interface enabled in `CONFIG["interfaces"]`.
-- **How to use**: plug the RP2040 into your laptop, open a serial terminal (`screen`, `minicom`, `tio`, `PuTTY`) on its USB CDC port. Type to chat.
+Turns an RP2040 (e.g. Waveshare RP2040-Zero) with a LoRa radio (E32 or SX1262) into a USB-to-Reticulum bridge: chat over LoRa from any laptop without MeshChat. Enable a LoRa interface in `CONFIG["interfaces"]`, plug the board in and open a serial terminal (`screen`, `minicom`, `tio`, `PuTTY`) on its USB CDC port.
 
 | Command | Effect |
 |---------|--------|
 | `/help` | Show available commands |
 | `/peers` | List known peers |
-| `/to <hex>` | Set the current chat target by hex-hash prefix |
-| `/me` | Show this node's LXMF address |
-| `/name` | Show this node's display name |
+| `/to <hex>` | Set the chat target by hex-hash prefix |
+| `/me` / `/name` | Show this node's LXMF address / display name |
 | `/announce` | Broadcast identity now |
-| `/quit` | Shutdown and return to the MicroPython REPL |
+| `/quit` | Return to the MicroPython REPL |
 
-Anything that doesn't start with `/` is sent as an LXMF chat message to the current target. The current target auto-switches to the most recent peer who messaged you, so replies are automatic.
-
----
+Text not starting with `/` is sent to the current target, which auto-switches to the most recent peer who messaged you.
 
 ### 6 — E-ink status node (`example_eink_node.py`, Heltec Wireless Paper)
 
-Runs the LXMF node and paints a read-only status screen on the Wireless
-Paper's 2.13" SSD1682 e-ink: a QR code of the node's `lxma://` contact URI
-(scan it in Sideband or MeshChat to add the node), name and short hash, RX/TX
-counters, last RSSI/SNR with signal bars, radio settings, uptime and battery.
-It redraws when the counters change or every 30 s, using the panel's fast
-refresh and a full refresh every 10th time to clear ghosting.
+Runs the LXMF node and paints a read-only status screen on the Wireless Paper's 2.13" SSD1682 e-ink: a QR code of the node's `lxma://` contact URI (scan it in Sideband or MeshChat), name and short hash, RX/TX counters, last RSSI/SNR, radio settings, uptime and battery. It redraws when the counters change or every 30 s (fast refresh, full refresh every 10th time).
 
-Set the LoRa interface's `"board": "heltec_wireless_paper"` and check the
-`EINK` pin dict in `config.py` (panel power GPIO45 is active low). Panel
-driver: `peripherals/eink_ssd1682.py` — it reads the panel chip ID and refuses
-the other 2.13" revision, and uses the controller's 8-bit Y addressing.
+Set the LoRa interface's `"board": "heltec_wireless_paper"` and check the `EINK` pin dict in `config.py`. The driver (`peripherals/eink_ssd1682.py`) reads the panel chip ID and refuses the other 2.13" revision.
 
-```python
-import example_eink_node
-```
+The board has **no PSRAM** (about 220 KB of heap), so deploy it as `mpy-cross -march=xtensawin` bytecode and leave the native Ed25519 module off the device (it costs 95 KB of heap; pure-Python crypto is slower but fits). The full staging and upload script is in [docs/eink-deploy.md](docs/eink-deploy.md). Then `import example_eink_node`.
 
-The Wireless Paper has **no PSRAM** (about 220 KB of heap), so deploy it
-differently from the other ESP32-S3 boards: precompile the stack to bytecode
-and leave the native Ed25519 module off the device (it alone costs 95 KB of
-heap; pure-Python crypto is slower but fits).
-
-```bash
-MPY=mpy-cross   # from the MicroPython repo, same major version as the board
-mkdir -p stage/lib/lora
-for f in $(cd firmware && find urns peripherals -name '*.py' -not -path '*__pycache__*'); do
-  mkdir -p stage/$(dirname $f); $MPY -march=xtensawin -o stage/${f%.py}.mpy firmware/$f
-done
-for f in path/to/micropython-lib/lora/*.py; do $MPY -march=xtensawin -o stage/lib/lora/$(basename ${f%.py}).mpy $f; done
-$MPY -march=xtensawin -o stage/example_eink_node.mpy firmware/example_eink_node.py
-$MPY -march=xtensawin -o stage/lora_boards.mpy firmware/lora_boards.py
-$MPY -march=xtensawin -o stage/wifi_power.mpy firmware/wifi_power.py
-cp firmware/config.py stage/   # edit NODE_NAME, board, radio params first
-cp firmware/lib/bz2_fast_xtensawin.mpy stage/lib/
-mpremote connect /dev/cu.usbserial-0001 fs cp -r stage/urns stage/peripherals stage/lib :/
-mpremote connect /dev/cu.usbserial-0001 fs cp stage/example_eink_node.mpy stage/lora_boards.mpy stage/wifi_power.mpy stage/config.py :/
-```
+---
 
 ## Interfaces
 
-Every interface is configured by an entry in the `CONFIG["interfaces"]` list in `config.py`. You can run multiple interfaces at the same time (e.g. WiFi + LoRa). The auto-generated `/rns/config.json` on the device mirrors this — you usually don't need to edit it by hand.
+Every interface is an entry in the `CONFIG["interfaces"]` list in `config.py`; several can run at once (e.g. WiFi + LoRa). The auto-generated `/rns/config.json` mirrors it. Full option tables, wiring and relay internals: **[docs/interfaces.md](docs/interfaces.md)**.
 
-### WiFi UDP
-
-The default. Broadcasts on the local LAN and pairs with MeshChat / Sideband automatically.
+**WiFi UDP** — the default; broadcasts on the LAN and pairs with MeshChat / Sideband automatically.
 
 ```python
-{
-    "type": "UDPInterface",
-    "name": "WiFi UDP",
-    "enabled": True,
-    "listen_ip": "0.0.0.0",
-    "listen_port": 4242,
-    "forward_ip": None,       # None = auto-detected subnet broadcast
-    "forward_port": 4242,
-}
+{"type": "UDPInterface", "name": "WiFi UDP", "enabled": True,
+ "listen_ip": "0.0.0.0", "listen_port": 4242,
+ "forward_ip": None,            # None = auto-detected subnet broadcast
+ "forward_port": 4242}
 ```
 
-### Serial (RNode / generic LoRa)
-
-HDLC-framed UART. Use this for an RNode device, a generic LoRa modem in transparent serial mode, or board-to-board wired links.
+**Serial** — HDLC-framed UART for an RNode, a transparent serial LoRa modem, or a wired board-to-board link.
 
 ```python
-{
-    "type": "SerialInterface",
-    "name": "Serial Link",
-    "enabled": True,
-    "uart_id": 2,
-    "tx_pin": 17,
-    "rx_pin": 16,
-    "speed": 115200,
-}
+{"type": "SerialInterface", "name": "Serial Link", "enabled": True,
+ "uart_id": 2, "tx_pin": 17, "rx_pin": 16, "speed": 115200}
 ```
 
-### SX1262 SPI LoRa interface (e.g. XIAO ESP32-S3 + Wio-SX1262)
-
-Native SPI talk to the SX1262 radio. No external serial module needed.
-
-**Prerequisite:** install the LoRa driver on the device once:
-
-```bash
-mpremote mip install lora-sx126x lora-sync
-```
-
-**Board pinout presets.** The board's wiring (SPI + control pins, TCXO, regulator) lives in `firmware/lora_boards.py` as named presets — you reference one with a `"board"` key and keep only the network/radio parameters in the interface entry:
+**SX1262 SPI LoRa** (e.g. XIAO ESP32-S3 + Wio-SX1262) — native SPI, no serial module. Install the driver once with `mpremote mip install lora-sx126x lora-sync`. Board pinouts are named presets in `firmware/lora_boards.py` (`xiao_esp32s3_sx1262`, `xiao_esp32s3_sx1262_header`, `esp32s3_cam_sx1262`); reference one with `"board"` and keep only the radio parameters, which must match across the whole mesh, in the entry:
 
 ```python
-{
-    "type": "LoRaInterface",
-    "board": "esp32s3_cam_sx1262",   # pinout preset (lora_boards.py)
-    "name": "LoRa SX1262",
-    "enabled": True,
-    "freq_khz": 868800,
-    "sf": 8,
-    "bw": "125",
-    "coding_rate": 5,
-    "tx_power": 14,
-    "syncword": 0x1424,
-}
+{"type": "LoRaInterface", "board": "esp32s3_cam_sx1262", "name": "LoRa SX1262",
+ "enabled": True, "freq_khz": 868800, "sf": 8, "bw": "125",
+ "coding_rate": 5, "tx_power": 14, "syncword": 0x1424}
 ```
 
-The pins are merged in at startup. Any pin set explicitly on the interface overrides the preset, so you can tweak one pin without editing `lora_boards.py`.
-
-**Built-in presets:**
-
-| `board` | Hardware |
-|---------|----------|
-| `xiao_esp32s3_sx1262` | Seeed XIAO ESP32-S3 + Wio-SX1262 (kit) |
-| `xiao_esp32s3_sx1262_header` | XIAO ESP32-S3 + Wio-SX1262 (header board) |
-| `esp32s3_cam_sx1262` | ESP32-S3 WROOM CAM module + Wio-SX1262 |
-
-**Adding a board:** add one entry to `LORA_BOARDS` in `firmware/lora_boards.py` with that board's `sck/mosi/miso/cs/busy/dio1/reset` pins (plus `dio2_rf_sw`, `dio3_tcxo_millivolts`, and optionally `use_dcdc` / `spi_baudrate`), then point an interface at it by name. Radio params stay in `config.py` so every node on the mesh shares them.
-
-**Radio parameters** (interface entry — must match across the whole mesh)
-
-- `freq_khz`: 868000 (EU), 915000 (US), 923000 (AS).
-- `sf`: 7–12 (higher = longer range, slower).
-- `bw`: `"125"` / `"250"` / `"500"` (lower = longer range, slower).
-- `tx_power`: -9 to +22 dBm.
-- `syncword`: `0x1424` — Reticulum/RNode-compatible.
-- `dio2_rf_sw`: `True` on Wio-SX1262 (radio drives DIO2 as RF switch internally).
-- `dio3_tcxo_millivolts`: `1800` on Wio-SX1262 (TCXO). `None` to disable (crystal-only modules).
-- `lbt_rssi`: CSMA/listen-before-talk busy threshold in dBm (default `-100`, `None` disables). Every frame TX first probes the channel and defers in short random slots while it's busy — same etiquette as RNode firmware, essential when a repeater shares the channel.
-- `lbt_max_ms`: max LBT wait before transmitting anyway (default `2000`).
-
-The receive path is also hardened against **transparent repeaters** (devices that re-transmit every frame verbatim): duplicate halves of split packets (>254 B) are detected and dropped instead of corrupting reassembly.
+Transmits use listen-before-talk (`lbt_rssi`, default -100 dBm) and the receiver tolerates transparent repeaters; details, the parameter list and how to add a board are in [docs/interfaces.md](docs/interfaces.md#sx1262-radio-parameters-and-board-presets).
 
 ### E32 LoRa interface (EByte E32-900T20D)
 
-Transparent serial LoRa module ([product page](https://www.cdebyte.com/products/E32-900T20D/7)) with HDLC framing, AUX flow control, and optional auto-configuration of the module's hex registers.
+Transparent serial LoRa module ([product page](https://www.cdebyte.com/products/E32-900T20D/7)) with HDLC framing and AUX flow control.
 
 ```python
-{
-    "type": "E32Interface",
-    "name": "LoRa E32",
-    "enabled": True,
-    "uart_id": 1,
-    "tx_pin": 4,
-    "rx_pin": 5,
-    "speed": 9600,
-    "m0_pin": 15,
-    "m1_pin": 2,
-    "aux_pin": 6,
-    "auto_configure": False,
-    "timeout": 3000,
-    "channel": 6,
-    "air_rate": 2,
-    "tx_power": 3,
-}
+{"type": "E32Interface", "name": "LoRa E32", "enabled": True,
+ "uart_id": 1, "tx_pin": 4, "rx_pin": 5, "speed": 9600,
+ "m0_pin": 15, "m1_pin": 2, "aux_pin": 6,
+ "auto_configure": False,   # True once to write channel/rate/power to the module's flash
+ "timeout": 3000, "channel": 6, "air_rate": 2, "tx_power": 3}
 ```
 
-**Parameters**
-
-- `channel`: freq = 862 + channel MHz. Channel 6 = 868 MHz (EU ISM), 60 = 922 MHz (US ISM).
-- `air_rate`: 0 = 300 bps, 1 = 1200, 2 = 2400 (default), 3 = 4800, 4 = 9600, 5 = 19200.
-- `tx_power`: 0 = 20 dBm, 1 = 17 dBm, 2 = 14 dBm, 3 = 10 dBm.
-- `auto_configure`: `True` writes the channel/rate/power registers to the module's flash at boot. Set `False` once the module is configured.
-- `timeout`: HDLC frame timeout in ms. Must be >2× the air time of a full packet. At 2400 bps a 182-byte announce takes ~760 ms, so 3000 ms is safe.
-
-**Wiring (Waveshare RP2040-Zero example)**
-
-| E32 Pin | Function | RP2040 GPIO |
-|---------|----------|-------------|
-| RXD | Module RX | GPIO 4 (UART1 TX) |
-| TXD | Module TX | GPIO 5 (UART1 RX) |
-| M0 | Mode select | GPIO 15 |
-| M1 | Mode select | GPIO 2 |
-| AUX | Busy signal | GPIO 6 |
-| VCC | Power | 5 V |
-| GND | Ground | GND |
-
-**Pin gotcha:** on RP2040, do **not** use UART1 alternate-function pins (GPIO 3, 6, 7, 8) for M0/M1 — UART1 init claims them for CTS/RTS/TX and the resulting contention can damage the GPIO drivers. The driver also sets M0/M1 to 12 mA drive strength (vs the 4 mA default) so the E32's internal pull-ups release reliably.
-
-**Power gotcha:** the E32-900T20D draws ~120 mA at 20 dBm TX. On RP2040-Zero this current spike will crash the MCU even off the 5 V USB rail. Use `tx_power: 3` (10 dBm, ~40 mA) unless the E32 has its own supply with decoupling.
+- **Pins (RP2040-Zero)**: module RXD/TXD to GPIO 4/5 (UART1), M0/M1 to GPIO 15/2, AUX to GPIO 6, VCC 5 V. Full wiring table and parameter meanings: [docs/interfaces.md](docs/interfaces.md#e32-parameters-wiring-and-gotchas).
+- **Pin gotcha**: on RP2040 do **not** use UART1 alternate-function pins (GPIO 3, 6, 7, 8) for M0/M1; the contention can damage the GPIO drivers.
+- **Power gotcha**: the E32-900T20D draws ~120 mA at 20 dBm and can crash the RP2040-Zero. Use `tx_power: 3` (10 dBm, ~40 mA) unless the E32 has its own supply.
 
 ### TCP client
 
-Connects to a remote RNS TCP transport server. HDLC framing, wire-compatible with reference Reticulum's `TCPServerInterface`. Auto-reconnects on disconnect.
+Connects to a remote RNS TCP transport server (HDLC framing, wire-compatible with `TCPServerInterface`), reconnecting automatically.
 
 ```python
-{
-    "type": "TCPClientInterface",
-    "name": "Transport Hub",
-    "enabled": True,
-    "target_host": "rn.example.com",
-    "target_port": 4243,
-}
+{"type": "TCPClientInterface", "name": "Transport Hub", "enabled": True,
+ "target_host": "rn.example.com", "target_port": 4243}
 ```
 
 ### IFAC (Interface Access Codes)
 
-Add `networkname` and/or `passphrase` to *any* interface to require authentication. Both sides must use identical values.
+Add `networkname` and/or `passphrase` to *any* interface to require authentication; both ends must match. `ifac_size` is in **bytes** (reference config uses bits) and defaults to 16 (8 on `LoRaInterface`); see [docs/interfaces.md](docs/interfaces.md#ifac-size).
 
 ```python
-{
-    "type": "TCPClientInterface",
-    "name": "Authenticated TCP",
-    "enabled": True,
-    "target_host": "rn.example.com",
-    "target_port": 4243,
-    "networkname": "my_network",
-    "passphrase": "my_secret_passphrase",
-}
+{"type": "TCPClientInterface", "target_host": "rn.example.com", "target_port": 4243,
+ "networkname": "my_network", "passphrase": "my_secret_passphrase"}
 ```
 
-The optional `ifac_size` is in **bytes** (the reference config takes bits: `ifac_size = 128` there is `16` here) and must match the other end. The default is 16, except on `LoRaInterface` where it is 8: a full 500 B packet plus the code has to fit the RNode two-frame limit of 508 B, so the LoRa interface also clamps a larger value to 8 and logs it. An empty string counts as unset, and calling `setup_ifac()` again with neither key clears a code set earlier.
+### Transport mode (relay)
 
-### Transport mode (full routing — turn a node into a relay)
-
-Set `enable_transport: True` and the node becomes a **Reticulum transport router**: it forwards traffic between its interfaces so a LoRa-only mesh reaches the wider network and back. It is wire-compatible with reference RNS — a µReticulum router can sit transparently in a path between reference RNS, MeshChat, Sideband or NomadNet nodes.
-
-This is **directed routing, not blind flooding**: the node learns routes from announces and forwards each packet on the *one* correct interface toward its destination, extending range without saturating the mesh. [`example_transport_router.py`](firmware/example_transport_router.py) is a ready-made LoRa ↔ WiFi/TCP router built on it.
+Set `enable_transport: True` and the node becomes a wire-compatible **Reticulum transport router**: it learns routes from announces and forwards announces, opportunistic messages, link sessions, resource transfers and path requests on the one correct interface (directed routing, not flooding). [`example_transport_router.py`](firmware/example_transport_router.py) is a ready-made LoRa ↔ WiFi/TCP router. It wants the RAM of an ESP32-S3 (PSRAM ideal) and is most useful as a LoRa ↔ IP gateway.
 
 ```python
 CONFIG = {
-    "enable_transport": True,                   # this node relays for others
+    "enable_transport": True,
+    "default_gravity": 0,   # tie-break between equal paths; per-interface "gravity" overrides
     "interfaces": [
-        { "type": "LoRaInterface",      ... },  # the LoRa mesh side
-        { "type": "TCPClientInterface", ... },  # the IP side (rnsd / MeshChat); or a UDPInterface
+        {"type": "LoRaInterface", ...},
+        {"type": "TCPClientInterface", "gravity": 5, ...},   # prefer IP when both work
     ],
 }
 ```
 
-**What it carries** — everything, multi-hop, wire-compatible:
+A headless router wants WiFi and WebREPL up at boot: `boot.py` can do this but ships **commented out** (so leaf nodes skip the ~15 s WiFi connect); uncomment its block on transport nodes only. Routing tables, resilience features, the web dashboard and gravity semantics are in [docs/interfaces.md](docs/interfaces.md#transport-mode-full-routing--turn-a-node-into-a-relay).
 
-| Traffic | How the router handles it |
-|---|---|
-| **Announces** | re-broadcast with the router's transport id stamped in (so downstream nodes learn the route back), with jitter, retries, neighbour-suppression and per-source rate-limiting |
-| **Opportunistic messages** (single-packet LXMF) | directed forward to the next-hop interface via the path table; the delivery **proof** returns along the recorded reverse path |
-| **Link sessions** (MeshChat / Sideband / NomadNet) | a link table is built from the transit `LINKREQUEST`; in-link traffic is routed both ways, the link proof returns, and the link **MTU is clamped** at the LoRa↔IP boundary so packets still fit on the air |
-| **Resource transfers** (large messages, ≤ 16 KB) | ride the link table automatically |
-| **Path requests** | answered on demand by replaying the cached announce; unknown routes trigger recursive discovery |
+### Probe responder and time sync
 
-Routing state lives in RAM-bounded tables: `path_table` (dest → next-hop + interface + hop count), `reverse_table` (proof return), `link_table` (link/resource transit), plus a small cache of recent announces.
-
-**Choosing between equal paths** — when the same announce reaches a node over two interfaces at the same hop count, whichever copy arrived first would otherwise keep the path forever. Set `gravity` on an interface to express a preference (RNS 1.4.1 semantics: higher wins, `0` is neutral, negatives discouraged). `default_gravity` at the top level applies to every interface that does not set its own.
+Two optional node-level features, set as top-level `CONFIG` keys (details in [docs/interfaces.md](docs/interfaces.md)):
 
 ```python
 CONFIG = {
-    "default_gravity": 0,
-    "interfaces": [
-        { "type": "TCPClientInterface", "gravity": 5,  ... },   # prefer IP when both work
-        { "type": "LoRaInterface",      "gravity": 0,  ... },   # fall back to radio
-    ],
-}
-```
-
-Gravity only breaks ties. It never buys a longer path — a shorter route always wins first, regardless of preference.
-
-**Resilience** (built for an open, long-running mesh): routing tables expire and are **purged when an interface drops** (WiFi-flap recovery); per-source announce rate-limiting and hard table caps prevent runaway memory; optional **strict link-proof validation** (native-gated Ed25519, ~17 ms); **blackholing** of misbehaving identities; and the **path table persists to flash** so a reboot isn't a mesh blackout.
-
-**Watching it work**: every forward logs a `Relay …` line at `NOTICE` and bumps a counter, so you can follow relay activity in the console. The router example also serves a plain-HTTP dashboard on the LAN ([`webmonitor.py`](firmware/webmonitor.py)) showing live `RELAYED ann/data/link/proof` counts, the path table, and the log stream. Path-table rows are labeled with the peer's announced display name **and the protocol behind each destination hash** — `lxmf` (messaging peer), `lxmf-pn` (propagation node), `nomad` (NomadNet pages), `voice-lxst` / `voice-mc` (LXST and MeshChat call endpoints), `probe`, or a `?hex` tag for unknown apps. Classification reads the `name_hash` every announce carries (no decryption involved) and survives reboots by recomputing labels from persisted identities.
-
-**Running it headless**: a transport router usually runs without a USB cable, so it wants WiFi up at boot and a way back in to control it. [`boot.py`](firmware/boot.py) can bring up **WiFi + WebREPL** automatically on every reset — but it ships **commented out**, so a plain leaf node (LoRa-only, sensor, proxy) boots straight to the REPL instead of sitting through a needless ~15 s WiFi connect. Uncomment the execution block at the bottom of `boot.py` **only on a transport node**; you can then reach it at `ws://<node-ip>:8266/` (log in with `WEBREPL_PASSWORD` from `config.py`) to start/stop the router and push fixes over the air.
-
-> A transport router wants the RAM headroom of an ESP32-S3 (PSRAM is ideal). Forwarding is single-instance (no shared-instance or tunnel interfaces) — most useful as a **LoRa ↔ IP gateway**.
-
-### Probe responder (rnprobe)
-
-Expose a dedicated destination that replies to `rnprobe`, the reference reachability/RTT tool. Useful for debugging transport paths.
-
-```python
-CONFIG = {
-    "probe": {
-        "enabled": True,
-        "app_name": "urns",            # full_name = "urns.probe"
-        "aspect": "probe",
-        "announce_interval": 60 * 60,  # 1 hour; 0 = announce once at boot only
-    },
+    "probe": {"enabled": True, "app_name": "urns", "aspect": "probe",
+              "announce_interval": 3600},   # then: rnprobe urns.probe <hash>
+    "time_sync": {"enabled": True,
+                  "trusted_nodes": [],      # LXMF hashes that may set the clock; empty = corroboration
+                  "min_sources": 2, "tolerance": 120},
     "interfaces": [...],
 }
 ```
 
-When enabled the boot log prints the destination hash and full name:
+- **Probe**: a destination that answers the reference `rnprobe` tool (reachability and RTT); the boot log prints its hash.
+- **Time sync**: a LoRa-only node has no NTP or RTC and would stamp messages *January 2000*. With `time_sync` it learns the time from the mesh (once per power-on, from a trusted node or from `min_sources` agreeing peers) and re-announces when the clock is set.
 
-```
-Probe address: 4a1b… (urns.probe)
-```
+---
 
-From a desktop with reference RNS installed:
+## Network stamps (Reticulum 1.6)
 
-```bash
-rnprobe urns.probe 4a1b…
-```
+Reticulum 1.6 adds proof-of-work **stamps**. A 1.6.1 hub verifies them and 1.6.2 is expected to enforce them, so a node without stamps gets its announces and path requests ignored by enforcing hubs.
 
-Both `full_name` and `destination_hash` are required: announces only carry a hash of the name, so the dot-name has to be known out of band. A successful probe prints `Valid reply received from <hash>` with the measured RTT. The probe destination refuses link requests — it only signs PROOF replies. Other apps filter it out of their UIs by app_name.
+**What µReticulum implements**
 
-### Time sync (clock for pure-LoRa nodes)
+- **Own announces**: an 18-byte extension appended inside the signed app_data. The stamp is generated once per destination in the background and stored at `<storage>/stamps/<dest_hex>.dstamp` (reference-compatible msgpack). Announces go out unstamped until it exists; one announce is re-sent when it becomes ready.
+- **Inbound announces**: stamped announces are validated at cost 23.5 (`announce_stamp_required`).
+- **Link requests**: when a destination announces a link cost, the link request carries a key stamp. `max_link_stamp_cost` caps what the board will search (default 19 with the native module, 12 without); above it the link fails at once.
+- **Path requests**: stamped at cost 15.8 (`stamp_path_requests`); after `pr_stamp_timeout` (30 s) the unstamped form is sent.
+- **LXMF**: proof-of-work message stamps and tickets. Tickets are preferred; PoW is only the fallback.
+- **Not implemented**: stamp enforcement on inbound path requests.
 
-A LoRa-only node has no WiFi/NTP and no battery-backed RTC, so its clock sits at `2000-01-01` and every message/announce it sends is stamped *January 2000* (you'll see this on received images in MeshChat). Time sync fixes this by learning the real time **from the mesh itself** — every announce and every signed LXMF message already carries the sender's Unix timestamp.
+**Speed.** Stamping needs the native module (`lib/ed25519_fast_xtensawin.mpy` / `ed25519_iram.mpy`, which provide `hashcash` and `x25519_stamp2`); without it, stamp generation is effectively off. On an ESP32-S3 the SHA hardware accelerator is used automatically (`stamps_hw_sha`, default on), about 4-5x faster than software: measured on a T-Deck Pro, ~260k hashes/s hardware vs ~60k software. It is used when WiFi is fully off or joined and settled, avoided while WiFi is joining or the AP interface is up, and every hardware result is re-verified in software.
 
-```python
-CONFIG = {
-    "time_sync": {
-        "enabled": True,
-        "trusted_nodes": [],   # see modes below
-        "min_sources": 2,      # corroboration quorum (when trusted_nodes is empty)
-        "tolerance": 120,      # seconds of allowed disagreement between peers
-    },
-    "interfaces": [...],
-}
-```
+| Config key | Meaning |
+|------------|---------|
+| `stamp_announces` | Stamp our own announces (default on when the native `hashcash` exists) |
+| `announce_stamp_value` | Cost of our announce stamp, 25.0 (below 23.5 needs `announce_stamp_allow_low`) |
+| `announce_stamp_duty` | Share of wall time spent generating (50 %) |
+| `announce_stamp_required` | Cost required of inbound announces (23.5) |
+| `stamp_path_requests`, `pr_stamp_timeout` | Stamped path requests, and the fallback timeout |
+| `max_link_stamp_cost` | Highest link cost the board will search |
+| `stamps_hw_sha` | ESP32-S3 SHA accelerator (default on) |
 
-Two modes:
+**Off-device generation.** The device logs `stamp material <hex>` at INFO; `tools/gen_announce_stamp.py` turns it into the stamp file in seconds and prints the `mpremote` upload command. Useful for battery-powered or non-native boards.
 
-- **Authority** — list one or more LXMF delivery hashes (hex, exactly as shown in MeshChat/Sideband) in `trusted_nodes`. The first announce or signed message from a matching node sets the clock. Fastest, and corrects time on the very first packet heard.
-- **Corroboration** — leave `trusted_nodes` empty. The clock is set only once `min_sources` *distinct* peers agree on the time within `tolerance` seconds (the median is applied). No single node can move your clock, so you don't have to trust anyone in particular.
-
-The sync runs **once per power-on**, only while the clock is still unset — it never re-adjusts mid-session. A reboot resets the RTC to 2000, and the node re-syncs from the next qualifying packet. After syncing, both outgoing message timestamps and announce timestamps are correct for the rest of the session.
-
-The moment the clock syncs, the node **automatically re-announces** all its destinations: announces sent before sync carry a year-2000 emission timestamp and are rejected as stale replays by peers that knew the node from a previous boot — without the re-announce, a rebooted node would stay invisible to the mesh until its next periodic announce.
-
-> The ESP32's internal RTC keeps time only while powered — it does not survive a full power cycle. For instant-correct time at boot with no peer audible, add a battery-backed RTC (e.g. DS3231 over I²C).
+A default 1.6.1 hub rebroadcasts at most one announce per destination per hour, so the examples announce hourly. LXMF delivery now follows reference LXMF 1.3.1 scheduling: a message is "delivered" only when the receiver's proof arrives (see [docs/lxmf-delivery-semantics.md](docs/lxmf-delivery-semantics.md)).
 
 ---
 
 ## Peripherals
 
-Modular hardware drivers in `firmware/peripherals/` with a uniform contract:
-
-- `init(...)` — set up hardware
-- `process(content)` — handle an LXMF message or page-template query, return a response string or `None`
+Modular drivers in `firmware/peripherals/` with a uniform contract: `init(...)` sets up the hardware and `process(content)` handles an LXMF message or page-template query, returning a response string or `None`.
 
 | Module | Hardware | Triggers |
 |--------|----------|----------|
-| `bme280_sensor` | BME280 I²C sensor | Returns temperature / pressure / humidity when an incoming message contains `sensor` |
-| `sds011_sensor` | SDS011 PM2.5 / PM10 UART sensor | Returns particulate matter readings when an incoming message contains `sensor` |
+| `bme280_sensor` | BME280 I²C sensor | `sensor` returns temperature / pressure / humidity |
+| `sds011_sensor` | SDS011 PM2.5 / PM10 UART sensor | `sensor` returns particulate readings |
 | `neopixel_led` | WS2812 NeoPixel LED | `red`, `green`, `blue`, `off` |
 | `gpio_control` | Any GPIO pin | `<name> on`, `<name> off`, `<name>?` |
-| `adc_reader` | ADC analog input (battery, …) | `<name>`, or `sensor` for all channels — returns voltage (×divider) + raw |
-| `camera` | OV2640 (camera firmware required) | Used by `example_camera_node.py` |
+| `adc_reader` | ADC input (battery, …) | `<name>`, or `sensor` for all channels (voltage × divider + raw) |
+| `camera` | OV2640 (camera firmware) | Used by `example_camera_node.py` |
 
-### Wiring example
-
-Peripherals are initialized at the top of `example_nomadnet_node.py` (or `example_node.py`). Uncomment what you have:
+Peripherals are initialised at the top of `example_nomadnet_node.py` / `example_node.py`; uncomment what you have:
 
 ```python
 from machine import Pin, SoftI2C
 i2c = SoftI2C(scl=Pin(6), sda=Pin(5), freq=100000)
-
 import peripherals.bme280_sensor as bme_sensor
 bme_sensor.init(i2c)
+# import peripherals.neopixel_led as neopixel_led;  neopixel_led.init(pin=21)
+# import peripherals.gpio_control as gpio;          gpio.init({"lamp": (2, "OUT")})
+# import peripherals.sds011_sensor as sds011_sensor; sds011_sensor.init(uart_id=1, tx_pin=43, rx_pin=44)
 
-# import peripherals.neopixel_led as neopixel_led
-# neopixel_led.init(pin=21)
-
-# import peripherals.gpio_control as gpio
-# gpio.init({"lamp": (2, "OUT")})
-
-# Battery: board-declared. Reads automatically IF the active board's preset in
-# lora_boards.py has a "battery" block. The XIAO ESP32-S3 has no BAT->ADC path
-# (Meshtastic disables battery on it too), so this stays off on that board.
-import peripherals.adc_reader as adc_reader
+import peripherals.adc_reader as adc_reader          # battery, board-declared (see below)
 from lora_boards import battery_config
 _battery = battery_config(CONFIG)
 if _battery:
     adc_reader.init({"battery": _battery["pin"]}, dividers={"battery": _battery.get("divider", 1.0)})
-
-# import peripherals.sds011_sensor as sds011_sensor
-# sds011_sensor.init(uart_id=1, tx_pin=43, rx_pin=44)
-
 active_peripherals = [bme_sensor] + ([adc_reader] if _battery else [])
 ```
 
-**Battery voltage** is treated as board-fixed wiring: declare it once in the board's preset in `lora_boards.py` as `"battery": {"pin": 1, "divider": 2.0}` (the ADC GPIO and the `vbat = vpin × divider` ratio), and `adc_reader` picks it up automatically — `battery_config(CONFIG)` resolves it and an inline `CONFIG["battery"]` overrides. Boards with no battery→ADC path simply omit the block. **Note:** the Seeed XIAO ESP32-S3 (including the Wio-SX1262 "Meshtastic" kit) has *no* such path — there's no onboard divider, and [Meshtastic itself ships that board with battery monitoring disabled](https://github.com/meshtastic/firmware/blob/master/variants/esp32s3/seeed_xiao_s3/variant.h) (`BATTERY_PIN -1`). So battery stays off unless you solder your own divider (`BAT+` → 2×200 kΩ → `GND`, midpoint to A0/GPIO1) and add the block with `divider: 2.0`.
+Active peripherals are also queried for the `{sensor}` variable in NomadNet pages.
 
-The SDS011 also needs `sds011_sensor.start()` inside the async event loop (see `run_with_announce()` in the example files) — that schedules a 5-minute duty cycle so the fan only runs during measurement.
+**Battery voltage** is board-fixed wiring: declare it in the board's preset in `lora_boards.py` as `"battery": {"pin": 1, "divider": 2.0}` (ADC GPIO and `vbat = vpin × divider`); an inline `CONFIG["battery"]` overrides. The Seeed XIAO ESP32-S3 (including the Wio-SX1262 kit) has *no* battery-to-ADC path, and [Meshtastic ships it with battery monitoring disabled](https://github.com/meshtastic/firmware/blob/master/variants/esp32s3/seeed_xiao_s3/variant.h); solder your own divider (`BAT+` → 2×200 kΩ → `GND`, midpoint to GPIO1) and add the block with `divider: 2.0`.
 
-**SDS011 wiring (XIAO ESP32-S3)**
-
-| SDS011 Pin | Connect to |
-|------------|------------|
-| TX | GPIO 44 (`rx_pin`) |
-| RX | GPIO 43 (`tx_pin`) |
-| VCC (5 V) | VUSB |
-| GND | GND |
-
-The SDS011 needs 5 V power (VUSB, only available with USB-powered boards). Its UART TX is 3.3 V-safe — no level shifter needed.
-
-Active peripherals are also queried for the `{sensor}` template variable in NomadNet pages. When multiple peripherals are active, all readings are shown.
+**SDS011** needs `sds011_sensor.start()` inside the async event loop (see `run_with_announce()` in the examples), which runs a 5-minute duty cycle so the fan only runs during measurement. Wiring (XIAO ESP32-S3): sensor TX → GPIO 44, RX → GPIO 43, VCC 5 V (VUSB, USB-powered boards only), GND; its UART is 3.3 V-safe, no level shifter.
 
 ---
 
 ## Troubleshooting
 
-**WiFi won't connect**
-- Double-check `WIFI_SSID` / `WIFI_PASS` in `config.py`. The ESP32-S3 only supports 2.4 GHz networks — a 5 GHz-only SSID will fail silently.
-- Some routers separate 2.4 / 5 GHz under the same SSID; explicitly join the 2.4 GHz one if your router offers it.
+**WiFi won't connect** — check `WIFI_SSID` / `WIFI_PASS` in `config.py`. The ESP32-S3 is 2.4 GHz only; a 5 GHz-only SSID fails silently, so join the 2.4 GHz one explicitly if your router splits them.
 
 **Node doesn't appear in MeshChat**
-- The desktop running MeshChat and the µReticulum node must be on the **same LAN subnet** for UDP broadcast to reach across.
-- If you have multiple NICs on the desktop (VPN, Docker bridge, virtual adapters), MeshChat may bind the wrong one. Disable interfaces you don't need.
-- The example disables the WiFi access-point interface (`AP_IF`) and turns WiFi power-management off — both are required to receive broadcasts. If you've stripped that out of `example_node.py`, put it back.
+- The desktop and the node must be on the **same LAN subnet** for UDP broadcast to reach.
+- With several NICs on the desktop (VPN, Docker, virtual adapters), MeshChat may bind the wrong one; disable the ones you don't need.
+- The WiFi access-point interface (`AP_IF`) must be off, and with an enabled `UDPInterface` modem power saving must be off (`WIFI_POWER_SAVE = "auto"` handles it). If you stripped that from `example_node.py`, put it back.
 
-**`ImportError: no module named 'lora'`**
-- Run `mpremote mip install lora-sx126x lora-sync` once. This installs the SX126x driver from `micropython-lib` to the device.
+**`ImportError: no module named 'lora'`** — run `mpremote mip install lora-sx126x lora-sync` once.
 
 **Native crypto module not loading (`ImportError: ed25519_fast`)**
-- The `.mpy` file in `firmware/lib/` must match your architecture: `*_xtensawin.mpy` for ESP32-S3, `*_armv6m.mpy` for RP2040.
-- The `.mpy` format is tied to a MicroPython version range. If your MicroPython is much newer than 1.22, see [BUILDING_NATIVE_MODULES.md](tools/natmod/BUILDING_NATIVE_MODULES.md) to rebuild.
-- The system still works without the native module — just at ~4 s per message instead of <200 ms.
+- The `.mpy` in `firmware/lib/` must match your architecture: `*_xtensawin.mpy` for ESP32-S3, `*_armv6m.mpy` for RP2040.
+- The `.mpy` format is tied to a MicroPython version range; if yours is much newer than 1.22, rebuild per [BUILDING_NATIVE_MODULES.md](tools/natmod/BUILDING_NATIVE_MODULES.md).
+- Everything still works without it, at ~4 s per message instead of <200 ms (and without stamp generation, see [Network stamps](#network-stamps-reticulum-16)).
 
 **LoRa: no packets received**
-- Both ends must share `freq_khz`, `sf`, `bw`, `coding_rate`, and `syncword`. A single mismatch and you'll receive nothing.
-- For SX1262 boards with a TCXO (Wio-SX1262), `dio3_tcxo_millivolts` must be set or the radio fails to init with `OpError 0x20`.
-- For SX1262 boards in TX-but-no-output situations, check the regulator mode and TX power. The T-Deck v1 specifically needs DC-DC regulator mode (see [reticulum-tdeck](https://github.com/varna9000/reticulum-tdeck) for the workaround).
+- Both ends must share `freq_khz`, `sf`, `bw`, `coding_rate` and `syncword`.
+- SX1262 boards with a TCXO (Wio-SX1262) need `dio3_tcxo_millivolts`, or init fails with `OpError 0x20`.
+- TX but no output: check regulator mode and TX power. The T-Deck v1 needs DC-DC mode (see [reticulum-tdeck](https://github.com/varna9000/reticulum-tdeck)).
 
-**RP2040 crashes when E32 transmits**
-- The E32 draws ~120 mA at 20 dBm and that current spike can brown out the RP2040. Use `tx_power: 3` (10 dBm) or give the E32 its own supply with decoupling caps.
+**RP2040 crashes when E32 transmits** — current spike brown-out; use `tx_power: 3` or give the E32 its own supply with decoupling caps.
 
-**`OSError: -202` or `OSError: -116`**
-- Usually a WiFi-stack issue from too many open sockets after long uptime. Reset the board.
+**`OSError: -202` or `OSError: -116`** — usually too many open sockets after long uptime in the WiFi stack. Reset the board.
 
-**Camera example fails with `ImportError: no module named 'camera'`**
-- You're running standard MicroPython. The camera example requires the camera-enabled build — see [Step 1](#step-1--flash-micropython-to-your-board).
+**Camera example: `ImportError: no module named 'camera'`** — you're on standard MicroPython; flash the camera build ([Step 1](#step-1--flash-micropython-to-your-board)).
 
 ---
 
@@ -687,369 +429,42 @@ Active peripherals are also queried for the `{sensor}` template variable in Noma
 
 Tested and confirmed working with:
 
-- **MeshChat** — bi-directional announces, opportunistic messaging, delivery receipts
-- **Sideband** — peer discovery, LXMF messaging
-- **NomadNet** — peer discovery, LXMF messaging, page serving over Links
-- **Reference Reticulum** (Python) — wire-compatible packets, announces, encryption, link handshake
-- **Reference LXMF** — cross-validated message packing/unpacking, signature verification
-- **RNode** (SX1276 / SX1278) — bidirectional LoRa, full split-packet support for the complete 500-byte MTU. Tested with Heltec Wireless Stick Lite V1 on 868 MHz.
-- **RNS transport servers** — TCP client connectivity to remote transport hubs, automatic path learning from announces
+- **MeshChat**, **Sideband**, **NomadNet** — announces, peer discovery, opportunistic LXMF messaging, delivery receipts, page serving over Links
+- **Reference Reticulum and LXMF** (Python) — wire-compatible packets, announces, encryption, link handshake, message packing and signatures
+- **RNode** (SX1276 / SX1278) — bidirectional LoRa with split-packet support for the full 500-byte MTU (tested with Heltec Wireless Stick Lite V1 on 868 MHz)
+- **RNS transport servers** — TCP client to remote hubs, automatic path learning from announces
 
-Protocol behaviour tracks **reference RNS 1.5.2**. The 1.3.9 link and resource
-safeguards are implemented here (see the *Resource and link safeguards* block
-under [Protocol details](#protocol-details)), as is the whole of 1.4.x that
-applies to a leaf or relay node: dynamic link path re-balancing, interface
-gravity, RTT-scaled keepalive and stale windows with the keepalive-reply
-throttle, `max_request_size` / `max_response_size`, and out-of-window rejection
-on `Channel` (see *Link path re-balancing* below). Neither 1.4.x nor 1.5.x
-changed the wire format, so older and newer peers interoperate either way.
+Protocol behaviour tracks **reference RNS 1.6.x**: the 1.3.9 link/resource safeguards and the parts of 1.4.x–1.5.x that apply to a leaf or relay node are implemented, and the 1.6 network stamps are covered in [Network stamps](#network-stamps-reticulum-16). Out of scope for an MCU port: `BackboneInterface` flap-blocking, interface discovery, I2P, shared-instance/tunnel interfaces, the `rnsh` utility, and the threaded ingress queue of 1.5.0. Per-release notes: [docs/protocol.md](docs/protocol.md#reference-rns-version-tracking).
 
-RNS 1.5.0's headline is a priority-based inbound ingress-queue rewrite of
-`Transport`, built on OS threads and locks — there is no analogue for this
-single-threaded `uasyncio` port, and none is needed for interop: the port
-already prioritises inline data, proof and link traffic over deferred announce
-validation. The two items from that release that apply to a leaf or relay node
-are implemented: an excessive-hop-count drop (`PATHFINDER_M = 128`, rejected in
-`Transport.packet_filter`) and a constant-time HMAC comparison in
-`Token.verify_hmac`. Identity blackholing is supported (`Transport.blackhole()`);
-the operator blackhole publish/subscribe lists and everything surfaced only
-through `rnstatus` are out of scope or opt-in, and none of it affects
-interoperability.
-
-RNS 1.5.1 and 1.5.2 likewise changed no wire format. Both are dominated by work
-with no analogue on a single-threaded MCU — adaptive dataplane ingress/egress
-control layered on the 1.5.0 queue rewrite, `BackboneInterface` transmit
-buffers, live profiling, and `rnstatus` diagnostics — or by fixes already
-covered here (the 1.5.2 resource-cancel guard cannot occur, since cancellation
-routes through `resource_concluded` and the link's `cancel_*_resource` already
-check membership; bz2 compression already falls back to uncompressed). The two
-frame-validation hardening checks that apply to a leaf or relay node are
-implemented: `Packet.unpack` rejects a zero-length data field, and
-`Transport.packet_filter` drops an announce frame larger than the MTU.
-
-Out of scope for an MCU port: `BackboneInterface` flap-blocking, interface
-discovery, I2P, shared-instance/tunnel interfaces, and the `rnsh` utility.
-
-> **If you run an `rnsh` listener** (any platform), update it to RNS 1.3.9: that
-> release patches a critical vulnerability where a command could be started on a
-> session that never completed identity authorisation. This port contains no
-> listener, so it is not affected — but a listener elsewhere on your mesh is.
+> If you run an `rnsh` listener anywhere, update it to RNS 1.3.9 or later (it fixes a critical authorisation bypass). This port has no listener and is not affected.
 
 ---
 
 ## Performance on ESP32-S3
 
-### With the native crypto module (default, recommended)
+| Operation | Native module (default) | Pure Python (no `.mpy`) |
+|-----------|-------------------------|-------------------------|
+| Ed25519 sign | **12 ms** | <1 s (sign + send proof) |
+| Ed25519 verify | **18 ms** | ~2 s |
+| X25519 key exchange | **13 ms** | ~1.4 s |
+| Receive + decrypt message | **~50 ms** | ~2 s |
+| **Total message round-trip** | **<200 ms** | **~4 s** |
+| IFAC sign/verify per packet | ~15 ms | n/a |
 
-| Operation | Time |
-|-----------|------|
-| Ed25519 sign | **12 ms** |
-| Ed25519 verify | **18 ms** |
-| X25519 key exchange | **13 ms** |
-| Receive + decrypt message | **~50 ms** |
-| **Total message round-trip** | **<200 ms** |
-| IFAC sign/verify per packet | **~15 ms** |
-
-### Pure-Python fallback (no `.mpy` modules)
-
-| Operation | Time |
-|-----------|------|
-| Receive + decrypt message | ~2 s |
-| Verify Ed25519 signature | ~2 s |
-| Sign + send proof | <1 s |
-| **Total message round-trip** | **~4 s** |
-
-The native C module (Monocypher-based) is ~160× faster than pure-Python Curve25519. Pre-built `.mpy` files for ESP32-S3 and RP2040 ship in `firmware/lib/` — they're loaded automatically when present. If you accidentally don't upload them, everything still works, just slowly.
+The Monocypher-based native module is ~160× faster. Pre-built `.mpy` files for ESP32-S3 and RP2040 ship in `firmware/lib/` and load automatically; without them everything works, just slowly. Module details: [docs/protocol.md](docs/protocol.md#native-crypto-module-mpy-details).
 
 ---
 
 ## Limitations
 
-- **MicroPython only** — no CPython/desktop support. Uses `uhashlib`, `ucryptolib`, `uasyncio`, `micropython.const` directly.
-- **LXMF message size** — single-packet opportunistic messages up to ~295 bytes content. Larger messages (up to 16 KB) use Link-based DIRECT delivery via Resource transfer, including through multi-hop transport chains.
-- **No propagation node** — cannot store-and-forward messages for offline peers.
-- **On-demand path resolution** — when sending to a peer it has no route to (e.g. a transport-distant node right after a reboot), the node issues a Reticulum **path request** and delivers the message once the route is learned, instead of silently dropping it. Replies also reuse an already-open link when present.
-- **Pure-Python crypto fallback** — ~4 s message round-trip without the native module. With native module: <200 ms.
-
-## Roadmap
-
-Potential areas for expansion:
-
-- **Propagation node** — store-and-forward for offline peers
-- **More sensor integrations** — additional peripheral drivers
-
----
-
-## Protocol details
-
-This section is the deep dive — you don't need any of it to use the project, but it's here for anyone interested in how it interoperates with reference Reticulum.
-
-<details>
-<summary><b>Message flow (MeshChat → ESP32-S3)</b></summary>
-
-```
-MeshChat                          ESP32-S3 (µReticulum)
-   │                                    │
-   ├─ LXMF announce ──────────────────► │ Validates Ed25519 signature
-   │                                    │ Stores peer identity & display name
-   │                                    │
-   │ ◄────────────────── LXMF announce ─┤ Sends own announce (+ periodic re-announce)
-   │ Peer appears in                    │
-   │ network visualizer                 │
-   │                                    │
-   ├─ Encrypted LXMF message ────────► │ X25519 ECDH decrypt
-   │  (e.g. "green")                    │ Unpack msgpack payload
-   │                                    │ Verify Ed25519 signature
-   │                                    │ Set NeoPixel color / echo reply
-   │                                    │
-   │ ◄──────────────── Delivery proof ──┤ Sign packet hash with Ed25519
-   │ Shows "delivered"                  │ Send PKT_PROOF back
-   │                                    │
-   │ ◄────────── Echo reply (LXMF) ────┤ Encrypt + sign reply message
-   │ Receives "Echo: green"            │ Send via opportunistic delivery
-```
-
-</details>
-
-<details>
-<summary><b>LXMF wire format</b></summary>
-
-| Field | Size | Description |
-|-------|------|-------------|
-| Destination hash | 16 bytes | Truncated SHA-256 of destination |
-| Source hash | 16 bytes | Truncated SHA-256 of source |
-| Ed25519 signature | 64 bytes | Signs dest + source + payload + message_id |
-| Payload (msgpack) | variable | `[timestamp, title, content, fields]` |
-
-Total overhead: 112 bytes. Content capacity in a single encrypted packet: ~295 bytes.
-
-Announces carry msgpack-encoded app data so peers know the node's display name:
-
-```python
-# Wire format: msgpack [name_bytes, stamp_cost]
-# Example: [b"ESP32s3", None]
-b'\x92\xc4\x07ESP32s3\xc0'
-```
-
-</details>
-
-<details>
-<summary><b>NomadNet link handshake</b></summary>
-
-```
-NomadNet Client                     ESP32-S3 (µReticulum)
-   │                                       │
-   ├─ Link Request (X25519 pub key) ─────► │ Generate ephemeral X25519 keypair
-   │                                       │ ECDH shared secret → HKDF → AES-256 Token
-   │                                       │
-   │ ◄───── Link Proof (signature + pub) ──┤ Sign with destination Ed25519 identity
-   │                                       │
-   ├─ RTT (encrypted) ──────────────────► │ Link ACTIVE
-   │                                       │
-   ├─ Page Request (encrypted RPC) ──────► │ Decrypt, look up handler by path hash
-   │                                       │ Read .mu file, substitute variables
-   │ ◄──────── Page Response (encrypted) ──┤ Encrypt and send
-```
-
-Each link consumes ~350 bytes of RAM. Up to 4 concurrent links are supported (`MAX_ACTIVE_LINKS=4`). Idle links are cleaned up after 12 minutes.
-
-</details>
-
-<details>
-<summary><b>Outbound link establishment on half-duplex LoRa (LRRTT resend + delivery retry)</b></summary>
-
-Reference RNS marks a responder link *established* — and starts accepting resource
-transfers on it — **only** when the initiator's RTT packet (LRRTT) arrives. That
-packet is sent exactly once, and on a half-duplex LoRa mesh it is unusually easy to
-lose: a node typically opens its reply link seconds after proving an inbound
-message, while the relay upstream is still transmitting the sibling link's traffic —
-its radio is deaf mid-TX and the LRRTT dies. The failure is silent and deceptive:
-the half-established peer still answers keepalives (raw 1-byte frames, processed
-regardless of link state) but discards every resource advertisement, so the link
-looks alive while nothing ever delivers.
-
-µReticulum hardens both layers on the initiator side:
-
-- **LRRTT resend** (`link.py`) — the RTT payload is kept and re-sent (up to 4×,
-  every 4 s) until the peer sends *anything that decrypts*, which proves its side
-  of the link completed establishment (each resend re-encrypts with a fresh IV, so
-  transport dedup never drops it; a peer that was already established just re-fires
-  its idempotent established-callback).
-- **DIRECT delivery retry** (`lxmf.py`) — if the link dies before the message got
-  through (establishment timeout: lost LR or proof) or the resource transfer fails,
-  the delivery is re-attempted on a fresh link, 3 attempts total — matching
-  reference LXMF's retry behavior.
-
-</details>
-
-<details>
-<summary><b>Resource and link safeguards (parity with RNS 1.3.9)</b></summary>
-
-A link peer is untrusted input: it can send a malformed resource advertisement,
-re-identify mid-session, or vanish mid-transfer. Reference RNS 1.3.9 tightened
-these paths, and this port implements the equivalents — with an MCU's much
-smaller margin for error in mind.
-
-- **Advertisement validation** — every advertisement is parsed *and* validated
-  inside one guarded block: msgpack errors, missing fields, wrong types,
-  negative or absurd sizes are rejected before anything is allocated. On a
-  desktop an unchecked size claim wastes memory; on an ESP32 it is an immediate
-  out-of-memory. An advertisement that cannot be processed at all tears the link
-  down rather than leaving it looping on bad input.
-- **Pre-send link check** — a resource verifies its link is still `ACTIVE`
-  before every advertisement, part, request and proof. A closing link nulls its
-  resources' references, so an unguarded watchdog send would raise inside the
-  event loop.
-- **Cancellation signalling** — cancelling tells the peer: `RESOURCE_ICL` from
-  the sender, `RESOURCE_RCL` from the receiver (the receiver-side signal is new
-  in 1.3.9). Without it the far end keeps re-advertising or re-requesting until
-  its own timeout — minutes of wasted airtime on half-duplex LoRa. A cancel that
-  arrives *from* the peer is never echoed back.
-- **Identity binds once** — a second `identify` on an established link is
-  ignored, so anything authorising on the identified identity cannot have its
-  authorisation subject swapped mid-session.
-- **HDLC frame validation** (TCP interface) — frames shorter than a packet
-  header, or that overflowed the buffer mid-flight, are dropped instead of
-  handed to routing as truncated packets.
-
-Covered by `firmware/tests/test_resource_safeguards.py`.
-
-</details>
-
-<details>
-<summary><b>Link path re-balancing and keepalives (parity with RNS 1.4.x)</b></summary>
-
-A link request and the proof that answers it do not always travel the same
-number of hops — a route can shorten or lengthen between the two, and on a mesh
-with several possible paths they can simply differ. Both ends check the proof's
-hop count, so a mismatch used to mean the link never came up at all.
-
-- **Re-balancing at a relay** — when a transit link-request proof arrives with a
-  hop count other than the one recorded for that link, the relay verifies the
-  proof signature and then adopts the new count, in both the link table and the
-  path table, instead of dropping the proof. The signature check is mandatory
-  here: this rewrites routing state, so an unverifiable proof (no native
-  Ed25519, or `strict_lr_validation` off) is still dropped — a failed link beats
-  an unauthenticated hop rewrite.
-- **Re-balancing at the initiator** — the same correction is applied to the path
-  table once our own link goes active. No extra crypto is spent: the link only
-  reaches that state after the peer's signature over our link id has been
-  verified.
-- **Keepalive on outbound silence** — what stales a link at the far end is how
-  long since *we* transmitted, not how long since we heard. An initiator that
-  only receives (a peer streaming to it) used to fall silent and get torn down
-  mid-stream; it now probes when either direction has been quiet.
-- **RTT-scaled windows** — the RTT the initiator measures is carried in the
-  handshake and now sizes the receiver's keepalive and stale windows
-  (`clamp(rtt × 360/1.75, 5, 360)`, stale = twice that). LoRa clamps back to the
-  360 s / 720 s pair this port used unconditionally before; a fast link drops to
-  roughly 20 s / 41 s, so a dead TCP link is reaped in under a minute instead of
-  twelve. An absent or unusable value keeps the old defaults.
-- **Keepalive reply throttle** — with both ends deriving that window from the
-  same RTT, a `0xFF` probe is answered only if we have been quiet for it.
-  Anything transmitted inside the window already proved us alive, and on
-  half-duplex LoRa the saved frame is one that would have gone out exactly when
-  the channel is busiest.
-- **Channel window** — a message sequence past the far edge of the receive
-  window is rejected rather than buffered forever behind a gap that can never be
-  filled.
-
-**Request and response size limits** — `destination.set_max_request_size(n)`
-caps what a destination's request handlers will accept, and
-`link.request(..., max_response_size=n)` caps what comes back. Both refuse
-before buffering: an oversized single-packet request is dropped before it is
-unpacked, and an oversized resource is cancelled with an `RCL` before a single
-part transfers, so the sender stops immediately rather than retrying for
-minutes. Without a limit the stack's own 16 KB `MAX_RESOURCE_SIZE` ceiling still
-applies — worth lowering on a node with tens of KB of free heap, especially over
-TCP where the negotiated link MTU reaches 16 KB.
-
-Covered by `firmware/tests/test_transport.py`, `test_link_request.py`,
-`test_resource_safeguards.py` and `test_channel.py`, and verified on an ESP32-S3
-(T-Deck) against real native Ed25519.
-
-</details>
-
-<details>
-<summary><b>SX1262 LoRa — RNode split-packet protocol</b></summary>
-
-The LoRa interface implements the same split-packet framing as [RNode firmware](https://github.com/markqvist/RNode_Firmware), enabling transparent interop with RNode devices and support for Reticulum's full 500-byte MTU over LoRa's 255-byte frame limit.
-
-Every LoRa frame carries a **1-byte RNode header**:
-
-| Bits | Field | Description |
-|------|-------|-------------|
-| 7–4 | Sequence | Random 4-bit value for matching split halves |
-| 0 | FLAG_SPLIT | Set when packet is split across 2 frames |
-
-- **Single frame** (data ≤ 254 bytes): `[header] [data]` — max 255 bytes
-- **Split packet** (data 255–508 bytes): two frames with the same header byte (same sequence + FLAG_SPLIT), back-to-back:
-  - Frame 1: `[header] [first 254 bytes]` = 255 bytes
-  - Frame 2: `[header] [remaining bytes]`
-
-The receiver matches split frames by sequence number and reassembles them into a complete Reticulum packet. Stale fragments are discarded after 15 seconds.
-
-The `lora-sx126x` MicroPython driver sends and receives bytes faithfully — the RNode header byte is the first byte returned by `poll_recv()` on RX and the first byte written by `send()` on TX. No FIFO offset workarounds are needed.
-
-Packets with bit 7 set in the Reticulum flags byte (IFAC-tagged) are validated if IFAC is configured on the receiving interface, or dropped if IFAC is not configured. This matches reference Reticulum behavior.
-
-</details>
-
-<details>
-<summary><b>ESP32-S3 socket workarounds</b></summary>
-
-The UDP interface includes several workarounds for ESP32-S3 MicroPython lwIP quirks:
-
-- **Single TX/RX socket** — saves ~280 bytes IDF heap vs two sockets.
-- **`settimeout(0)` re-asserted after every `sendto()`** — ESP32-S3 lwIP bug: `sendto()` corrupts the socket's non-blocking state. Without this, `recvfrom()` silently blocks after the first send, freezing the async event loop.
-- **No `select.poll()`** — `poll(0)` doesn't reliably detect incoming UDP on ESP32-S3 lwIP. Uses direct non-blocking `recvfrom()` + `except OSError` instead.
-- **RX socket watchdog** — if the interface previously received traffic but hasn't for 60 seconds, the socket is closed and recreated.
-- **WiFi power management disabled** — `wlan.config(pm=0)` is required to receive broadcast UDP packets.
-- **AP_IF deactivated** — dual-interface mode routes broadcast packets to AP instead of STA, preventing UDP broadcast reception.
-
-</details>
-
-<details>
-<summary><b>Native crypto module (.mpy details)</b></summary>
-
-The native C module wraps [Monocypher](https://monocypher.org/) compiled to native machine code, distributed as a `.mpy` file alongside the Python code (no firmware recompile needed).
-
-| Operation | Pure Python | Native C | Speedup |
-|-----------|-------------|----------|---------|
-| Ed25519 sign | 2 000 ms | 12 ms | **166×** |
-| Ed25519 verify | 2 000 ms | 18 ms | **111×** |
-| X25519 exchange | 1 400 ms | 13 ms | **107×** |
-
-`.mpy` files are version 6 (MicroPython 1.19+) and architecture-specific:
-
-| File | Architecture | Devices |
-|------|--------------|---------|
-| `ed25519_fast_xtensawin.mpy` | Xtensa (windowed) | ESP32-S3 |
-| `ed25519_fast_armv6m.mpy` | ARM Cortex-M0+ | RP2040 (Pico W) |
-
-Both ship pre-built in `firmware/lib/` and are loaded automatically. If a future MicroPython version changes the `.mpy` format, see [BUILDING_NATIVE_MODULES.md](tools/natmod/BUILDING_NATIVE_MODULES.md) for cross-compilation instructions.
-
-</details>
-
-<details>
-<summary><b>Native BZ2 module</b></summary>
-
-Reference RNS always compresses Resource transfers with bz2. The native C module provides **both compression and decompression**, producing stdlib-compatible bz2 output that interoperates with reference RNS.
-
-- **Decompression**: ~100× faster than pure Python (~2 ms vs ~200 ms for 1 KB). Falls back to pure Python if native module is missing.
-- **Compression**: ~500 ms for 1 KB on ESP32-S3. Reduces text payloads by 60–80% (e.g. 1 253 B → 394 B). Only available with native module — without it, Resources are sent uncompressed (which is valid).
-
-| File | Architecture | Devices |
-|------|--------------|---------|
-| `bz2_fast_xtensawin.mpy` | Xtensa (windowed) | ESP32-S3 |
-| `bz2_fast_armv6m.mpy` | ARM Cortex-M0+ | RP2040 (Pico W) |
-
-</details>
+- **MicroPython only** — no CPython/desktop support.
+- **Message size** — single-packet opportunistic messages carry up to ~295 bytes of content; larger ones (up to 16 KB) use Link-based DIRECT delivery via Resource transfer, also through multi-hop chains.
+- **Unknown routes** — sending to a peer with no known route issues a path request and delivers once the route is learned; replies reuse an open link when present.
+- **No propagation node** — no store-and-forward for offline peers (on the roadmap, along with more peripheral drivers).
 
 ---
 
 ## Project structure
-
 ```
 uP-reticulum/
 ├── README.md
@@ -1083,6 +498,9 @@ uP-reticulum/
         ├── interfaces/          # UDP, TCP, Serial, E32, SX1262
         └── crypto/              # X25519, Ed25519, AES, HKDF, HMAC, SHA, Token
 ```
+```
+
+Further reading in `docs/`: [protocol.md](docs/protocol.md), [interfaces.md](docs/interfaces.md), [eink-deploy.md](docs/eink-deploy.md), [CAMERA_WEBP.md](docs/CAMERA_WEBP.md), [lxmf-delivery-semantics.md](docs/lxmf-delivery-semantics.md), [small-board-footprint.md](docs/small-board-footprint.md).
 
 ---
 
