@@ -12,31 +12,19 @@ A pure MicroPython implementation of the [Reticulum](https://reticulum.network/)
 
 ## What can I build with this?
 
-Each row below is a working example in the `firmware/` folder. Pick the one closest to what you want, then follow the matching walkthrough further down.
+Each row is a working example in `firmware/`, on hardware it has been tested on; the link opens its walkthrough.
 
 | Goal | Example | Hardware | Connectivity |
 |------|---------|----------|--------------|
-| Chat with friends from a cheap board, control GPIO over LXMF | [`example_node.py`](#1--chat-node-example_nodepy) | ESP32-S3-Zero | WiFi |
-| Run a tiny webserver-like portal reachable over Reticulum | [`example_nomadnet_node.py`](#2--nomadnet-page-server-example_nomadnet_nodepy) | ESP32-S3-Zero (+ optional sensors) | WiFi, LoRa, or TCP |
-| Take a photo on demand and have it delivered as an LXMF attachment | [`example_camera_node.py`](#3--camera-node-example_camera_nodepy) | ESP32-S3-CAM + OV2640 | WiFi |
-| Battery-powered sensor that wakes, reports, sleeps | [`example_sensor.py`](#4--sensor-node-with-deepsleep-example_sensorpy) | Any ESP32-S3 + sensor | WiFi |
-| Pocket terminal: chat over LoRa using a USB serial cable, no app needed | [`example_proxy.py`](#5--usb-serial--lora-chat-bridge-example_proxypy) | RP2040 + E32/SX1262 LoRa | LoRa |
+| Chat from a cheap board, control GPIO over LXMF | [`example_node.py`](docs/examples/chat-node.md) | ESP32-S3 with PSRAM, e.g. [Waveshare ESP32-S3-Zero](https://www.waveshare.com/wiki/ESP32-S3-Zero) | WiFi |
+| Tiny web-like portal reachable over Reticulum | [`example_nomadnet_node.py`](docs/examples/nomadnet-node.md) | ESP32-S3 (+ optional sensors) | WiFi, LoRa or TCP |
+| Photo on demand, delivered as an LXMF attachment | [`example_camera_node.py`](docs/examples/camera-node.md) | ESP32-S3-CAM (OV2640, with PSRAM) | WiFi |
+| Battery sensor that wakes, reports, sleeps | [`example_sensor.py`](docs/examples/sensor-node.md) | ESP32-S3 + sensor | WiFi |
+| Chat over LoRa from a serial terminal, no app needed | [`example_proxy.py`](docs/examples/serial-lora-bridge.md) | [Waveshare RP2040-Zero](https://www.waveshare.com/rp2040-zero.htm) + [EByte E32-900T20D](https://www.cdebyte.com/products/E32-900T20D/7) or SX1262 | LoRa |
+| E-ink status screen with a contact QR code | [`example_eink_node.py`](docs/examples/eink-node.md) | Heltec Wireless Paper | LoRa |
+| LoRa ↔ WiFi/TCP relay | [`example_transport_router.py`](#transport-mode-relay) | ESP32-S3 (PSRAM) + LoRa | LoRa + WiFi/TCP |
 
----
-
-## Hardware shopping list
-
-These are the boards µReticulum has been tested on. All are inexpensive and easy to find on Aliexpress / Amazon / Seeed / Waveshare.
-
-| Board | Price | Good for | Notes |
-|-------|------:|----------|-------|
-| [Waveshare ESP32-S3-Zero](https://www.waveshare.com/wiki/ESP32-S3-Zero) | ~$4 | First-time users, chat/sensor/NomadNet nodes | ESP32-S3, 2 MB PSRAM, onboard NeoPixel LED, USB-C, 24.8 × 18 mm |
-| [Seeed XIAO ESP32-S3](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/) + [Wio-SX1262 LoRa kit](https://wiki.seeedstudio.com/wio_sx1262_xiao_esp32s3_for_lora/) | ~$25 | LoRa + WiFi nodes that interop with RNode | XIAO + SX1262 stack |
-| [ESP32-S3-CAM (OV2640)](https://www.aliexpress.com/item/1005008285512156.html) | ~$10 | Anything with the camera example | Many clones available — pick one with PSRAM |
-| [Waveshare RP2040-Zero](https://www.waveshare.com/rp2040-zero.htm) + [EByte E32-900T20D](https://www.cdebyte.com/products/E32-900T20D/7) | ~$10 | Cheapest LoRa option, USB serial chat | Wiring + power notes in the [E32 LoRa Interface](#e32-lora-interface-ebyte-e32-900t20d) section |
-| [LilyGO T-Deck](https://lilygo.cc/products/t-deck) v1 | ~$60 | Portable LoRa messenger with display + keyboard | Uses a separate GUI project: [reticulum-tdeck](https://github.com/varna9000/reticulum-tdeck) |
-
-Should also work on other ESP32-S3 boards and Raspberry Pi Pico W. **Pure ESP32 (non-S3) is no longer supported** — the project targets ESP32-S3 and RP2040.
+For LoRa on an ESP32-S3, the [Seeed XIAO ESP32-S3](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/) + [Wio-SX1262](https://wiki.seeedstudio.com/wio_sx1262_xiao_esp32s3_for_lora/) kit is tested and works with RNodes. Other ESP32-S3 boards should work too; the original ESP32 (non-S3) is not supported. For a handheld messenger on the LilyGO T-Deck v1 or T-Deck Pro, see [reticulum-tdeck](https://github.com/varna9000/reticulum-tdeck).
 
 ---
 
@@ -63,7 +51,7 @@ You have two choices of firmware. Pick the one that matches what you want to bui
 
 | Firmware | Use when | Download |
 |----------|----------|----------|
-| **Standard MicroPython 1.22+** | All examples *except* the camera node | [micropython.org/download/ESP32_GENERIC_S3](https://micropython.org/download/ESP32_GENERIC_S3/) |
+| **Standard MicroPython 1.23+** | All examples *except* the camera node | [micropython.org/download/ESP32_GENERIC_S3](https://micropython.org/download/ESP32_GENERIC_S3/) |
 | **MicroPython + camera driver** | **Required** for `example_camera_node.py` and any use of `peripherals.camera` | [micropython-camera-API releases](https://github.com/cnadler86/micropython-camera-API/releases) |
 
 Standard MicroPython does **not** include the OV2640 camera driver — the camera-enabled build is mandatory if you want to use the camera. For everything else (chat, NomadNet pages, sensors, serial proxy) stick with the standard build.
@@ -91,13 +79,13 @@ Install esptool once (`pip install esptool`), then with your board in download m
 
 ```bash
 # Wipe existing firmware first (recommended, especially when switching builds)
-esptool.py --chip esp32s3 --port /dev/ttyACM0 erase_flash
+esptool --chip esp32s3 --port /dev/ttyACM0 erase-flash
 
 # Standard MicroPython
-esptool.py --chip esp32s3 --port /dev/ttyACM0 write_flash -z 0 ESP32_GENERIC_S3-<version>.bin
+esptool --chip esp32s3 --port /dev/ttyACM0 write-flash -z 0 ESP32_GENERIC_S3-<version>.bin
 
 # OR: camera-enabled MicroPython
-esptool.py --chip esp32s3 --port /dev/ttyACM0 write_flash -z 0 firmware_camera_esp32s3.bin
+esptool --chip esp32s3 --port /dev/ttyACM0 write-flash -z 0 firmware_camera_esp32s3.bin
 ```
 
 Replace `/dev/ttyACM0` with your port (`COM3` on Windows, `/dev/tty.usbmodem*` on macOS). After flashing, unplug and re-plug the board to exit download mode.
@@ -145,82 +133,9 @@ In the Thonny REPL (or `mpremote repl`):
 import example_node
 ```
 
-You should see boot output ending in something like:
+When the boot log reaches `Announced as: MyNode`, open MeshChat on the same LAN; your node appears as a peer within a few seconds.
 
-```
-[reticulum] Identity loaded: <hex hash>
-[reticulum] WiFi UDP interface up on 192.168.1.42
-[reticulum] Announced as MyNode
-```
-
-Open MeshChat on the same LAN — your node will appear as a peer within a few seconds.
-
-To run a different example, replace `example_node` with `example_nomadnet_node`, `example_camera_node`, `example_sensor`, or `example_proxy`. To make any example run on boot, save it as `main.py` on the device.
-
----
-
-## Example walkthroughs
-
-### 1 — Chat node (`example_node.py`)
-
-The default example. Receives LXMF messages, echoes them back, and can drive the onboard NeoPixel (GPIO 21 on the Waveshare S3-Zero) from chat commands. Needs any ESP32-S3 with WiFi and standard MicroPython.
-
-| You send | What happens |
-|----------|--------------|
-| `red` / `green` / `blue` | Onboard LED changes colour |
-| `off` | LED turns off |
-| anything else | Echoed back to you |
-
-Commands are case-insensitive. The same pattern can drive relays, motors, or any GPIO-attached hardware — see [Peripherals](#peripherals).
-
-### 2 — NomadNet page server (`example_nomadnet_node.py`)
-
-Serves [micron-format](https://github.com/markqvist/NomadNet) pages over Reticulum Links, a tiny web server reachable only via Reticulum. Any ESP32-S3 (WiFi, LoRa or TCP), standard MicroPython, optional I²C/UART/ADC sensors.
-
-Open NomadNet or MeshChat on another machine, wait for the `nomadnetwork.node` announce, and browse to the node. The landing page is `firmware/pages/index.mu`; drop more `.mu` files into `firmware/pages/` to add pages. Template variables: `{node_name}`, `{mem_free}`, `{uptime}`, and `{sensor}` (readings from active [peripherals](#peripherals)).
-
-Pages under ~417 bytes ride a single encrypted link packet; larger pages and files (up to 16 KB) use the Resource protocol automatically. Files in `firmware/files/` are served at `/file/<name>`; link to them with `` [label`:/file/name] ``.
-
-### 3 — Camera node (`example_camera_node.py`)
-
-Captures a photo with an OV2640 and returns it as an LXMF image attachment, by default a **VGA (640 × 480) WebP** (~7 KB, small enough for LoRa), falling back to JPEG if the WebP encoder isn't installed.
-
-![camera demo](images/image2-cam.png "Camera Module Demo")
-
-- **Hardware**: ESP32-S3-CAM with OV2640 and PSRAM.
-- **Firmware**: **camera-enabled MicroPython is mandatory** (see [Step 1](#step-1--flash-micropython-to-your-board)); standard MicroPython fails at `import camera`.
-- **Usage**: send `image` from MeshChat / Sideband (delivered via Link + Resource). Send `help` or `settings` for the live controls.
-- **Settings**: resolution, WebP quality, exposure, flash and night mode are adjustable at runtime; see [Camera image settings](docs/CAMERA_WEBP.md).
-- **WebP encoder**: optional native module `webp_fast.mpy` in `/lib` (source in [`tools/natmod/webp_fast/`](tools/natmod/webp_fast/)). Builds before July 2026 swapped red/blue (pink skies); update `/lib/webp_fast_xtensawin.mpy` if your photos look like that.
-
-For direct capture from the REPL: `from peripherals.camera import capture`, then `capture(resolution="cif", quality=30)` saves to flash and `capture(path=None, resolution="qvga", quality=15)` returns the bytes. Resolutions run from `qqvga` (160 × 120) to `vga` (640 × 480) and larger.
-
-### 4 — Sensor node with deepsleep (`example_sensor.py`)
-
-A minimal LXMF client that boots, reads a sensor (e.g. BME280, SDS011), sends the reading to a fixed hub address, and goes back to deepsleep. Set `SENSOR_HUB = "<hex destination hash>"` in `config.py` (the collector's LXMF address, from its boot log or MeshChat). `import example_sensor`, or save it as `main.py` to restart on every wake. The sleep interval is set inside the example.
-
-### 5 — USB serial ↔ LoRa chat bridge (`example_proxy.py`)
-
-Turns an RP2040 (e.g. Waveshare RP2040-Zero) with a LoRa radio (E32 or SX1262) into a USB-to-Reticulum bridge: chat over LoRa from any laptop without MeshChat. Enable a LoRa interface in `CONFIG["interfaces"]`, plug the board in and open a serial terminal (`screen`, `minicom`, `tio`, `PuTTY`) on its USB CDC port.
-
-| Command | Effect |
-|---------|--------|
-| `/help` | Show available commands |
-| `/peers` | List known peers |
-| `/to <hex>` | Set the chat target by hex-hash prefix |
-| `/me` / `/name` | Show this node's LXMF address / display name |
-| `/announce` | Broadcast identity now |
-| `/quit` | Return to the MicroPython REPL |
-
-Text not starting with `/` is sent to the current target, which auto-switches to the most recent peer who messaged you.
-
-### 6 — E-ink status node (`example_eink_node.py`, Heltec Wireless Paper)
-
-Runs the LXMF node and paints a read-only status screen on the Wireless Paper's 2.13" SSD1682 e-ink: a QR code of the node's `lxma://` contact URI (scan it in Sideband or MeshChat), name and short hash, RX/TX counters, last RSSI/SNR, radio settings, uptime and battery. It redraws when the counters change or every 30 s (fast refresh, full refresh every 10th time).
-
-Set the LoRa interface's `"board": "heltec_wireless_paper"` and check the `EINK` pin dict in `config.py`. The driver (`peripherals/eink_ssd1682.py`) reads the panel chip ID and refuses the other 2.13" revision.
-
-The board has **no PSRAM** (about 220 KB of heap), so deploy it as `mpy-cross -march=xtensawin` bytecode and leave the native Ed25519 module off the device (it costs 95 KB of heap; pure-Python crypto is slower but fits). The full staging and upload script is in [docs/eink-deploy.md](docs/eink-deploy.md). Then `import example_eink_node`.
+To run a different example, replace `example_node` with `example_nomadnet_node`, `example_camera_node`, `example_sensor`, `example_proxy`, `example_eink_node` or `example_transport_router`. To make any example run on boot, save it as `main.py` on the device.
 
 ---
 
@@ -244,7 +159,7 @@ Every interface is an entry in the `CONFIG["interfaces"]` list in `config.py`; s
  "uart_id": 2, "tx_pin": 17, "rx_pin": 16, "speed": 115200}
 ```
 
-**SX1262 SPI LoRa** (e.g. XIAO ESP32-S3 + Wio-SX1262) — native SPI, no serial module. Install the driver once with `mpremote mip install lora-sx126x lora-sync`. Board pinouts are named presets in `firmware/lora_boards.py` (`xiao_esp32s3_sx1262`, `xiao_esp32s3_sx1262_header`, `esp32s3_cam_sx1262`); reference one with `"board"` and keep only the radio parameters, which must match across the whole mesh, in the entry:
+**SX1262 SPI LoRa** (e.g. XIAO ESP32-S3 + Wio-SX1262) — native SPI, no serial module. Install the driver once with `mpremote mip install lora-sx126x lora-sync`. Board pinouts are named presets in `firmware/lora_boards.py` (`xiao_esp32s3_sx1262`, `xiao_esp32s3_sx1262_header`, `esp32s3_cam_sx1262`, `heltec_wireless_paper`, `tdeck_v1_sx1262`, `tdeck_pro_sx1262`); reference one with `"board"` and keep only the radio parameters, which must match across the whole mesh, in the entry:
 
 ```python
 {"type": "LoRaInterface", "board": "esp32s3_cam_sx1262", "name": "LoRa SX1262",
@@ -409,7 +324,7 @@ Active peripherals are also queried for the `{sensor}` variable in NomadNet page
 
 **Native crypto module not loading (`ImportError: ed25519_fast`)**
 - The `.mpy` in `firmware/lib/` must match your architecture: `*_xtensawin.mpy` for ESP32-S3, `*_armv6m.mpy` for RP2040.
-- The `.mpy` format is tied to a MicroPython version range; if yours is much newer than 1.22, rebuild per [BUILDING_NATIVE_MODULES.md](tools/natmod/BUILDING_NATIVE_MODULES.md).
+- The modules are mpy v6.3 builds, loaded by MicroPython 1.23 and newer (in use on 1.24.1 and 1.27); on 1.22 they do not load. For another version, rebuild per [BUILDING_NATIVE_MODULES.md](tools/natmod/BUILDING_NATIVE_MODULES.md).
 - Everything still works without it, at ~4 s per message instead of <200 ms (and without stamp generation, see [Network stamps](#network-stamps-reticulum-16)).
 
 **LoRa: no packets received**
@@ -435,8 +350,6 @@ Tested and confirmed working with:
 - **RNS transport servers** — TCP client to remote hubs, automatic path learning from announces
 
 Protocol behaviour tracks **reference RNS 1.6.x**: the 1.3.9 link/resource safeguards and the parts of 1.4.x–1.5.x that apply to a leaf or relay node are implemented, and the 1.6 network stamps are covered in [Network stamps](#network-stamps-reticulum-16). Out of scope for an MCU port: `BackboneInterface` flap-blocking, interface discovery, I2P, shared-instance/tunnel interfaces, the `rnsh` utility, and the threaded ingress queue of 1.5.0. Per-release notes: [docs/protocol.md](docs/protocol.md#reference-rns-version-tracking).
-
-> If you run an `rnsh` listener anywhere, update it to RNS 1.3.9 or later (it fixes a critical authorisation bypass). This port has no listener and is not affected.
 
 ---
 
@@ -467,37 +380,29 @@ The Monocypher-based native module is ~160× faster. Pre-built `.mpy` files for 
 ## Project structure
 ```
 uP-reticulum/
-├── README.md
-├── images/                      # README assets
-├── tools/                       # Build tools, hardware docs, support files
-│   ├── natmod/                  # Native C modules (ed25519_fast, bz2_fast)
-│   ├── camera/                  # Camera board pinout, test scripts
-│   └── ebyte/                   # E32/E220 datasheets
-│
-└── firmware/                    # ← Upload contents to microcontroller root
-    ├── example_node.py          # LXMF messaging node with NeoPixel control
-    ├── example_nomadnet_node.py # NomadNet page-serving node
-    ├── example_camera_node.py   # OV2640 camera node (ESP32-S3-CAM)
-    ├── example_sensor.py        # Sensor client with deepsleep
-    ├── example_proxy.py         # USB serial ↔ LoRa chat bridge (RP2040)
-    ├── config.py                # Node configuration (WiFi, interfaces)
-    ├── lib/                     # Native C modules (.mpy) — auto-loaded
-    ├── pages/                   # NomadNet micron-format pages
-    ├── files/                   # Downloadable files served over Links
-    ├── sensors/                 # Low-level sensor drivers
-    ├── peripherals/             # Modular hardware drivers (LED, GPIO, ADC, sensors, camera)
-    └── urns/                    # The Reticulum stack itself
-        ├── reticulum.py         # Core init, config, async event loop
-        ├── identity.py          # Identity, key generation, announce validation
-        ├── destination.py       # Addressing, encryption, announces
-        ├── packet.py            # Packet framing, proof generation, receipts
-        ├── transport.py         # Directed routing / relay, path tables, announce propagation
-        ├── link.py              # Reticulum Links (ECDH, RPC)
-        ├── resource.py          # Resource protocol (segmented data)
-        ├── lxmf.py              # LXMF message format, LXMRouter
-        ├── interfaces/          # UDP, TCP, Serial, E32, SX1262
-        └── crypto/              # X25519, Ed25519, AES, HKDF, HMAC, SHA, Token
-```
+├── docs/                         # Protocol, interfaces, delivery semantics, deploy notes
+├── tools/                        # Build tools and support files
+│   ├── natmod/                   # Native C modules (ed25519_fast, bz2_fast, webp_fast)
+│   ├── gen_announce_stamp.py     # Off-device announce stamp generator
+│   ├── camera/                   # Camera board pinout, test scripts
+│   └── ebyte/                    # E32/E220 datasheets
+└── firmware/                     # ← Upload contents to the microcontroller root
+    ├── example_*.py              # node, nomadnet_node, camera_node, sensor, proxy, eink_node, transport_router
+    ├── config.py                 # Node configuration (WiFi, interfaces)
+    ├── lora_boards.py            # LoRa board pinout presets
+    ├── wifi_power.py, boot.py    # WiFi power settings; optional WiFi/WebREPL at boot
+    ├── lib/                      # Native C modules (.mpy), auto-loaded
+    ├── pages/, files/            # NomadNet pages and downloadable files
+    ├── peripherals/, sensors/    # Hardware drivers
+    └── urns/                     # The Reticulum stack
+        ├── reticulum.py          # Core init, config, event loop
+        ├── identity.py, destination.py, packet.py
+        ├── transport.py          # Routing / relay, path tables, announces, path requests
+        ├── link.py, channel.py, buffer.py, resource.py
+        ├── lxmf.py               # LXMF messages, LXMRouter, outbound scheduler
+        ├── stamps.py, stamp_check.py, stamp_hw.py, announce_stamps.py   # Reticulum 1.6 stamps
+        ├── interfaces/           # UDP, TCP, Serial, E32, SX1262 LoRa
+        └── crypto/               # X25519, Ed25519, AES, HKDF, HMAC, SHA, Token
 ```
 
 Further reading in `docs/`: [protocol.md](docs/protocol.md), [interfaces.md](docs/interfaces.md), [eink-deploy.md](docs/eink-deploy.md), [CAMERA_WEBP.md](docs/CAMERA_WEBP.md), [lxmf-delivery-semantics.md](docs/lxmf-delivery-semantics.md), [small-board-footprint.md](docs/small-board-footprint.md).

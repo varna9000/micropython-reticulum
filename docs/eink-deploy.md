@@ -1,6 +1,6 @@
 # E-ink status node: bytecode deployment
 
-The Heltec Wireless Paper has no PSRAM (about 220 KB of heap), so the stack is deployed as precompiled bytecode with the native Ed25519 module left off the device. This is the full staging and upload script referenced from the [README](../README.md#6--e-ink-status-node-example_eink_nodepy-heltec-wireless-paper).
+The Heltec Wireless Paper has no PSRAM (about 220 KB of heap), so the stack is deployed as precompiled bytecode with the native Ed25519 module left off the device. This is the full staging and upload script referenced from the [e-ink example](examples/eink-node.md).
 
 ```bash
 MPY=mpy-cross   # from the MicroPython repo, same major version as the board
