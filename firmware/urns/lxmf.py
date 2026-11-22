@@ -1094,8 +1094,18 @@ class LXMRouter:
         # announced (cheap for typical costs; see LXMessage._pow_stamp).
         if not msg.outbound_ticket and msg.stamp_cost is None:
             p = self.peers.get(msg.destination_hash)
-            if p:
-                msg.stamp_cost = p.get("stamp_cost")
+            cost = p.get("stamp_cost") if p else None
+            if cost is None:
+                # The bounded in-memory peers table may not hold this peer: it
+                # was evicted by a busy hub's announce flood, or the node has
+                # rebooted since the peer announced. Its last announce data is
+                # also kept (and persisted) in Identity.known_destinations, so
+                # read the stamp cost from there before sending unstamped
+                # (reference LXMF persists outbound stamp costs for the same
+                # reason). Seen live: a reply sent 40 s after the peer's
+                # announce was dropped by MeshChatX as "invalid stamp".
+                cost = self._parse_stamp_cost(Identity.recall_app_data(msg.destination_hash))
+            msg.stamp_cost = cost
         if msg.packed:
             return
         if msg.pack(defer_pow=True):

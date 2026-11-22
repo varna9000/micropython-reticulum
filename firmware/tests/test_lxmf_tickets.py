@@ -425,6 +425,29 @@ def test_single_packet_limit_leaves_room_for_a_transport_header():
 
 
 
+def test_stamp_cost_falls_back_to_remembered_announce_data():
+    """The peer is not (or no longer) in the bounded peers table, but its last
+    announce is remembered by Identity: the reply must still be stamped."""
+    r, peer = _router_with_peer()
+    r.peers.pop(peer.hash, None)
+    lxmf.Identity.app_data[peer.hash] = umsgpack.packb([b"meshchatx", 8, [0], 8.0])
+    old_link, old_dest = link_mod.OutgoingLink, lxmf.Destination
+    link_mod.OutgoingLink = StubOutgoingLink
+    lxmf.Destination = FakeDest
+    try:
+        msg = r.send_message(peer.hash, "reply", desired_method=LXMessage.DIRECT)
+        assert msg.stamp_cost == 8
+        payload = umsgpack.unpackb(msg.packed[32 + 64:])
+        assert len(payload) == 5 and len(payload[4]) == 32
+        assert hashlib.sha256(msg.message_id + payload[4]).digest() <= _pow_target(8)
+    finally:
+        link_mod.OutgoingLink, lxmf.Destination = old_link, old_dest
+        lxmf.Identity.known.clear()
+        lxmf.Identity.app_data.clear()
+        Transport.reachable_destinations.clear()
+
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
