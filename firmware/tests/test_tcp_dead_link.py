@@ -127,7 +127,83 @@ def test_disabled_watchdog():
           len(mod.made))
 
 
-for fn in (test_silent_socket_reconnects, test_traffic_resets_watchdog,
+class _FakeTime:
+    def __init__(self):
+        self.t = 1000.0
+
+    def time(self):
+        return self.t
+
+
+def _sim(iface, mod, ft, seconds, life):
+    """Drive reconnect once a (fake) second. A connection 'lives' `life` s
+    before the remote closes it. Returns the fake times of every connect."""
+    times = []
+    seen = len(mod.made)
+    up_at = ft.t
+    for _ in range(seconds):
+        ft.t += 1
+        _now[0] += 1000
+        if iface.online and ft.t - up_at >= life:
+            iface.online = False                       # what poll_loop does on EOF
+        if not iface.online:
+            iface._reconnect()
+            if len(mod.made) > seen:
+                seen = len(mod.made)
+                up_at = ft.t
+                times.append(ft.t)
+    return times
+
+
+def test_refused_connections_back_off_and_cap():
+    _now[0] = 0
+    ft = _FakeTime()
+    real = tcp.time
+    tcp.time = ft
+    try:
+        iface, mod = mk(reconnect_wait=5)
+        times = _sim(iface, mod, ft, 4000, life=1)     # remote closes after 1 s, every time
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        check("several attempts happened", len(times) > 8, len(times))
+        check("gaps grow (doubling)", gaps[1] >= 1.8 * gaps[0] and gaps[3] >= 1.8 * gaps[2], gaps[:6])
+        check("gap capped at 10 min + jitter", max(gaps) <= 600 * 1.1 + 2 and gaps[-1] >= 600, gaps[-3:])
+        check("not hammering: <= 25 connects in 4000 s", len(times) <= 25, len(times))
+    finally:
+        tcp.time = real
+
+
+def test_healthy_connection_resets_backoff():
+    _now[0] = 0
+    ft = _FakeTime()
+    real = tcp.time
+    tcp.time = ft
+    try:
+        iface, mod = mk(reconnect_wait=5)
+        _sim(iface, mod, ft, 400, life=1)
+        check("delay grew", iface._delay >= 160, iface._delay)
+        # next connection stays up 90 s (> healthy), then drops
+        iface.online = True
+        iface._connected_at = _now[0]
+        iface._assess = True
+        _now[0] += 90000
+        ft.t += 90
+        iface.online = False
+        iface._reconnect()
+        check("delay reset to base after a healthy connection", iface._delay == 5, iface._delay)
+        # 45 s (between short and healthy): unchanged
+        iface._delay = 40
+        iface.online = True
+        iface._connected_at = _now[0]
+        iface._assess = True
+        _now[0] += 45000
+        iface.online = False
+        iface._reconnect()
+        check("mid-length connection keeps the delay", iface._delay == 40, iface._delay)
+    finally:
+        tcp.time = real
+
+
+for fn in (test_refused_connections_back_off_and_cap, test_healthy_connection_resets_backoff, test_silent_socket_reconnects, test_traffic_resets_watchdog,
            test_disabled_watchdog):
     print(fn.__name__)
     fn()

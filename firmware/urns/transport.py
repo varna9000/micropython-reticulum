@@ -32,6 +32,15 @@ _TIME_FLOOR = 1704067200       # 2024-01-01 UTC
 # can ASK a transport node for a route to a destination it has no path to yet.
 _PATH_APP_NAME = "rnstransport"     # well-known: "rnstransport.path.request"
 _PATH_REQUEST_TIMEOUT = 15          # seconds before a waiting send gives up
+_ANNOUNCE_AWAITED_EXTRA = 4         # awaited path answers may exceed the ingress cap by this many
+_IN_USE_MAX = 16                    # destinations protected from table eviction
+_IN_USE_TTL = 1800                  # seconds a conversation peer stays protected
+_PATH_AWAIT_WINDOW = 60             # seconds an answer to our path request gets queue priority
+_PR_STAMP_TIMEOUT = 30              # seconds to search a path-request stamp before sending unstamped
+_PR_MAX_STAMPING = 2                # concurrent stamp searches (each one is CPU on the event loop)
+_PR_EXT_MARKER = 0xC1               # extension marker byte (reference EXTPAYLOADMARKER)
+_PR_FLAG_STAMPED = 0x00             # extension flag: stamped by the requester
+_PR_FLAG_RELAYED = 0xFF             # extension flag: unstamped request relayed by a stamp-aware node
 _PATH_REREQUEST_INTERVAL = 5        # seconds between re-requests while waiting
 
 # Transport types (module-level for import compatibility)
@@ -80,6 +89,10 @@ class Transport:
     # it to assert on tables immediately after inbound().
     announce_ingress = []
     announce_inline = False
+    # Ingress counters since boot: [arrived, queued, replaced, noop, dup, overflow, processed]
+    # (noop = could not change any table; dup = a better copy was already queued;
+    # overflow = oldest queued entry evicted at the cap).
+    ann_stats = [0, 0, 0, 0, 0, 0, 0]
 
     # Validate link-request proofs before relaying them (anti-DoS on open mesh).
     # Native-gated: skipped when native Ed25519 is unavailable (avoids ~2s verify).
@@ -110,6 +123,15 @@ class Transport:
     _path_waiters = {}            # dest_hash -> [ {on_found, on_timeout, deadline} ]
     _path_request_times = {}      # dest_hash -> last request sent (rate-limit)
     _path_request_dest = None     # cached OUT/PLAIN "rnstransport.path.request"
+    clock_shift_hooks = []        # callables(_sh) that re-base their own wall-clock state
+    _in_use = {}                  # dest_hash -> last time we used it (bounded, see mark_in_use)
+    _seen_emit = {}               # dest_hash -> newest announce emission validated (bounded)
+    _seen_blob = {}               # dest_hash -> random_hash (10 B) of the last announce validated (bounded)
+    # Reticulum 1.6 stamped path requests: send dest|tid|tag|0xC1 0x00|stamp
+    # (64 B) instead of the unstamped 48 B form. Config "stamp_path_requests".
+    stamp_path_requests = None    # None: decided by Reticulum from the native hashcash
+    pr_stamp_timeout = _PR_STAMP_TIMEOUT
+    _pr_stamping = {}             # dest_hash -> True while a stamp search is in flight
 
     transport_enabled = False
 
@@ -250,12 +272,33 @@ class Transport:
         return sent
 
     @staticmethod
+    def _sweep_receipts():
+        """Time out receipts and drop the concluded ones, except those an owner
+        keeps matchable (receipt.keep: LXMF holds its pending messages' earlier
+        attempts so a late proof still counts)."""
+        timed_out = []
+        for receipt in Transport.receipts:
+            receipt.check_timeout()
+            if receipt.status != 1 and not receipt.keep:  # concluded, nobody wants it late
+                timed_out.append(receipt)
+        for r in timed_out:
+            if r in Transport.receipts:
+                Transport.receipts.remove(r)
+
+    @staticmethod
     def _create_receipt(packet):
         if packet.create_receipt:
             from .packet import PacketReceipt
             receipt = PacketReceipt(packet)
             if len(Transport.receipts) >= const.MAX_RECEIPTS:
-                Transport.receipts.pop(0)
+                # Evict the oldest receipt nobody asked to keep (LXMF keeps a few per
+                # pending message); only when every one is kept, the oldest of those.
+                for i, old in enumerate(Transport.receipts):
+                    if not old.keep:
+                        del Transport.receipts[i]
+                        break
+                else:
+                    Transport.receipts.pop(0).keep = False
             Transport.receipts.append(receipt)
             return receipt
         return None
@@ -943,11 +986,8 @@ class Transport:
             if packet.packet_type == const.PKT_ANNOUNCE:
                 if Transport.announce_inline:
                     Transport._handle_announce(packet)
-                elif len(Transport.announce_ingress) < const.MAX_ANNOUNCE_INGRESS:
-                    Transport.announce_ingress.append(packet)
                 else:
-                    log("Announce ingress full, dropped "
-                        + packet.destination_hash.hex()[:8], LOG_DEBUG)
+                    Transport._queue_announce(packet)
             elif packet.packet_type == const.PKT_LINKREQUEST:
                 Transport._handle_linkrequest(packet)
             elif packet.packet_type == const.PKT_DATA:
@@ -1072,8 +1112,11 @@ class Transport:
                 d["timeout"] = _sh(d["timeout"])
         for ws in Transport._path_waiters.values():
             for w in ws:
-                if "deadline" in w:
-                    w["deadline"] = _sh(w["deadline"])
+                for k in ("deadline", "hard"):
+                    if k in w:
+                        w[k] = _sh(w[k])
+        for k in Transport._in_use:
+            Transport._in_use[k] = _sh(Transport._in_use[k])
         for k in Transport._path_request_times:
             Transport._path_request_times[k] = _sh(
                 Transport._path_request_times[k])
@@ -1089,7 +1132,7 @@ class Transport:
             # the moment the clock syncs (seen live with a MeshChat peer).
             for attr in ("last_outbound", "last_inbound", "last_proof_time",
                          "request_time", "activated_at", "last_activity",
-                         "_last_keepalive", "_lrrtt_last"):
+                         "_last_keepalive", "_lrrtt_last", "_stamp_deadline"):
                 v = getattr(l, attr, None)
                 if v is not None:
                     setattr(l, attr, _sh(v))
@@ -1101,6 +1144,11 @@ class Transport:
             Identity.known_ratchets[k] = (r, _sh(received))
         Transport._last_cull = _sh(Transport._last_cull)
         Transport._last_persist = _sh(Transport._last_persist)
+        for hook in Transport.clock_shift_hooks:      # application state on the wall clock (LXMF router)
+            try:
+                hook(_sh)
+            except Exception as e:
+                log("Clock shift hook error: " + str(e), LOG_ERROR)
         log("Re-based " + str(len(Transport.path_table))
             + " paths after clock sync (+" + str(delta) + "s)", LOG_VERBOSE)
 
@@ -1123,6 +1171,57 @@ class Transport:
             log("Re-announced " + str(n) + " destination(s) after clock sync", LOG_NOTICE)
 
     @staticmethod
+    def mark_in_use(destination_hash):
+        """Record that we are talking to this destination (sent to it, received
+        a verified message from it): its route and key are protected from
+        eviction by unsolicited announces for _IN_USE_TTL seconds. Bounded."""
+        iu = Transport._in_use
+        now = time.time()
+        if destination_hash not in iu and len(iu) >= _IN_USE_MAX:
+            iu.pop(min(iu, key=lambda k: iu[k]), None)
+        iu[destination_hash] = now
+
+    @staticmethod
+    def is_in_use(destination_hash):
+        """True for a destination we are actively using: a recent conversation
+        peer (mark_in_use), one with an ensure_path waiter, an outstanding path
+        request, or an open/pending link of ours."""
+        t = Transport._in_use.get(destination_hash)
+        if t is not None and 0 <= time.time() - t < _IN_USE_TTL:
+            return True
+        if destination_hash in Transport._path_waiters:
+            return True
+        if Transport._announce_awaited(destination_hash):
+            return True
+        for l in Transport.pending_links + Transport.active_links:
+            d = getattr(l, "destination", None)
+            if d is not None and getattr(d, "hash", None) == destination_hash:
+                return True
+        return False
+
+    @staticmethod
+    def _evict_victim(table, values, ts_index=None):
+        """Key of the entry with the oldest timestamp among those not in use,
+        or None. `values` is a {key: ts} dict, or None to read table[key][ts_index]."""
+        best = None
+        best_ts = None
+        for k in table:
+            ts = values[k] if values is not None else table[k][ts_index]
+            if best_ts is not None and ts >= best_ts:
+                continue
+            if Transport.is_in_use(k):
+                continue
+            best = k
+            best_ts = ts
+        return best
+
+    @staticmethod
+    def _announce_awaited(destination_hash):
+        """True if we sent a path request for this destination recently."""
+        t = Transport._path_request_times.get(destination_hash)
+        return t is not None and 0 <= time.time() - t < _PATH_AWAIT_WINDOW
+
+    @staticmethod
     def has_path(destination_hash):
         """True if we currently know how to reach this destination.
 
@@ -1139,26 +1238,149 @@ class Transport:
         return destination_hash in Transport.reachable_destinations
 
     @staticmethod
-    def request_path(destination_hash, on_interface=None):
+    def request_path(destination_hash, on_interface=None, tag=None, ext_payload=None):
         """Broadcast a path request so a transport node re-announces the route.
 
-        Wire-compatible with reference RNS: a PLAIN broadcast packet addressed to
-        "rnstransport.path.request" carrying destination_hash + a random tag.
-        """
+        Wire-compatible with reference RNS 1.6: a PLAIN broadcast packet to
+        "rnstransport.path.request" carrying destination_hash + OUR transport
+        identity hash (leaf nodes too: the reference always includes it) + a
+        random tag, and by default the 16-byte stamp extension 0xC1 0x00 +
+        stamp (sha256(dest+tag+stamp) <= cost 15.8).
+
+        The stamp search runs in a task (sliced, so the event loop keeps
+        turning) and the request goes out when it is found; if it is not found
+        within pr_stamp_timeout the unstamped 48 B form is sent instead (a hub
+        that does not enforce stamps still answers it). stamp_path_requests =
+        False sends the unstamped form at once. `ext_payload` (relay
+        forwarding) is sent as given, never stamped here. With no event loop
+        running (host tests) the search is done inline.
+
+        While a search is in flight the call is a no-op for that destination.
+        _path_request_times is set when the request is actually SENT (it opens
+        the awaited-announce priority window and spaces re-requests), and the
+        timeouts of ensure_path() waiters count from that moment too."""
+        if tag is None:
+            from .identity import Identity
+            tag = Identity.get_random_hash()
+        else:
+            tag = tag[:const.TRUNCATED_HASHLENGTH // 8]
+        if ext_payload is not None or not Transport.stamp_path_requests:
+            Transport._send_path_request(destination_hash, tag, on_interface, ext_payload)
+            return
+        if destination_hash in Transport._pr_stamping:
+            return
+        if len(Transport._pr_stamping) >= _PR_MAX_STAMPING:
+            log("Path request stamp searches busy, sending unstamped for "
+                + destination_hash.hex()[:8], LOG_NOTICE)
+            Transport._send_path_request(destination_hash, tag, on_interface, None)
+            return
+        Transport._pr_stamping[destination_hash] = True
+        coro = Transport._pr_stamp_task(destination_hash, tag, on_interface)
+        try:
+            import uasyncio as asyncio
+            asyncio.create_task(coro)
+        except Exception:
+            coro.close()
+            Transport._pr_stamp_inline(destination_hash, tag, on_interface)
+
+    @staticmethod
+    def _pr_stamp_step(destination_hash, tag, on_interface, deadline_ms, t0):
+        """One search slice. True when finished (request sent)."""
+        try:
+            from . import stamps
+            stamp, tried = stamps.find_pr_stamp(destination_hash, tag)
+        except Exception as e:
+            log("Path request stamp error: " + str(e), LOG_ERROR)
+            stamp = None
+            deadline_ms = 0
+        if stamp is not None:
+            ms = _ticks_diff(_ticks_ms(), t0)
+            log("Path request stamp for " + destination_hash.hex()[:8] + " found in "
+                + str(ms) + " ms", LOG_VERBOSE)
+            Transport._send_path_request(destination_hash, tag, on_interface,
+                                         bytes([_PR_EXT_MARKER, _PR_FLAG_STAMPED]) + stamp, True)
+            return True
+        if _ticks_diff(_ticks_ms(), t0) >= deadline_ms:
+            log("Path request stamp for " + destination_hash.hex()[:8]
+                + " not found in " + str(deadline_ms // 1000) + " s, sending unstamped", LOG_NOTICE)
+            Transport._send_path_request(destination_hash, tag, on_interface, None, True)
+            return True
+        return False
+
+    @staticmethod
+    async def _pr_stamp_task(destination_hash, tag, on_interface):
+        # Everything that can fail (import, Duty, config) is inside the try: the
+        # _pr_stamping flag must always be cleared, or every later path request
+        # to this destination would be a silent no-op.
+        entered = False
+        sent = False
+        try:
+            import uasyncio as asyncio
+            from . import stamps
+            duty = stamps.Duty(stamps.DUTY_INTERACTIVE, stamps.GRACE_MS)
+            t0 = _ticks_ms()
+            dl = int(Transport.pr_stamp_timeout * 1000)
+            stamps.interactive_enter()
+            entered = True
+            while True:
+                duty.begin()
+                sent = Transport._pr_stamp_step(destination_hash, tag, on_interface, dl, t0)
+                if sent:
+                    break
+                # a real timer wait (duty-cycled): due I/O tasks run before the next slice
+                await asyncio.sleep_ms(duty.rest_ms())
+        except Exception as e:
+            log("Path request stamp task error: " + str(e), LOG_ERROR)
+            if not sent:
+                try:
+                    Transport._send_path_request(destination_hash, tag, on_interface, None, True)
+                except Exception:
+                    pass
+        finally:
+            if entered:
+                try:
+                    stamps.interactive_exit()
+                except Exception:
+                    pass
+            Transport._pr_stamping.pop(destination_hash, None)
+
+    @staticmethod
+    def _pr_stamp_inline(destination_hash, tag, on_interface):
+        entered = False
+        try:
+            from . import stamps
+            t0 = _ticks_ms()
+            dl = int(Transport.pr_stamp_timeout * 1000)
+            stamps.interactive_enter()
+            entered = True
+            while not Transport._pr_stamp_step(destination_hash, tag, on_interface, dl, t0):
+                pass
+        except Exception as e:
+            log("Path request stamp error: " + str(e), LOG_ERROR)
+            try:
+                Transport._send_path_request(destination_hash, tag, on_interface, None, True)
+            except Exception:
+                pass
+        finally:
+            if entered:
+                stamps.interactive_exit()
+            Transport._pr_stamping.pop(destination_hash, None)
+
+    @staticmethod
+    def _send_path_request(destination_hash, tag, on_interface, ext_payload, after_search=False):
         from .destination import Destination
-        from .identity import Identity
         from .packet import Packet
         if Transport._path_request_dest is None:
             Transport._path_request_dest = Destination(
                 None, Destination.OUT, Destination.PLAIN,
                 _PATH_APP_NAME, "path", "request",
             )
-        tag = Identity.get_random_hash()
-        # Leaf form is dest(16)+tag(16); transport nodes insert their own id.
-        if Transport.transport_enabled and Transport.identity is not None:
+        if Transport.identity is not None:
             data = destination_hash + Transport.identity.hash + tag
         else:
-            data = destination_hash + tag
+            data = destination_hash + tag        # no identity yet: legacy leaf form
+        if ext_payload is not None:
+            data += ext_payload
         try:
             pkt = Packet(
                 Transport._path_request_dest, data, const.PKT_DATA,
@@ -1168,10 +1390,37 @@ class Transport:
                 create_receipt=False,
             )
             pkt.send()
-            Transport._path_request_times[destination_hash] = time.time()
-            log("Path request for " + destination_hash.hex()[:8], LOG_VERBOSE)
+            now = time.time()
+            Transport._path_request_times[destination_hash] = now
+            # A waiter's timeout runs from the moment the request is on the wire
+            # (the stamp search may have taken seconds of its original budget).
+            # Extended at most ONCE per waiter (the first send) and never past
+            # the waiter's hard bound, or every re-request would reset the
+            # deadline and an unreachable peer would be re-requested forever.
+            if after_search:
+                for w in Transport._path_waiters.get(destination_hash, ()):
+                    if not w.get("stretched"):
+                        w["stretched"] = True
+                        w["deadline"] = min(now + w["timeout"], w["hard"])
+            log("Path request for " + destination_hash.hex()[:8]
+                + (" (stamped)" if ext_payload is not None and ext_payload[1] == _PR_FLAG_STAMPED
+                   else " (relayed, unstamped)" if ext_payload is not None else ""), LOG_VERBOSE)
         except Exception as e:
             log("Path request failed: " + str(e), LOG_ERROR)
+
+    @staticmethod
+    def path_rerequest_interval():
+        """Seconds between re-requests while a waiter waits: the base interval,
+        never shorter than the LXMF path_request_wait() (7 s, or the medium path
+        timeout of the slowest online interface when that is longer) and never
+        shorter than the 60 s debounce while a slow interface (< 2 kbit/s) is
+        online -- repeating a request inside a slow link's round trip only
+        adds airtime to the congestion that delays the answer."""
+        interval = max(_PATH_REREQUEST_INTERVAL, const.PATH_REQUEST_WAIT,
+                       Transport.medium_path_timeout())
+        if Transport.slow_interface_online():
+            interval = max(interval, const.PATH_REQUEST_DEBOUNCE)
+        return interval
 
     @staticmethod
     def ensure_path(destination_hash, on_found, on_timeout=None,
@@ -1185,8 +1434,11 @@ class Transport:
             except Exception as e:
                 log("Path on_found error: " + str(e), LOG_ERROR)
             return
+        Transport.mark_in_use(destination_hash)
+        now = time.time()
         waiter = {"on_found": on_found, "on_timeout": on_timeout,
-                  "deadline": time.time() + timeout}
+                  "deadline": now + timeout, "timeout": timeout,
+                  "hard": now + timeout + (Transport.pr_stamp_timeout or 0)}
         waiters = Transport._path_waiters.get(destination_hash)
         if waiters is None:
             Transport._path_waiters[destination_hash] = [waiter]
@@ -1212,8 +1464,9 @@ class Transport:
                         log("Path on_found error: " + str(e), LOG_ERROR)
                 continue
             live = []
+            stamping = dest in Transport._pr_stamping      # request not on the wire yet
             for w in waiters:
-                if now >= w["deadline"]:
+                if now >= w["hard"] or (now >= w["deadline"] and not stamping):
                     if w["on_timeout"] is not None:
                         try:
                             w["on_timeout"]()
@@ -1227,30 +1480,40 @@ class Transport:
                 continue
             Transport._path_waiters[dest] = live
             last = Transport._path_request_times.get(dest, 0)
-            if now - last >= _PATH_REREQUEST_INTERVAL:
+            if now - last >= Transport.path_rerequest_interval():
                 Transport.request_path(dest)
+
+    @staticmethod
+    def _parse_path_request(data):
+        """Reference Transport.parse_path_request -> (dest, requester transport
+        id or None, tag, extension or None), or None when tagless/short.
+          64 B  dest | tid | tag | 0xC1 flag stamp(14)   (1.6 stamped)
+          >32 B dest | tid | tag(<=16)                    (pre-1.6 / unstamped)
+          >16 B dest | tag                                (legacy leaf form)"""
+        hlen = const.TRUNCATED_HASHLENGTH // 8
+        n = len(data)
+        if n == 4 * hlen:
+            return data[:hlen], data[hlen:2 * hlen], data[2 * hlen:3 * hlen], data[3 * hlen:]
+        if n > 2 * hlen:
+            return data[:hlen], data[hlen:2 * hlen], data[2 * hlen:3 * hlen], None
+        if n > hlen:
+            return data[:hlen], None, data[hlen:], None
+        return None
 
     @staticmethod
     def path_request_handler(data, packet):
         """Inbound callback on the rnstransport.path.request control destination.
-        Parses a path request and answers it (or recursively discovers the path).
-        Wire format: dest_hash(16) [+ requester_transport_id(16)] + tag."""
+        Parses a path request (any of the three wire formats) and answers it
+        (or recursively discovers the path, forwarding the stamp extension).
+        Stamps are not enforced here (a relay forwards them; a leaf answers
+        only its own destinations)."""
         try:
-            hlen = const.TRUNCATED_HASHLENGTH // 8
-            if data is None or len(data) < hlen:
-                return
-            dest_hash = data[:hlen]
-            requester_tid = None
-            if len(data) > 2 * hlen:
-                requester_tid = data[hlen:2 * hlen]
-                tag = data[2 * hlen:]
-            elif len(data) > hlen:
-                tag = data[hlen:]
-            else:
-                tag = b""
-            if not tag:
+            if data is None or len(data) > 4 * (const.TRUNCATED_HASHLENGTH // 8):
+                return                       # oversized: reference calls it a protocol violation
+            pr = Transport._parse_path_request(data)
+            if pr is None:
                 return                       # tagless requests are ignored
-            tag = tag[:hlen]
+            dest_hash, requester_tid, tag, ext = pr
             unique = dest_hash + tag
             if unique in Transport._pr_tags:
                 return                       # already handled this exact request
@@ -1258,12 +1521,12 @@ class Transport:
             if len(Transport._pr_tags) > 32:
                 Transport._pr_tags.pop(0)
             recv_if = getattr(packet, "receiving_interface", None)
-            Transport._answer_path_request(dest_hash, recv_if, requester_tid, tag)
+            Transport._answer_path_request(dest_hash, recv_if, requester_tid, tag, ext)
         except Exception as e:
             log("path_request_handler error: " + str(e), LOG_ERROR)
 
     @staticmethod
-    def _answer_path_request(dest_hash, attached_interface, requester_tid, tag):
+    def _answer_path_request(dest_hash, attached_interface, requester_tid, tag, ext=None):
         from .destination import Destination as _Dest
         # 1) Dest is one of our own destinations -> announce it directly.
         for d in Transport.destinations:
@@ -1288,7 +1551,7 @@ class Transport:
                 return
         # 3) Unknown path -> recursively discover it (re-originate on other ifaces).
         if Transport.transport_enabled:
-            Transport._recursive_path_discovery(dest_hash, attached_interface, tag)
+            Transport._recursive_path_discovery(dest_hash, attached_interface, tag, ext)
 
     @staticmethod
     def _enqueue_path_response(dest_hash, raw, path_entry, attached_interface):
@@ -1304,10 +1567,15 @@ class Transport:
         ]
 
     @staticmethod
-    def _recursive_path_discovery(dest_hash, attached_interface, tag):
+    def _recursive_path_discovery(dest_hash, attached_interface, tag, ext=None):
         """We don't know the path: re-originate a path request on every other
         interface and remember the requester so we can answer when the announce
-        arrives (serviced in _handle_announce)."""
+        arrives (serviced in _handle_announce). Like the reference, the ORIGINAL
+        tag and stamp extension are forwarded unchanged (a relay does not
+        stamp for others); an unstamped request gets the "relayed" extension
+        0xC1 0xFF + 14 zero bytes when this node stamps its own requests."""
+        if ext is None and Transport.stamp_path_requests:
+            ext = bytes([_PR_EXT_MARKER, _PR_FLAG_RELAYED]) + bytes(14)
         if dest_hash in Transport.discovery_path_requests:
             return
         Transport.discovery_path_requests[dest_hash] = {
@@ -1318,7 +1586,7 @@ class Transport:
             if iface is attached_interface or not iface.online:
                 continue
             try:
-                Transport.request_path(dest_hash, on_interface=iface)
+                Transport.request_path(dest_hash, on_interface=iface, tag=tag, ext_payload=ext)
             except Exception as e:
                 log("Recursive request_path error: " + str(e), LOG_DEBUG)
         log("Path request: recursive discovery for " + dest_hash.hex()[:8], LOG_VERBOSE)
@@ -1498,6 +1766,181 @@ class Transport:
             Transport.announce_handlers.remove(handler)
 
     @staticmethod
+    def _announce_blob(packet):
+        """The announce's 10-byte random_hash (5 random + 5 emission bytes): what
+        makes two announces of one destination the same announce (reference RNS
+        keeps a list of these per path to drop duplicates)."""
+        off = const.KEYSIZE // 8 + const.NAME_HASH_LENGTH // 8
+        if packet.data is not None and len(packet.data) >= off + 10:
+            return bytes(packet.data[off:off + 10])
+        return None
+
+    @staticmethod
+    def _note_blob(dest, blob):
+        """Remember the random_hash of the announce just validated; bounded like
+        _seen_emit (stale keys first, then an arbitrary one)."""
+        sb = Transport._seen_blob
+        if blob is None:
+            return
+        if dest not in sb and len(sb) >= const.MAX_PATH_TABLE * 2:
+            for k in [k for k in sb if k not in Transport.path_table]:
+                del sb[k]
+            if len(sb) >= const.MAX_PATH_TABLE * 2:
+                sb.pop(next(iter(sb)), None)
+        sb[dest] = blob
+
+    @staticmethod
+    def _note_emission(dest, emitted):
+        """Remember the newest emission validated for a routed destination, so
+        a later copy of an emission we already processed over a longer path is
+        recognised as carrying nothing new. Bounded: stale keys (no route any
+        more) go first, then the oldest emission."""
+        se = Transport._seen_emit
+        if emitted > se.get(dest, -1):
+            if dest not in se and len(se) >= const.MAX_PATH_TABLE * 2:
+                for k in [k for k in se if k not in Transport.path_table]:
+                    del se[k]
+                if len(se) >= const.MAX_PATH_TABLE * 2:
+                    se.pop(min(se, key=lambda k: se[k]), None)
+            se[dest] = emitted
+
+    @staticmethod
+    def _announce_noop(packet, entry):
+        """True when this announce cannot change our routing: a known path whose
+        emission is not newer (same or fewer hops are what _handle_announce's
+        should_add adopts; this mirrors it, minus the gravity tie-break which
+        is kept as "not a no-op"). Reference RNS announce_prefilter."""
+        hops = packet.hops
+        eh = entry[const.IDX_PT_HOPS]
+        if hops < eh:
+            return False
+        emitted = Transport._announce_emitted(packet)
+        if hops == eh:
+            ee = entry[const.IDX_PT_EMITTED]
+            if emitted > ee:
+                return False
+            if emitted == ee and Transport._gravity_of(packet.receiving_interface) \
+                    > Transport._gravity_of(entry[const.IDX_PT_RECV_IF]):
+                return False
+            return True
+        # Longer path: ignorable only while the shorter route lives AND the
+        # emission carries nothing new. A newer emission over a longer path
+        # still has to be validated: it may bring a new ratchet, app_data
+        # (display name, LXMF stamp cost) or link cost (the route is kept).
+        if time.time() >= entry[const.IDX_PT_EXPIRES]:
+            return False
+        seen = Transport._seen_emit.get(packet.destination_hash, entry[const.IDX_PT_EMITTED])
+        return emitted <= max(seen, entry[const.IDX_PT_EMITTED])
+
+    @staticmethod
+    def _announce_prefilter(packet):
+        """Cheap pre-queue check (before any crypto or queue slot): True if the
+        announce is for a destination whose key we hold, matches it, and would
+        change no route. The same refresh _handle_announce does for a
+        re-confirming announce (route expiry, reachability, LRU stamp) is done
+        here — the key match gives it the trust of the existing fast path, which
+        also skips the signature for a known key. Never applied to path
+        responses or to destinations we are waiting on / relaying."""
+        from .identity import Identity
+        dest = packet.destination_hash
+        entry = Transport.path_table.get(dest)
+        if (entry is None or packet.context == const.CTX_PATH_RESPONSE
+                or dest in Transport.announce_table
+                or dest in Transport.discovery_path_requests
+                or Transport._announce_awaited(dest)):
+            return False
+        cached = Identity.known_destinations.get(dest)
+        if cached is None or cached[2] != packet.data[:const.KEYSIZE // 8]:
+            return False
+        # Only a TRUE duplicate (the very announce, by random_hash, we last
+        # validated) may be skipped. An announce that is merely "not newer" -- a
+        # peer whose clock stepped back, older firmware without a persisted
+        # emission time, a Pi without an RTC -- is a different announce with
+        # possibly new app_data / ratchet / link cost: it must be validated.
+        blob = Transport._announce_blob(packet)
+        if blob is None or Transport._seen_blob.get(dest) != blob:
+            return False
+        if not Transport._announce_noop(packet, entry):
+            return False
+        now = time.time()
+        if (packet.hops <= entry[const.IDX_PT_HOPS]
+                and entry[const.IDX_PT_NEXT_HOP] == (packet.transport_id
+                    if packet.header_type == const.HDR_2 and packet.transport_id else dest)):
+            entry[const.IDX_PT_TIMESTAMP] = now
+            entry[const.IDX_PT_EXPIRES] = now + const.PATH_EXPIRY
+        if dest in Transport.reachable_destinations:
+            Transport.reachable_destinations[dest] = now
+        cached[0] = now
+        return True
+
+    @staticmethod
+    def _queue_announce(packet):
+        """Admit an inbound announce to the bounded ingress queue.
+        1. no-op for a known destination -> refresh in place, never queued;
+        2. the SAME announce (identical bytes: an echo over another route) already
+           queued -> keep one copy, the one with fewer hops (same signed content);
+        3. a DIFFERENT announce for a queued destination is queued beside it (up to
+           MAX_ANNOUNCE_PER_DEST): nothing here is authenticated yet, so an arrival
+           may not decide that another one is worse (a forged far-future emission
+           must not displace the genuine announce, an older cached copy with fewer
+           hops must not displace a newer one); validation sorts them out. At the
+           per-destination cap the newcomer is dropped, unless it answers our own
+           path request, which then replaces the oldest copy;
+        4. answer to our own path request -> head of the queue, over the cap;
+        5. queue full -> evict the OLDEST entry (fresh data beats stale)."""
+        st = Transport.ann_stats
+        st[0] += 1
+        dest = packet.destination_hash
+        awaited = Transport._announce_awaited(dest)
+        if not awaited and Transport._announce_prefilter(packet):
+            st[3] += 1
+            return
+        q = Transport.announce_ingress
+        same = [i for i in range(len(q)) if q[i].destination_hash == dest]
+        for i in same:
+            if q[i].data == packet.data:
+                # identical content: only the hop count can differ (not signed)
+                keep = packet if packet.hops < q[i].hops else q[i]
+                if awaited:
+                    del q[i]
+                    q.insert(0, keep)
+                else:
+                    q[i] = keep
+                st[4] += 1
+                return
+        if same and len(same) >= const.MAX_ANNOUNCE_PER_DEST:
+            if not awaited:
+                st[4] += 1
+                return
+            del q[same[0]]              # oldest copy of this destination makes room
+        if awaited:
+            if len(q) >= const.MAX_ANNOUNCE_INGRESS + _ANNOUNCE_AWAITED_EXTRA:
+                if not Transport._evict_unawaited(q):
+                    st[5] += 1
+                    return              # all awaited and at the bound: drop the newcomer
+                st[5] += 1
+            q.insert(0, packet)
+        else:
+            if len(q) >= const.MAX_ANNOUNCE_INGRESS:
+                if not Transport._evict_unawaited(q):
+                    st[5] += 1
+                    return              # nothing evictable (all awaited): drop the newcomer
+                st[5] += 1
+            q.append(packet)
+        st[1] += 1
+
+    @staticmethod
+    def _evict_unawaited(q):
+        """Drop the OLDEST queued announce whose destination is not awaited
+        (awaited ones sit at the head, then the rest in age order). False if
+        every entry is awaited."""
+        for i in range(len(q)):
+            if not Transport._announce_awaited(q[i].destination_hash):
+                del q[i]
+                return True
+        return False
+
+    @staticmethod
     def _service_announce_ingress():
         """job_loop tick: validate queued announces, oldest first, within a
         time budget so a burst (a hub reconnect floods dozens at once) cannot
@@ -1506,6 +1949,7 @@ class Transport:
         t0 = _ticks_ms()
         while Transport.announce_ingress:
             packet = Transport.announce_ingress.pop(0)
+            Transport.ann_stats[6] += 1
             try:
                 Transport._handle_announce(packet)
             except Exception as e:
@@ -1553,8 +1997,14 @@ class Transport:
         if not is_self:
             rd = Transport.reachable_destinations
             if len(rd) >= const.MAX_DESTINATIONS and dest not in rd:
-                rd.pop(min(rd, key=lambda k: rd[k]), None)
-            rd[dest] = now
+                # Never push out a destination we are using (open link, recent
+                # conversation, waiter): drop the oldest idle one; when every
+                # entry is in use the newcomer is simply not recorded.
+                victim = Transport._evict_victim(rd, rd)
+                if victim is not None:
+                    rd.pop(victim, None)
+            if dest in rd or len(rd) < const.MAX_DESTINATIONS:
+                rd[dest] = now
 
         # should_add: shortest path wins and is sticky (reference-RNS-like).
         #   - fewer hops  -> ALWAYS adopt. A shorter path is better even if its
@@ -1592,14 +2042,22 @@ class Transport:
             else:
                 should_add = now >= entry[const.IDX_PT_EXPIRES]
 
+        if entry is not None or should_add:
+            Transport._note_emission(dest, emitted)
+            Transport._note_blob(dest, Transport._announce_blob(packet))
+
         if not should_add:
             # Keep-alive: a re-confirming announce for the SAME next hop at no-worse
             # hops refreshes the path's expiry, so a still-valid route is not culled
             # merely because the origin's announces carry a stale/constant emission
             # (e.g. a peer replaying a cached announce, as c4756060's 1-hop TCP peer
             # does). The route itself is unchanged.
+            # An announce OLDER than the route's own emission (a stepped-back peer
+            # clock) is validated for its identity data above but must not keep
+            # the route alive: a stale entry has to age out and be replaced.
             if (entry is not None and received_from == entry[const.IDX_PT_NEXT_HOP]
-                    and packet.hops <= entry[const.IDX_PT_HOPS]):
+                    and packet.hops <= entry[const.IDX_PT_HOPS]
+                    and emitted >= entry[const.IDX_PT_EMITTED]):
                 entry[const.IDX_PT_TIMESTAMP] = now
                 entry[const.IDX_PT_EXPIRES] = now + const.PATH_EXPIRY
             log("Announce " + dest.hex()[:8] + " ignored (dup/worse/older)", LOG_DEBUG)
@@ -1614,8 +2072,16 @@ class Transport:
         # where a path request would have worked).
         if (len(Transport.path_table) >= const.MAX_PATH_TABLE
                 and dest not in Transport.path_table):
-            oldest = min(Transport.path_table,
-                         key=lambda k: Transport.path_table[k][const.IDX_PT_TIMESTAMP])
+            # Evict the oldest route that is NOT in use. A busy hub announces
+            # many new destinations per second; evicting by age alone pushed
+            # the route to a peer we were mid-conversation with out within
+            # seconds. When every entry is in use the newcomer is not recorded.
+            oldest = Transport._evict_victim(
+                Transport.path_table, None, const.IDX_PT_TIMESTAMP)
+            if oldest is None:
+                log("Path table full of in-use routes, not recording "
+                    + dest.hex()[:8], LOG_DEBUG)
+                return
             Transport.path_table.pop(oldest, None)
             Transport.reachable_destinations.pop(oldest, None)
             Transport.path_states.pop(oldest, None)
@@ -1768,6 +2234,54 @@ class Transport:
                 + " hops " + str(expected) + " -> " + str(packet.hops), LOG_VERBOSE)
 
     @staticmethod
+    def lowest_interface_bitrate():
+        """Bitrate of the slowest ONLINE interface with a non-zero bitrate, or
+        None (reference Transport.lowest_interface_bitrate). The reference
+        recomputes it when interfaces are (re)prioritised; here it is computed
+        on demand (a handful of interfaces) so an interface going on/offline
+        is reflected at once."""
+        lowest = None
+        for i in Transport.interfaces:
+            if not getattr(i, "online", True):
+                continue
+            b = getattr(i, "bitrate", 0)
+            if b and (lowest is None or b < lowest):
+                lowest = b
+        return lowest
+
+    @staticmethod
+    def slow_interface_online():
+        b = Transport.lowest_interface_bitrate()
+        return b is not None and b < const.SLOW_INTERFACE_BITRATE
+
+    @staticmethod
+    def medium_path_timeout():
+        """A full-MTU round trip on the slowest online interface plus per-hop
+        grace (reference Transport.medium_path_timeout); 0 when unknown."""
+        b = Transport.lowest_interface_bitrate()
+        if not b:
+            return 0
+        return 2 * (const.MTU * 8 / max(b, const.MINIMUM_BITRATE)) + const.DEFAULT_PER_HOP_TIMEOUT
+
+    @staticmethod
+    def next_hop_interface(destination_hash):
+        entry = Transport.path_table.get(destination_hash)
+        if entry is None:
+            return None
+        return entry[const.IDX_PT_RECV_IF]
+
+    @staticmethod
+    def first_hop_timeout(destination_hash):
+        """MTU airtime on the next-hop interface + per-hop grace (reference
+        Transport.first_hop_timeout); just the grace when the next hop is
+        unknown or its interface has no bitrate."""
+        i = Transport.next_hop_interface(destination_hash)
+        b = getattr(i, "bitrate", 0) if i is not None else 0
+        if b:
+            return const.MTU * (8 / b) + const.DEFAULT_PER_HOP_TIMEOUT
+        return const.DEFAULT_PER_HOP_TIMEOUT
+
+    @staticmethod
     def hops_to(destination_hash):
         """Return known hop count to destination, or 0 if unknown."""
         entry = Transport.path_table.get(destination_hash)
@@ -1791,6 +2305,8 @@ class Transport:
     async def job_loop():
         """Main transport maintenance loop - run as async task"""
         while Transport._jobs_running:
+            drain_ms = 0
+            drained = False
             try:
                 now = time.time()
 
@@ -1800,15 +2316,7 @@ class Transport:
                     Transport._announce_after_sync = False
                     Transport._reannounce_local()
 
-                # Check receipt timeouts
-                timed_out = []
-                for receipt in Transport.receipts:
-                    receipt.check_timeout()
-                    if receipt.status != 1:  # SENT
-                        timed_out.append(receipt)
-                for r in timed_out:
-                    if r in Transport.receipts:
-                        Transport.receipts.remove(r)
+                Transport._sweep_receipts()
 
                 # Check pending link timeouts
                 expired_links = []
@@ -1835,7 +2343,10 @@ class Transport:
                 # servicing path waiters, so a path response processed this
                 # tick can satisfy a waiter in the same tick.
                 if Transport.announce_ingress:
+                    t0 = _ticks_ms()
                     Transport._service_announce_ingress()
+                    drain_ms = _ticks_diff(_ticks_ms(), t0)
+                    drained = True
 
                 # Service deferred sends waiting on a path request.
                 Transport._process_path_waiters()
@@ -1869,4 +2380,40 @@ class Transport:
                 log("Transport job error: " + str(e), LOG_ERROR)
 
             import uasyncio as asyncio
-            await asyncio.sleep(0.25)
+            # Tick = 250 ms. While announces are queued, spend the tick in
+            # short yields with a budgeted drain between them instead of one
+            # drain per tick: a busy hub delivers ~8 announces/s, one slice per
+            # tick cleared ~1-5/s and kept the queue full.
+            # The yield is proportional to the work just done: after a drain slice
+            # (the one at the top of the loop, or one below) every other task gets at
+            # least as long as that slice took, never less than ANNOUNCE_INGRESS_YIELD_MS
+            # and at most ANNOUNCE_INGRESS_YIELD_MAX_MS. On a pure-Python board one
+            # announce validation is 3-12 s, so a fixed 10 ms yield left everything else
+            # ~10 ms every few seconds; and two slices never run without an await between.
+            remaining = 250
+            yielded = not drained        # a slice ran at the top: yield before the next one
+            while True:
+                if Transport.announce_ingress:
+                    if not yielded:
+                        step = min(max(drain_ms, const.ANNOUNCE_INGRESS_YIELD_MS),
+                                   const.ANNOUNCE_INGRESS_YIELD_MAX_MS)
+                        await asyncio.sleep_ms(step)
+                        remaining -= step
+                        yielded = True
+                    elif remaining > 0:
+                        t0 = _ticks_ms()
+                        try:
+                            Transport._service_announce_ingress()
+                        except Exception as e:
+                            log("Announce drain error: " + str(e), LOG_ERROR)
+                        drain_ms = _ticks_diff(_ticks_ms(), t0)
+                        remaining -= drain_ms
+                        yielded = False
+                    else:
+                        break
+                else:
+                    if not yielded:         # the last slice emptied the queue: still yield for it
+                        remaining = max(remaining, min(drain_ms, const.ANNOUNCE_INGRESS_YIELD_MAX_MS))
+                    if remaining > 0:
+                        await asyncio.sleep_ms(remaining)
+                    break

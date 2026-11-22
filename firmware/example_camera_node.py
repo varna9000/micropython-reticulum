@@ -20,7 +20,7 @@ from config import WIFI_SSID, WIFI_PASS, NODE_NAME, DEBUG, CONFIG
 import gc
 gc.collect()
 
-ANNOUNCE_INTERVAL=1800 #30 min
+ANNOUNCE_INTERVAL=3600 #60 min: a default RNS 1.6.1 hub rebroadcasts at most one announce per destination per hour
 
 # Camera settings.
 # Default is VGA + WebP: capture a clean q90 JPEG, re-encode to WebP at a very
@@ -241,12 +241,8 @@ async def send_image_reply(router, source_hash, content):
             "Camera capture",
             fields=fields,
         )
-        if msg:
-            if DEBUG >= 1:
-                print("[Camera] Sent to " + source_hash.hex()[:8])
-        else:
-            if DEBUG >= 1:
-                print("[Camera] Cannot reply to " + source_hash.hex()[:8] + " (unknown identity)")
+        if not msg and DEBUG >= 1:
+            print("[Camera] Cannot reply to " + source_hash.hex()[:8] + " (outbound queue full)")
     except Exception as e:
         from urns.log import log, LOG_ERROR
         log("Camera reply error: " + str(e), LOG_ERROR)
@@ -264,7 +260,7 @@ async def send_text_reply(router, source_hash, text):
     try:
         if not router.send_message(source_hash, text):
             if DEBUG >= 1:
-                print("[Camera] Cannot reply to " + source_hash.hex()[:8] + " (unknown identity)")
+                print("[Camera] Cannot reply to " + source_hash.hex()[:8] + " (outbound queue full)")
     except Exception as e:
         from urns.log import log, LOG_ERROR
         log("Camera reply error: " + str(e), LOG_ERROR)
@@ -412,6 +408,15 @@ def setup_node(rns, node_name):
         gc.collect()
 
     router.register_delivery_callback(on_message)
+
+    # Outbound states: "sent" = left this node, "delivered" = the peer's proof
+    # arrived, "failed" = retries exhausted (see docs/lxmf-delivery-semantics.md).
+    def _out_name(m):
+        return m.destination_hash.hex()[:8]
+    router.register_outbound_callbacks(
+        sent=lambda m: print("[Camera] sent -> " + _out_name(m)),
+        delivered=lambda m: print("[Camera] delivered -> " + _out_name(m)),
+        failed=lambda m: print("[Camera] FAILED -> " + _out_name(m) + " (state 0x%02x)" % m.state))
 
     def on_announce(destination_hash, display_name):
         if DEBUG >= 1:

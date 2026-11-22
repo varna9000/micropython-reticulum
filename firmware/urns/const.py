@@ -2,6 +2,15 @@
 # No internal imports - this module is the dependency root
 
 from micropython import const
+import time as _time
+
+# Millisecond monotonic tick source, wrap-safe through ticks_diff(). MicroPython's
+# time.time() is INTEGER seconds, so anything that needs sub-second resolution
+# (link RTT, receipt timeouts) or that must not move when the wall clock is
+# synced uses these. Host fallback: time.monotonic(). Call as const.ticks_ms()
+# (attribute lookup) so a test can substitute the clock.
+ticks_ms = getattr(_time, "ticks_ms", None) or (lambda: int(_time.monotonic() * 1000))
+ticks_diff = getattr(_time, "ticks_diff", None) or (lambda a, b: a - b)
 
 # Protocol MTU and sizes
 MTU                   = const(500)
@@ -13,7 +22,19 @@ HEADER_MINSIZE        = const(2 + 1 + (128 // 8))       # 19
 HEADER_MAXSIZE        = const(2 + 1 + (128 // 8) * 2)   # 35
 MDU                   = const(500 - 35 - 1)              # 464
 DEFAULT_PER_HOP_TIMEOUT = const(6)
+MINIMUM_BITRATE        = const(5)      # reference Reticulum.MINIMUM_BITRATE (bit/s floor in timeouts)
+PATH_REQUEST_WAIT      = const(7)      # reference LXMRouter.PATH_REQUEST_WAIT
+PATH_REQUEST_DEBOUNCE  = const(60)     # ... PATH_REQUEST_DEBOUNCE (window while a slow interface is online)
+SLOW_INTERFACE_BITRATE = const(2000)   # ... SLOW_INTERFACE_BITRATE (bit/s)
 TRAFFIC_TIMEOUT_FACTOR  = const(6)   # link traffic timeout = rtt * factor (reference Link)
+# Floor (seconds) for the delivery-proof timeout of a packet sent over a link:
+# the proof needs the peer to decrypt, sign (pure-Python Ed25519 on an MCU
+# peer is seconds) and answer; the reference's rtt*6 is only ~1-3 s on a fast
+# link and a link rtt of 0 gave 5 ms here.
+LINK_RECEIPT_MIN_TIMEOUT = const(5)
+# A pure-Python peer needs ~6-20 s of crypto before its proof for an opportunistic packet
+# leaves (decrypt + Ed25519 sign), on top of airtime: added to the reference receipt timeout.
+RECEIPT_PEER_CRYPTO_GRACE = const(15)
 RESPONSE_MAX_GRACE_TIME = const(10)  # request-response grace (reference Resource)
 
 # Identity / Key sizes (bits)
@@ -165,11 +186,14 @@ else:
 
 # Inbound announce ingress (validation deferred to job_loop — see transport)
 MAX_ANNOUNCE_INGRESS       = const(32)   # queued announces awaiting validation
-# Budget per job_loop tick. Sized for UI smoothness, not throughput: a stall
-# above ~2 frames (50ms redraw throttle) reads as scroll jank on the T-Deck.
-# 30ms x 4 ticks/s still validates 3-6 announces/s with IRAM crypto — about
-# 5x the measured public-hub announce rate.
-ANNOUNCE_INGRESS_BUDGET_MS = const(30)
+MAX_ANNOUNCE_PER_DEST   = const(3)    # distinct unvalidated announces queued per destination
+# Budget per drain slice, and the yield between slices while announces are
+# queued. Sized for UI smoothness: a stall above ~2 frames (50ms redraw
+# throttle) reads as scroll jank on the T-Deck. The budget is checked after
+# each announce, so a slice is at most budget + one announce.
+ANNOUNCE_INGRESS_BUDGET_MS = const(20)
+ANNOUNCE_INGRESS_YIELD_MS  = const(10)
+ANNOUNCE_INGRESS_YIELD_MAX_MS = const(3000)   # cap on the proportional yield after a slow drain slice
 
 # Maintenance / flood-control (Phase 5/6)
 CULL_INTERVAL         = const(5)           # seconds between table-maintenance passes

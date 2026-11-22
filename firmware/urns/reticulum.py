@@ -2,6 +2,7 @@
 # Simplified for Pico W: JSON config, no RPC, async event loop
 
 import os
+import sys
 import gc
 import time
 from . import const
@@ -159,6 +160,62 @@ class Reticulum:
         if Transport.transport_enabled:
             log("Transport mode enabled", LOG_NOTICE)
 
+        # Reticulum 1.6 stamps: send stamped (64 B) path requests (default on);
+        # "stamps_hw_sha": True opts in to the ESP32-S3 SHA accelerator for the
+        # native stamp searches (default off, see stamps.HW_SHA).
+        # Default: stamped only when the native hashcash makes the search cheap
+        # (same rule as stamp_announces); an explicit config value always wins.
+        # The stamp modules are NOT imported here: the native-hashcash probe
+        # lives in crypto.ed25519 (already loaded), so a board with stamping off
+        # never pays for stamps.py / announce_stamps.py at boot.
+        from .crypto import ed25519 as _ed
+        _hc = _ed.hashcash_module() is not None
+        _spr = self.config.get("stamp_path_requests")
+        Transport.stamp_path_requests = _hc if _spr is None else bool(_spr)
+        # "max_link_stamp_cost": highest announced link-request stamp cost this
+        # board will search for (default derives from the native key search).
+        _mlc = self.config.get("max_link_stamp_cost")
+        if _mlc is not None:
+            from .link import OutgoingLink as _OL
+            _OL.max_stamp_cost = float(_mlc)
+        Transport.pr_stamp_timeout = self.config.get("pr_stamp_timeout", Transport.pr_stamp_timeout)
+        if self.config.get("stamps_hw_sha", False):
+            from . import stamps
+            stamps.HW_SHA = True
+
+        # Reticulum 1.6 announce stamps: "stamp_announces" (default: on when the
+        # native hashcash exists) generates a stamp per SINGLE destination in the
+        # background; stored stamps are always attached. "announce_stamp_value"
+        # (25.0; below 23.5 needs "announce_stamp_allow_low"), "announce_stamp_duty" (50).
+        # "announce_stamp_required" (23.5) is the cost an INBOUND announce's stamp
+        # must reach for its extension to be accepted; the receive-side twin of
+        # announce_stamp_allow_low. A private network that lowers one lowers both.
+        # announce_stamps.py is imported only when this board generates stamps or
+        # a stored stamp exists (Destination._announce_stamps applies the config then).
+        from .destination import Destination as _D
+        _req = self.config.get("announce_stamp_required")
+        if _req is not None:
+            from . import identity as _idm
+            _idm.ANNOUNCE_STAMP_COST = float(_req)
+        _gen = bool(self.config.get("stamp_announces", _hc))
+        _D.stamp_announces = _gen
+        _D.stamp_config = dict(
+            enabled=_gen, value=self.config.get("announce_stamp_value"),
+            allow_low=self.config.get("announce_stamp_allow_low", False),
+            duty=self.config.get("announce_stamp_duty"))
+        _stored = False
+        if not _gen:
+            for _d in Transport.destinations:
+                if _d.type == _D.SINGLE and _d.direction == _D.IN and _d._stamp_stored():
+                    _stored = True
+                    break
+        if _gen or _stored:
+            _as = _D._announce_stamps()
+            if _gen:
+                for _d in Transport.destinations:
+                    if _d.type == _D.SINGLE and _d.direction == _D.IN:
+                        _as.request(_d)
+
         # Time sync (for nodes with no RTC/NTP). Learn wall-clock time once per
         # boot from a trusted peer's announce/message timestamp.
         ts_cfg = self.config.get("time_sync", {})
@@ -253,6 +310,13 @@ class Reticulum:
         if self.probe_destination is not None:
             tasks.append(asyncio.create_task(self._probe_announce_loop()))
 
+        try:
+            _m = sys.modules.get(__name__.rsplit(".", 1)[0] + ".announce_stamps")
+            if _m is not None:
+                _m.kick()
+        except Exception as e:
+            log("Announce stamp error: " + repr(e), LOG_ERROR)
+
         log("Event loop running with " + str(len(tasks)) + " tasks", LOG_VERBOSE)
         await asyncio.gather(*tasks)
 
@@ -306,7 +370,8 @@ class Reticulum:
         return Reticulum._use_implicit_proof
 
     def get_first_hop_timeout(self, destination_hash):
-        return Reticulum.DEFAULT_PER_HOP_TIMEOUT
+        from .transport import Transport
+        return Transport.first_hop_timeout(destination_hash)
 
     @staticmethod
     def exit_handler():

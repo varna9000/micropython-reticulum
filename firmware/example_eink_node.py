@@ -183,7 +183,7 @@ def main():
                 if DEBUG >= 2:
                     print("Announce error:", e)
             gc.collect()
-            await asyncio.sleep(120)
+            await asyncio.sleep(3600)   # hourly: a default RNS 1.6.1 hub blocks rebroadcast of faster announcers
 
     _original_run = rns.run
 

@@ -11,7 +11,9 @@ MOD = ed25519_fast
 SRC = main.c monocypher.c monocypher-ed25519.c libc_stubs.c
 ARCH = xtensawin
 
-CFLAGS += -Os -DNDEBUG -fno-builtin
+OPT ?= -Os
+CFLAGS += -DNDEBUG -fno-builtin
+CFLAGS_EXTRA += $(OPT) $(XFLAGS)
 LINK_RUNTIME = 1
 
 # Default cross-compiler (ESP-IDF); override with CROSS=arm-none-eabi- for ARM

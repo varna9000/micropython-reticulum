@@ -1,6 +1,7 @@
 # µReticulum TCP Client Interface
 # HDLC-framed TCP connection to a remote RNS TCPServerInterface
 
+import os
 import time
 import socket
 from . import Interface
@@ -70,6 +71,21 @@ class TCPClientInterface(Interface):
     # IP_ADD_MEMBERSHIP and SO_REUSEADDR.
     RX_IDLE_TIMEOUT = 180
 
+    # Reconnect back-off. A hub may refuse a client that keeps connecting and
+    # dropping (reference BackboneInterface blocks an IP after >5 connections
+    # shorter than 20 s, for 12 h). A connection that is closed (or never
+    # established) within BACKOFF_SHORT_S doubles the wait before the next
+    # attempt, up to BACKOFF_MAX_S (+ ~10% jitter); only one that stayed up
+    # BACKOFF_HEALTHY_S resets it to reconnect_wait.
+    BACKOFF_SHORT_S = 30
+    BACKOFF_HEALTHY_S = 60
+    BACKOFF_MAX_S = 600
+    # A failure that never reached the hub (WiFi down, DNS failure, connect
+    # error/timeout) says nothing about the hub refusing us, so it never
+    # escalates the back-off above: it retries after reconnect_wait, doubling
+    # per consecutive failure up to LOCAL_RETRY_MAX_S.
+    LOCAL_RETRY_MAX_S = 30
+
     def __init__(self, config):
         name = config.get("name", "TCP")
         super().__init__(name)
@@ -89,11 +105,18 @@ class TCPClientInterface(Interface):
         self._reconnect_count = 0
         self._last_reconnect = 0
         self._last_rx = _ticks_ms()
+        self._connected_at = None
+        self._healthy = False         # this connection has already stayed up BACKOFF_HEALTHY_S
+        self._local_fails = 0         # consecutive attempts that never reached the hub
+        self._assess = False          # a drop/failure not yet judged for the back-off
+        self._delay = self.reconnect_wait
+        self._cur_wait = self.reconnect_wait
 
         try:
             self._connect()
         except Exception as e:
             log("TCP initial connect failed: " + str(e), LOG_ERROR)
+            self._assess = True
 
     def _connect(self):
         addr_info = socket.getaddrinfo(self.target_host, self.target_port)
@@ -115,6 +138,10 @@ class TCPClientInterface(Interface):
         self._frame_overflow = False
         self.online = True
         self._reconnect_count = 0
+        self._connected_at = _ticks_ms()
+        self._healthy = False
+        self._local_fails = 0
+        self._assess = True
         log("TCP connected to " + self.target_host + ":" + str(self.target_port), LOG_NOTICE)
 
     def _close_socket(self):
@@ -125,9 +152,49 @@ class TCPClientInterface(Interface):
                 pass
             self._socket = None
 
+    def _note_alive(self):
+        """Called every poll iteration while online: remember the moment the
+        connection has stayed up long enough to count as healthy. The lifetime
+        is only ever measured below BACKOFF_HEALTHY_S, because ticks_diff wraps
+        after ~6.2 days and would turn a week-old connection into a negative
+        (short) one."""
+        if (not self._healthy and self._connected_at is not None
+                and _ticks_diff(_ticks_ms(), self._connected_at)
+                >= self.BACKOFF_HEALTHY_S * 1000):
+            self._healthy = True
+
+    def _judge_drop(self, now):
+        """First look at a drop (or failed attempt): adjust the back-off."""
+        self._assess = False
+        if self._connected_at is None:
+            # Never connected: a local failure, not the hub refusing us.
+            self._local_fails += 1
+            wait = self.reconnect_wait * (1 << min(self._local_fails - 1, 4))
+            self._cur_wait = min(wait, max(self.LOCAL_RETRY_MAX_S, self.reconnect_wait))
+            self._last_reconnect = now
+            return
+        self._local_fails = 0
+        if self._healthy:
+            self._delay = self.reconnect_wait
+        else:
+            lived = _ticks_diff(_ticks_ms(), self._connected_at) // 1000
+            if lived >= self.BACKOFF_HEALTHY_S:
+                self._delay = self.reconnect_wait
+            elif lived < self.BACKOFF_SHORT_S:
+                self._delay = min(self._delay * 2, self.BACKOFF_MAX_S)
+        self._connected_at = None
+        self._healthy = False
+        jitter = (os.urandom(1)[0] * self._delay) // 2560     # up to ~10%
+        self._cur_wait = self._delay + jitter
+        self._last_reconnect = now
+        if self._delay > self.reconnect_wait:
+            log("TCP remote is refusing connections; backing off " + str(self._cur_wait) + " s", LOG_NOTICE)
+
     def _reconnect(self):
         now = time.time()
-        if now - self._last_reconnect < self.reconnect_wait:
+        if self._assess:
+            self._judge_drop(now)
+        if now - self._last_reconnect < self._cur_wait:
             return
         self._last_reconnect = now
 
@@ -144,6 +211,8 @@ class TCPClientInterface(Interface):
             self._connect()
         except Exception as e:
             log("TCP reconnect failed: " + str(e), LOG_ERROR)
+            self._connected_at = None
+            self._assess = True
 
     def process_outgoing(self, data):
         if not self.online or not self._socket:
@@ -289,6 +358,7 @@ class TCPClientInterface(Interface):
 
             got = 0
             t0 = _ticks_ms()
+            self._note_alive()
             try:
                 # Re-assert non-blocking before every drain — ESP32 lwIP
                 # bug: send() corrupts the socket's non-blocking state.

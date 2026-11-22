@@ -314,6 +314,22 @@ int  crypto_elligator_rev(uint8_t hidden[32], const uint8_t curve [32],
 void crypto_elligator_key_pair(uint8_t hidden[32], uint8_t secret_key[32],
                                uint8_t seed[32]);
 
+
+// Reticulum 1.6 link request key-stamp search (see monocypher.c)
+uint32_t crypto_x25519_stamp2_init(void *buf, size_t buflen);
+int crypto_x25519_stamp2_search(uint8_t prv[32], uint8_t pub[32], uint32_t *tried,
+                               const uint8_t seed[32],
+                               const uint8_t *material, size_t material_size,
+                               const uint8_t target[32], uint32_t max_candidates,
+                               void *buf, int hw);
+uint32_t crypto_ks_hwselftest(const uint8_t *material, size_t msize, uint32_t count, uint32_t *mism_words, uint32_t *compared);
+uint32_t crypto_ks_hwprobe(int op);
+void crypto_ks_hwstats(uint32_t *n, uint32_t *mm, int reset);
+void crypto_ks_hwstats2(uint32_t *o, int reset);
+int crypto_hashcash_search(uint8_t *stamp, uint32_t slen, uint32_t *tried, const uint8_t seed[32],
+                           const uint8_t *material, size_t material_size,
+                           const uint8_t target[32], uint32_t max_tries, int hw);
+
 #ifdef __cplusplus
 }
 #endif

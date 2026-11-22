@@ -55,7 +55,7 @@ DEFAULT_PEER = None
 SHOW_OUTGOING = True
 
 # When True, the proxy announces itself once a second after boot and then
-# every 2 minutes. Each announce blocks the event loop for ~5-7s of pure
+# every hour. Each announce blocks the event loop for ~5-7s of pure
 # Python crypto on rp2040, during which input is unresponsive. Set to
 # False to start silent — you can trigger announces manually with the
 # /announce command at any time.
@@ -93,7 +93,7 @@ async def _send(router, dest_hash, body):
     try:
         msg = router.send_message(dest_hash, body)
         if not msg:
-            print("[err: unknown identity " + _short(dest_hash) + "]")
+            print("[err: outbound queue full, not sent to " + _short(dest_hash) + "]")
         elif SHOW_OUTGOING:
             print("[me -> " + _short(dest_hash) + "] " + body)
     except Exception as e:
@@ -222,6 +222,13 @@ def setup_node(rns):
 
     router.register_delivery_callback(on_message)
 
+    # Outbound states: "sent" = left this node, "delivered" = the peer's proof
+    # arrived, "failed" = retries exhausted (see docs/lxmf-delivery-semantics.md).
+    router.register_outbound_callbacks(
+        sent=lambda m: print("[sent -> " + _short(m.destination_hash) + "]"),
+        delivered=lambda m: print("[delivered -> " + _short(m.destination_hash) + "]"),
+        failed=lambda m: print("[FAILED -> " + _short(m.destination_hash) + ", state 0x%02x]" % m.state))
+
     def on_announce(destination_hash, display_name):
         if display_name:
             _peer_names[destination_hash] = display_name
@@ -274,7 +281,7 @@ def main():
 
     async def reannounce_loop():
         while True:
-            await asyncio.sleep(120)
+            await asyncio.sleep(3600)   # hourly: a default RNS 1.6.1 hub blocks rebroadcast of faster announcers
             print("[re-announcing...]")
             try:
                 router.announce()

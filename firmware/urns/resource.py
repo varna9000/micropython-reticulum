@@ -88,6 +88,7 @@ ASSEMBLING = 0x04
 COMPLETE = 0x05
 FAILED = 0x06
 CORRUPT = 0x07
+REJECTED = 0x08   # the receiver refused the advertisement (RCL): final, do not retry
 
 
 class Resource:
@@ -767,6 +768,24 @@ class Resource:
             if signal:
                 self._signal_cancel()
             log("Resource cancelled: " + self.hash.hex()[:8], LOG_DEBUG)
+            self._conclude()
+
+    def rejected(self):
+        """The receiver cancelled (RCL) a resource we are sending.
+
+        Only a cancel that arrives while the resource is still merely ADVERTISED
+        (no part requested yet) is a refusal of the advertisement: REJECTED, final.
+        After the transfer started (status TRANSFERRING) the same RCL is what this
+        port's receivers send when a transfer stalls (and what a reference receiver
+        sends on its own timeout), so it is a failed transfer: FAILED, which the
+        caller retries. The reference (Resource._rejected) marks both REJECTED;
+        this is a deliberate deviation, see docs/lxmf-delivery-semantics.md.
+        Nothing is sent back."""
+        if self.status < COMPLETE:
+            started = self.status != ADVERTISED
+            self.status = FAILED if started else REJECTED
+            log("Resource " + ("failed (receiver cancelled mid-transfer): " if started
+                               else "rejected by receiver: ") + self.hash.hex()[:8], LOG_DEBUG)
             self._conclude()
 
     def _signal_cancel(self):

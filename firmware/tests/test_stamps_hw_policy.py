@@ -1,0 +1,247 @@
+# Resilience policy of the opt-in ESP32-S3 SHA path (host-side, fake native module). Run:
+#   python3 firmware/tests/test_stamps_hw_policy.py
+# Covers: start-up check (hw vs sw hashes, firmware-reset-clears-sentinel proof), session disable on
+# mismatch / too many busy+lost events, hold-off after an event, WiFi gating, hits re-verified.
+
+import importlib
+import sys
+import types
+
+import harness  # noqa: F401  (puts firmware/ on sys.path)
+
+stamps = importlib.import_module("urns.stamps")
+ed = importlib.import_module("urns.crypto.ed25519")
+
+CLK = [100000]
+
+
+class Fake:
+    def __init__(self, selftest=None, owned_after_reset=0, claim=1):
+        self.selftest = selftest            # None -> (0, 0, n)
+        self.owned_after_reset = owned_after_reset
+        self.claim = claim
+        self.stats = [0, 0, 0, 0]
+        self.calls = []
+        self.probes = []
+
+    def hwselftest(self, material, n):
+        self.calls.append(("selftest", n))
+        return self.selftest if self.selftest is not None else (0, 0, n)
+
+    def hwprobe(self, op):
+        self.probes.append(op)
+        if op == 0:
+            return self.claim
+        if op == 1:
+            return self.owned_after_reset
+        return 0
+
+    def hwstats(self, reset):
+        return tuple(self.stats)
+
+    def hashcash(self, material, target, slen, budget, seed, *hw):
+        self.calls.append(("hc", hw))
+        return None, budget
+
+    def x25519_stamp2_init(self, buf):
+        return 1
+
+    def x25519_stamp2(self, seed, material, target, budget, buf, *hw):
+        self.calls.append(("ks", hw))
+        return None, None, budget
+
+
+class Env:
+    def __enter__(self):
+        self.old = (getattr(ed, "_native", None), stamps.HW_SHA, stamps.const.ticks_ms,
+                    getattr(sys.implementation, "_machine", None), sys.modules.get("network"))
+        self.fake = None
+        stamps.HW_SHA = True
+        stamps.const.ticks_ms = lambda: CLK[0]
+        sys.implementation._machine = "Generic ESP32S3 module with ESP32S3"
+        sys.modules.pop("network", None)
+        stamps.hw_reset()
+        stamps.reset_native_probe()
+        stamps.set_table_size(4)
+        return self
+
+    def use(self, fake):
+        self.fake = fake
+        ed._native = fake
+        stamps.reset_native_probe()
+        stamps.hw_reset()
+        return fake
+
+    def __exit__(self, *a):
+        ed._native, stamps.HW_SHA, stamps.const.ticks_ms, mach, net = self.old
+        if mach is None:
+            del sys.implementation._machine
+        else:
+            sys.implementation._machine = mach
+        if net is None:
+            sys.modules.pop("network", None)
+        else:
+            sys.modules["network"] = net
+        stamps.hw_reset()
+        stamps.reset_native_probe()
+        stamps.set_table_size(64)
+
+
+def _slice():
+    return stamps.find_hashcash(b"m" * 32, b"\x00" * 32, 14, 10)
+
+
+def _fake_network(state):
+    n = types.ModuleType("network")
+    n.STA_IF = 0
+
+    class W:
+        def __init__(self, i):
+            pass
+
+        def isconnected(self):
+            return state[0]
+    n.WLAN = W
+    sys.modules["network"] = n
+
+
+def test_healthy_start_checks_once_then_uses_hardware():
+    with Env() as e:
+        f = e.use(Fake())
+        assert stamps._hw() == 1 and stamps._hw() == 1
+        assert [c for c in f.calls if c[0] == "selftest"] == [("selftest", stamps.HW_CHECK_N)]
+        assert f.probes == [0, 1, 2]                      # claim, owned?, release
+        assert stamps.hw_disabled() is None
+        _slice()
+        assert f.calls[-1] == ("hc", (1,))
+
+
+def test_selftest_mismatch_disables_for_the_session():
+    with Env() as e:
+        f = e.use(Fake(selftest=(3, 5, stamps.HW_CHECK_N)))
+        assert stamps._hw() == 0
+        assert "differ" in stamps.hw_disabled()
+        _slice()
+        assert f.calls[-1] == ("hc", ())                  # software call, no hw argument
+        assert [c for c in f.calls if c[0] == "selftest"] == [("selftest", stamps.HW_CHECK_N)]   # not retried
+
+
+def test_old_native_module_without_check_disables():
+    class Old:
+        def hashcash(self, *a):
+            return None, a[3]
+        def x25519_stamp2_init(self, b):
+            return 1
+        def x25519_stamp2(self, *a):
+            return None, None, a[3]
+    with Env() as e:
+        e.use(Old())
+        assert stamps._hw() == 0 and "too old" in stamps.hw_disabled()
+
+
+def test_sentinel_surviving_firmware_reset_disables():
+    with Env() as e:
+        e.use(Fake(owned_after_reset=1))
+        assert stamps._hw() == 0 and "sentinel" in stamps.hw_disabled()
+
+
+def test_engine_busy_at_check_is_retried_later_not_disabled():
+    with Env() as e:
+        f = e.use(Fake(selftest=(0, 0, 0)))
+        assert stamps._hw() == 0 and stamps.hw_disabled() is None
+        assert stamps._hw() == 0                           # still in the hold-off
+        f.selftest = None
+        CLK[0] += stamps.HW_HOLDOFF_S * 1000 + 1
+        assert stamps._hw() == 1
+
+
+def test_mismatch_after_a_slice_disables():
+    with Env() as e:
+        f = e.use(Fake())
+        _slice()
+        f.stats[1] = 1
+        _slice()
+        assert "mismatch" in stamps.hw_disabled()
+        assert stamps._hw() == 0
+
+
+def test_busy_or_lost_event_holds_off_then_resumes():
+    with Env() as e:
+        f = e.use(Fake())
+        _slice()
+        f.stats[2] += 1                                   # found busy
+        _slice()
+        assert stamps.hw_disabled() is None
+        assert stamps._hw() == 0                          # hold-off
+        CLK[0] += stamps.HW_HOLDOFF_S * 1000 - 1
+        assert stamps._hw() == 0
+        CLK[0] += 2
+        assert stamps._hw() == 1
+
+
+def test_too_many_events_in_window_disables_but_old_events_expire():
+    with Env() as e:
+        f = e.use(Fake())
+        _slice()
+        for _ in range(stamps.HW_MAX_EVENTS):
+            f.stats[3] += 1                               # taken from us
+            CLK[0] += stamps.HW_HOLDOFF_S * 1000 + 1
+            _slice()
+        assert stamps.hw_disabled() is None               # exactly the tolerated number
+        CLK[0] += stamps.HW_WINDOW_S * 1000               # old events leave the window
+        f.stats[3] += 1
+        _slice()
+        assert stamps.hw_disabled() is None
+        for _ in range(stamps.HW_MAX_EVENTS):
+            f.stats[2] += 1
+            CLK[0] += stamps.HW_HOLDOFF_S * 1000 + 1
+            _slice()
+        assert "contention" in stamps.hw_disabled()
+
+
+def test_wifi_gating_and_settle_time():
+    with Env() as e:
+        up = [False]
+        _fake_network(up)
+        e.use(Fake())
+        assert stamps._hw() == 0                          # WiFi down
+        up[0] = True
+        assert stamps._hw() == 0                          # just came up
+        CLK[0] += stamps.HW_WIFI_SETTLE_S * 1000 - 1
+        assert stamps._hw() == 0
+        CLK[0] += 2
+        assert stamps._hw() == 1
+        up[0] = False
+        assert stamps._hw() == 0
+        up[0] = True
+        assert stamps._hw() == 0                          # reconnect restarts the settle time
+        CLK[0] += stamps.HW_WIFI_SETTLE_S * 1000 + 1
+        assert stamps._hw() == 1
+
+
+def test_off_by_default_never_touches_the_module():
+    with Env() as e:
+        f = e.use(Fake())
+        stamps.HW_SHA = False
+        _slice()
+        assert f.calls == [("hc", ())] and f.probes == []
+
+
+def _run():
+    import traceback
+    tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
+    failed = 0
+    for name, fn in tests:
+        try:
+            fn()
+            print("PASS  " + name)
+        except Exception as e:
+            failed += 1
+            print("FAIL  " + name + "  ->  " + repr(e))
+            traceback.print_exc()
+    print("\n%d/%d passed" % (len(tests) - failed, len(tests)))
+    return failed
+
+
+if __name__ == "__main__":
+    sys.exit(1 if _run() else 0)

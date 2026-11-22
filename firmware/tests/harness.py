@@ -39,6 +39,7 @@ class Identity:
     validate_result = True        # tests flip this to simulate bad announces
     known = {}                    # dest_hash -> app_data (for recall)
     app_data = {}                 # dest_hash -> announce app_data (recall_app_data)
+    link_costs = {}               # dest_hash -> announced link-request stamp cost (float)
 
     @staticmethod
     def full_hash(data):
@@ -55,6 +56,10 @@ class Identity:
     @staticmethod
     def validate_announce(packet, only_validate_signature=False):
         return Identity.validate_result
+
+    @staticmethod
+    def recall_link_cost(dest_hash):
+        return Identity.link_costs.get(dest_hash)
 
     @staticmethod
     def recall(dest_hash, **kw):
@@ -94,6 +99,10 @@ def _install_shims():
         sys.modules["micropython"] = mp
 
     sys.modules.setdefault("uhashlib", hashlib)
+    if not hasattr(asyncio, "sleep_ms"):
+        async def _sleep_ms(ms):
+            await asyncio.sleep(ms / 1000)
+        asyncio.sleep_ms = _sleep_ms
     sys.modules.setdefault("uasyncio", asyncio)
     sys.modules.setdefault("machine", types.ModuleType("machine"))
 
@@ -293,6 +302,13 @@ def reset_transport():
     T._announce_rate = {}
     T._pr_tags = []
     T.announce_ingress = []
+    T.ann_stats = [0, 0, 0, 0, 0, 0, 0]
+    T._path_request_times = {}
+    T._path_waiters = {}
+    T._in_use = {}
+    T._seen_emit = {}
+    T._seen_blob = {}
+    T._pr_stamping = {}
     T.relayed_announces = T.relayed_data = T.relayed_links = T.relayed_proofs = 0
     T.control_destinations = []
     T.control_hashes = []
@@ -305,3 +321,5 @@ def reset_transport():
     Identity.validate_result = True
     Identity.known = {}
     Identity.app_data = {}
+    Identity.link_costs = {}
+    Identity.known_destinations = {}

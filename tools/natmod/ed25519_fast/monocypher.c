@@ -927,6 +927,11 @@ void crypto_argon2(u8 *hash, u32 hash_size, void *work_area,
 
 // field element
 typedef i32 fe[10];
+#ifdef KS_HOT
+#define KS_HOT_ATTR __attribute__((optimize(KS_HOT)))
+#else
+#define KS_HOT_ATTR
+#endif
 
 // field constants
 //
@@ -1222,7 +1227,7 @@ static void fe_mul_small(fe h, const fe f, i32 g)
 //
 //   |g0|, |g2|, |g4|, |g6|, |g8|  <  1.65 * 2^26
 //   |g1|, |g3|, |g5|, |g7|, |g9|  <  1.65 * 2^25
-static void fe_mul(fe h, const fe f, const fe g)
+KS_HOT_ATTR static void fe_mul(fe h, const fe f, const fe g)
 {
 	// Everything is unrolled and put in temporary variables.
 	// We could roll the loop, but that would make curve25519 twice as slow.
@@ -1278,7 +1283,7 @@ static void fe_mul(fe h, const fe f, const fe g)
 //   |f1|, |f3|, |f5|, |f7|, |f9|  <  1.65 * 2^25
 //
 // Note: we could use fe_mul() for this, but this is significantly faster
-static void fe_sq(fe h, const fe f)
+KS_HOT_ATTR static void fe_sq_x(fe h, const fe f, const i32 *sub)
 {
 	i32 f0 = f[0]; i32 f1 = f[1]; i32 f2 = f[2]; i32 f3 = f[3]; i32 f4 = f[4];
 	i32 f5 = f[5]; i32 f6 = f[6]; i32 f7 = f[7]; i32 f8 = f[8]; i32 f9 = f[9];
@@ -1321,8 +1326,14 @@ static void fe_sq(fe h, const fe f)
 	// t8 < 0.09 * 2^61
 	// t9 < 0.03 * 2^61
 
+	if (sub) {
+		t0 -= sub[0]; t1 -= sub[1]; t2 -= sub[2]; t3 -= sub[3]; t4 -= sub[4];
+		t5 -= sub[5]; t6 -= sub[6]; t7 -= sub[7]; t8 -= sub[8]; t9 -= sub[9];
+	}
 	FE_CARRY;
 }
+static inline __attribute__((always_inline)) void fe_sq(fe h, const fe f) { fe_sq_x(h, f, 0); }
+
 
 //  Parity check.  Returns 0 if even, 1 if odd
 static int fe_isodd(const fe f)
@@ -2954,3 +2965,721 @@ int crypto_aead_unlock(u8 *plain_text, const u8  mac[16], const u8 key[32],
 #ifdef MONOCYPHER_CPP_NAMESPACE
 }
 #endif
+
+/////////////////////////////////////////////////////////////////////////
+/// X25519 key-stamp search (Reticulum 1.6 link request stamps)        ///
+/// Finds an X25519 private key whose public key satisfies             ///
+///   SHA-256(material || public_key) <= target   (big-endian compare) ///
+/// Candidates are k0 + 8*i: each next public key comes from one       ///
+/// x-only differential addition, with one inversion per batch.        ///
+/////////////////////////////////////////////////////////////////////////
+static const u32 ks_K[64] = {
+	0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+	0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+	0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+	0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+	0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+	0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+	0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+	0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2 };
+
+#define KS_ROR(x,n) (((x) >> (n)) | ((x) << (32-(n))))
+KS_HOT_ATTR static void ks_sha256_block(u32 st[8], const u8 *p)
+{
+	u32 w[64];
+	FOR (i, 0, 16) {
+		w[i] = ((u32)p[4*i] << 24) | ((u32)p[4*i+1] << 16)
+		     | ((u32)p[4*i+2] << 8) | (u32)p[4*i+3];
+	}
+	FOR (i, 16, 64) {
+		u32 s0 = KS_ROR(w[i-15], 7) ^ KS_ROR(w[i-15],18) ^ (w[i-15] >>  3);
+		u32 s1 = KS_ROR(w[i- 2],17) ^ KS_ROR(w[i- 2],19) ^ (w[i- 2] >> 10);
+		w[i] = w[i-16] + s0 + w[i-7] + s1;
+	}
+	u32 a=st[0], b=st[1], c=st[2], d=st[3], e=st[4], f=st[5], g=st[6], h=st[7];
+	FOR (i, 0, 64) {
+		u32 t1 = h + (KS_ROR(e,6) ^ KS_ROR(e,11) ^ KS_ROR(e,25))
+		       + ((e & f) ^ (~e & g)) + ks_K[i] + w[i];
+		u32 t2 = (KS_ROR(a,2) ^ KS_ROR(a,13) ^ KS_ROR(a,22))
+		       + ((a & b) ^ (a & c) ^ (b & c));
+		h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+	}
+	st[0]+=a; st[1]+=b; st[2]+=c; st[3]+=d; st[4]+=e; st[5]+=f; st[6]+=g; st[7]+=h;
+}
+
+/////////////////////////////////////////////////////////////////////////
+/// Trimmed SHA-256 for SHA-256(material || pub)                       ///
+/////////////////////////////////////////////////////////////////////////
+#define KS_RND(a,b,c,d,e,f,g,h,i) do { \
+	u32 t1_ = h + (KS_ROR(e,6) ^ KS_ROR(e,11) ^ KS_ROR(e,25)) \
+	        + (g ^ (e & (f ^ g))) + ks_K[i] + w[i]; \
+	u32 t2_ = (KS_ROR(a,2) ^ KS_ROR(a,13) ^ KS_ROR(a,22)) \
+	        + ((a & b) | (c & (a | b))); \
+	d += t1_; h = t1_ + t2_; } while (0)
+
+// Runs rounds r0..63 from state init[] over words w[0..15] (w[16..63] are
+// computed here) and writes base[] + result to st[].
+KS_HOT_ATTR static void ks_compress(u32 st[8], u32 w[64], int r0,
+                                    const u32 init[8], const u32 base[8])
+{
+	for (int i = 16; i < 64; i++) {
+		u32 s0 = KS_ROR(w[i-15], 7) ^ KS_ROR(w[i-15],18) ^ (w[i-15] >>  3);
+		u32 s1 = KS_ROR(w[i- 2],17) ^ KS_ROR(w[i- 2],19) ^ (w[i- 2] >> 10);
+		w[i] = w[i-16] + s0 + w[i-7] + s1;
+	}
+	u32 a=init[0], b=init[1], c=init[2], d=init[3];
+	u32 e=init[4], f=init[5], g=init[6], h=init[7];
+	int i = r0;
+	for (; (i & 7) && i < 64; i++) {
+		u32 t1 = h + (KS_ROR(e,6) ^ KS_ROR(e,11) ^ KS_ROR(e,25))
+		       + (g ^ (e & (f ^ g))) + ks_K[i] + w[i];
+		u32 t2 = (KS_ROR(a,2) ^ KS_ROR(a,13) ^ KS_ROR(a,22))
+		       + ((a & b) | (c & (a | b)));
+		h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+	}
+	for (; i < 64; i += 8) {
+		KS_RND(a,b,c,d,e,f,g,h,i  );
+		KS_RND(h,a,b,c,d,e,f,g,i+1);
+		KS_RND(g,h,a,b,c,d,e,f,i+2);
+		KS_RND(f,g,h,a,b,c,d,e,i+3);
+		KS_RND(e,f,g,h,a,b,c,d,i+4);
+		KS_RND(d,e,f,g,h,a,b,c,i+5);
+		KS_RND(c,d,e,f,g,h,a,b,i+6);
+		KS_RND(b,c,d,e,f,g,h,a,i+7);
+	}
+	st[0]=base[0]+a; st[1]=base[1]+b; st[2]=base[2]+c; st[3]=base[3]+d;
+	st[4]=base[4]+e; st[5]=base[5]+f; st[6]=base[6]+g; st[7]=base[7]+h;
+}
+
+typedef struct {
+	u32 mid[8];       // state after the whole leading blocks of the material
+	u32 pre[8];       // state of block 0 after its nfix constant rounds
+	u32 wfix[2][16];  // constant words of the (up to) two tail blocks
+	u32 tailw[32];    // tail blocks as words (little-endian view of the byte tail)
+	u32 rem, blocks, nfix, lo, hi, full, tw0, slen;   // slen: bytes appended to the material
+} ks_sha_t;
+
+static void ks_sha_init(ks_sha_t *c, const u8 *material, size_t material_size, u32 slen)
+{
+	static const u32 iv[8] = {
+		0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+		0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19 };
+	FOR (i, 0, 8) { c->mid[i] = iv[i]; }
+	size_t full = material_size / 64;
+	FOR (i, 0, full) { ks_sha256_block(c->mid, material + 64*i); }
+	size_t rem = material_size - 64*full;
+	FOR (i, 0, 128) { ((u8*)c->tailw)[i] = 0; }
+	FOR (i, 0, rem) { ((u8*)c->tailw)[i] = material[64*full + i]; }
+	c->slen = slen;
+	size_t tail_len = rem + slen;
+	c->blocks = (tail_len + 9 > 64) ? 2 : 1;
+	((u8*)c->tailw)[tail_len] = 0x80;
+	u64 bits = (u64)(material_size + slen) * 8;
+	FOR (i, 0, 8) { ((u8*)c->tailw)[64*c->blocks - 1 - i] = (u8)(bits >> (8*i)); }
+	FOR (i, 0, 32) {
+		const u8 *p = ((u8*)c->tailw) + 4*i;
+		c->wfix[i >> 4][i & 15] = ((u32)p[0] << 24) | ((u32)p[1] << 16)
+		                        | ((u32)p[2] << 8) | (u32)p[3];
+	}
+	c->rem = (u32)rem;
+	c->full = (u32)full;
+	c->nfix = (u32)(rem / 4);
+	c->lo = c->nfix;
+	c->hi = (u32)((rem + slen + 3) / 4);
+	// constant leading rounds of block 0
+	u32 a=c->mid[0], b=c->mid[1], cc=c->mid[2], d=c->mid[3];
+	u32 e=c->mid[4], f=c->mid[5], g=c->mid[6], h=c->mid[7];
+	for (u32 i = 0; i < c->nfix; i++) {
+		u32 t1 = h + (KS_ROR(e,6) ^ KS_ROR(e,11) ^ KS_ROR(e,25))
+		       + (g ^ (e & (f ^ g))) + ks_K[i] + c->wfix[0][i];
+		u32 t2 = (KS_ROR(a,2) ^ KS_ROR(a,13) ^ KS_ROR(a,22))
+		       + ((a & b) | (cc & (a | b)));
+		h = g; g = f; f = e; e = d + t1; d = cc; cc = b; b = a; a = t1 + t2;
+	}
+	c->pre[0]=a; c->pre[1]=b; c->pre[2]=cc; c->pre[3]=d;
+	c->pre[4]=e; c->pre[5]=f; c->pre[6]=g; c->pre[7]=h;
+}
+
+// Hashes material || suffix (slen bytes) into st[8].
+KS_HOT_ATTR static void ks_sha_eval(ks_sha_t *c, const u8 *pub, u32 st[8])
+{
+	u32 w[64];
+	u8 *t = ((u8*)c->tailw);
+	size_t rem = c->rem;
+	FOR (i, 0, c->slen) { t[rem + i] = pub[i]; }
+	FOR (i, 0, 16) { w[i] = c->wfix[0][i]; }
+	u32 end0 = c->hi < 16 ? c->hi : 16;
+	for (u32 i = c->lo; i < end0; i++) {
+		const u8 *p = t + 4*i;
+		w[i] = ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+	}
+	ks_compress(st, w, (int)c->nfix, c->pre, c->mid);
+	if (c->blocks == 2) {
+		FOR (i, 0, 16) { w[i] = c->wfix[1][i]; }
+		for (u32 i = (c->lo > 16 ? c->lo : 16); i < c->hi; i++) {
+			const u8 *p = t + 4*i;
+			w[i-16] = ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+		}
+		u32 base[8];
+		FOR (i, 0, 8) { base[i] = st[i]; }
+		ks_compress(st, w, 0, base, base);
+	}
+}
+
+// big-endian compare: hash (st) <= target ?
+static int ks_le_target(const u32 st[8], const u8 target[32])
+{
+	FOR (i, 0, 32) {
+		u8 hb = (u8)(st[i >> 2] >> (24 - 8*(i & 3)));
+		if (hb != target[i]) { return hb < target[i]; }
+	}
+	return 1;
+}
+
+
+#if defined(__XTENSA__)   // the register map below is the ESP32-S3 one; Python must only pass hw on an S3
+/////////////////////////////////////////////////////////////////////////
+/// ESP32-S3 SHA accelerator, direct register access (block mode)     ///
+/// Register map: soc/esp32s3 reg_base.h / hwcrypto_reg.h /           ///
+/// system_reg.h (ESP-IDF 5.4 headers)                                ///
+/////////////////////////////////////////////////////////////////////////
+#define KS_R32(a)        (*(volatile u32 *)(a))
+#define KS_SYS_CLK_EN1   0x600C001Cu   // SYSTEM_PERIP_CLK_EN1_REG, bit2 = CRYPTO_SHA_CLK_EN
+#define KS_SYS_RST_EN1   0x600C0024u   // SYSTEM_PERIP_RST_EN1_REG, bit2 SHA, bit4 DS, bit5 HMAC
+#define KS_SHA_BASE      0x6003B000u   // DR_REG_SHA_BASE
+#define KS_SHA_MODE      (KS_SHA_BASE + 0x00)
+#define KS_SHA_START     (KS_SHA_BASE + 0x10)
+#define KS_SHA_CONTINUE  (KS_SHA_BASE + 0x14)
+#define KS_SHA_BUSY      (KS_SHA_BASE + 0x18)
+#define KS_SHA_H         (KS_SHA_BASE + 0x40)
+#define KS_SHA_TEXT      (KS_SHA_BASE + 0x80)
+#define KS_SHA2_256      2u            // SHA_TYPE: SHA1=0, SHA2_224=1, SHA2_256=2
+
+#define KS_BSWAP32(x) __builtin_bswap32(x)   // digest registers hold byte-swapped words
+static u32 ks_hw_n, ks_hw_mm;          // self-check statistics (mode 2)
+
+// Coordination with the firmware's own SHA users (WiFi key derivation, TLS,
+// hashlib).  We cannot take IDF's lock from a native module, but IDF switches
+// the SHA bus clock ON in esp_sha_acquire_hardware() and OFF in
+// esp_sha_release_hardware(), and resets the engine on every acquire.  So:
+//   - clock bit already set when we want the engine  -> somebody holds it: back off
+//   - a sentinel we park in SHA_T_STRING (unused for SHA-256, cleared by the
+//     engine reset) disappears                       -> somebody took it: back off,
+//     and never touch the clock again (it is theirs now)
+// A backed-off search simply continues with the software hash.
+#define KS_SHA_TSTR      (KS_SHA_BASE + 0x04)
+#define KS_SENTINEL      0x2Bu
+static u32 ks_hw_ok;                    // 1 while we believe we own the engine
+static u32 ks_hw_holdoff;               // set after a loss: stay on software for this call
+static u32 ks_hw_busy, ks_hw_lost;      // statistics: found busy at batch start / taken from us
+// diagnostics (experimental build)
+static u32 ks_c_rmw, ks_c_claim, ks_c_conc, ks_c_cmp, ks_c_cmpmm, ks_c_conc_info, ks_c_leave;
+#define KS_OWNED() (KS_R32(KS_SHA_TSTR) == KS_SENTINEL)
+
+// read-modify-write with a check that no OTHER bit of the word moved between our read and
+// our read-back (a concurrent writer on the other core), counted in ks_c_conc.
+static void ks_rmw(u32 addr, u32 clr, u32 set)
+{
+	u32 v = KS_R32(addr);
+	u32 w = (v & ~clr) | set;
+	KS_R32(addr) = w;
+	u32 r = KS_R32(addr);
+	ks_c_rmw++;
+	if ((r ^ w) & ~(clr | set)) { ks_c_conc++;  ks_c_conc_info = ((addr & 0xff) << 24) | ((r ^ w) & 0xffffff); }
+}
+
+// Called at the start of every batch.  Returns 1 when we own the engine.
+static u32 ks_hw_enter(void)
+{
+	if (ks_hw_ok) {
+		if (KS_OWNED()) { return 1; }
+		ks_hw_ok = 0;  ks_hw_holdoff = 1;  ks_hw_lost++;
+		return 0;
+	}
+	if (ks_hw_holdoff) { return 0; }
+	if (KS_R32(KS_SYS_CLK_EN1) & 4u) {
+#ifdef KS_V_KEEPCLK
+		if (KS_OWNED()) { ks_hw_ok = 1;  return 1; }     // we left it on last call and nobody reset it since
+#endif
+		ks_hw_busy++;  ks_hw_holdoff = 1;  return 0;
+	}
+	ks_c_claim++;
+	ks_rmw(KS_SYS_CLK_EN1, 0, 4u);
+#ifndef KS_V_NORST
+	ks_rmw(KS_SYS_RST_EN1, 0, 4u);       // pulse reset like sha_ll_reset_register()
+	ks_rmw(KS_SYS_RST_EN1, 4u, 0);
+#ifndef KS_V_NODSHMAC
+	if (KS_R32(KS_SYS_RST_EN1) & (16u | 32u)) {   // DS, HMAC must not be held in reset
+		ks_rmw(KS_SYS_RST_EN1, 16u | 32u, 0);
+	}
+#endif
+#endif
+	KS_R32(KS_SHA_TSTR) = KS_SENTINEL;
+	ks_hw_ok = 1;
+	return 1;
+}
+// Give the engine back: clock off, but only if nobody took it from us meanwhile.
+static void ks_hw_leave(u32 unused)
+{
+	(void)unused;
+	if (ks_hw_ok) {
+		if (KS_OWNED()) {
+#ifndef KS_V_KEEPCLK
+			KS_R32(KS_SHA_TSTR) = 0;
+			ks_c_leave++;
+			ks_rmw(KS_SYS_CLK_EN1, 4u, 0);
+#endif
+		} else {
+			ks_hw_lost++;
+		}
+	}
+	ks_hw_ok = 0;
+}
+static void ks_hw_call_begin(void) { ks_hw_holdoff = 0; }
+
+// Hash material || pub on the accelerator.  Returns digest word 0; when out != NULL
+// all eight digest words are stored there.
+static u32 ks_hw_valid;                 // result of the last ks_hw_hash is trustworthy
+KS_HOT_ATTR static u32 ks_hw_hash(ks_sha_t *c, const u8 *pub, u32 *out)
+{
+	volatile u32 *T = (volatile u32 *)KS_SHA_TEXT;
+	volatile u32 *H = (volatile u32 *)KS_SHA_H;
+	u8 *t = (u8 *)c->tailw;
+	size_t rem = c->rem;
+	FOR (i, 0, c->slen) { t[rem + i] = pub[i]; }
+	const u32 *w = c->tailw;
+	u32 h0;
+	if (!ks_hw_ok || !KS_OWNED()) { goto lost; }
+	while (KS_R32(KS_SHA_BUSY)) { }
+	if (c->full) { FOR (i, 0, 8) { H[i] = KS_BSWAP32(c->mid[i]); } }
+	FOR (i, 0, 8)  { T[i] = w[i]; }
+	if (!KS_OWNED()) { goto lost; }
+	FOR (i, 8, 16) { T[i] = w[i]; }
+	KS_R32(KS_SHA_MODE) = KS_SHA2_256;
+	if (!KS_OWNED()) { goto lost; }
+	KS_R32(c->full ? KS_SHA_CONTINUE : KS_SHA_START) = 1;
+	if (c->blocks == 2) {
+		while (KS_R32(KS_SHA_BUSY)) { }
+		FOR (i, 0, 8)  { T[i] = w[16 + i]; }
+		if (!KS_OWNED()) { goto lost; }
+		FOR (i, 8, 16) { T[i] = w[16 + i]; }
+		KS_R32(KS_SHA_MODE) = KS_SHA2_256;
+		if (!KS_OWNED()) { goto lost; }
+		KS_R32(KS_SHA_CONTINUE) = 1;
+	}
+	while (KS_R32(KS_SHA_BUSY)) { }
+	if (out) { FOR (i, 0, 8) { out[i] = KS_BSWAP32(H[i]); } h0 = out[0]; }
+	else     { h0 = KS_BSWAP32(H[0]); }
+	if (!KS_OWNED()) { goto lost; }
+	ks_hw_valid = 1;
+	return h0;
+lost:
+	if (ks_hw_ok) { ks_hw_ok = 0;  ks_hw_holdoff = 1;  ks_hw_lost++; }
+	ks_hw_valid = 0;
+	return 0;
+}
+
+#else  // !__XTENSA__ (e.g. armv6m): no accelerator, hw requests fall back to software
+// (no static variables here: the armv6m native linker cannot place .bss)
+static u32 ks_hw_enter(void) { return 0; }
+static void ks_hw_leave(u32 unused) { (void)unused; }
+static void ks_hw_call_begin(void) { }
+#endif
+
+// Candidate test: SHA-256(material || suffix) <= target.  hw: 0 software,
+// 1 hardware filter with software re-verification of every hit.
+static int ks_cand(ks_sha_t *c, const u8 *pub, const u8 target[32], int hw)
+{
+	u32 st[8];
+#if defined(__XTENSA__)
+	if (hw && ks_hw_ok) {
+		u32 h0 = ks_hw_hash(c, pub, 0);
+		if (ks_hw_valid) {
+			ks_hw_n++;
+			if (hw == 2) {      // compare mode: check the digest against software
+				ks_sha_eval(c, pub, st);
+				ks_c_cmp++;
+				if (st[0] != h0) { ks_c_cmpmm++;  ks_hw_mm++; }
+				return ks_le_target(st, target);
+			}
+			if (h0 > c->tw0) { return 0; }
+		}
+	}
+#else
+	(void)hw;
+#endif
+	ks_sha_eval(c, pub, st);       // hits (and everything in software mode) are verified here
+	return ks_le_target(st, target);
+}
+
+#if defined(__XTENSA__)
+// Self test: hashes `count` pseudo-random public keys both ways, compares all 8 words.
+u32 crypto_ks_hwselftest(const u8 *material, size_t msize, u32 count, u32 *mism_words, u32 *compared)
+{
+	ks_sha_t c;
+	ks_sha_init(&c, material, msize, 32);
+	ks_hw_call_begin();
+	u32 turned = ks_hw_enter();
+	u32 bad = 0, badw = 0, done = 0;
+	*compared = 0;
+	if (!turned) { *mism_words = 0; return 0; }        // engine busy / held by the firmware: not run
+	u64 x = 0x9e3779b97f4a7c15ull ^ ((u64)msize << 32) ^ count;
+	for (u32 k = 0; k < count; k++) {
+		u8 pub[32];
+		FOR (i, 0, 32) {
+			x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+			pub[i] = (u8)(x >> 24);
+		}
+		u32 sw[8], hw[8];
+		ks_sha_eval(&c, pub, sw);
+		ks_hw_valid = 0;
+		ks_hw_hash(&c, pub, hw);
+		if (!ks_hw_valid) { break; }                   // taken from us mid-test
+		done++;
+		int b = 0;
+		FOR (i, 0, 8) { if (sw[i] != hw[i]) { b = 1; badw++; } }
+		bad += b;
+	}
+	ks_hw_leave(turned);
+	ks_hw_mm += bad;
+	*mism_words = badw;
+	*compared = done;
+	return bad;
+}
+// Probe used by the Python start-up check: 0 claim (1 = we own the engine now),
+// 1 owned? (our sentinel still in place), 2 release.
+u32 crypto_ks_hwprobe(int op)
+{
+	if (op == 0) { ks_hw_call_begin();  return ks_hw_enter(); }
+	if (op == 1) { return ks_hw_ok && KS_OWNED(); }
+	ks_hw_leave(0);
+	return 0;
+}
+void crypto_ks_hwstats2(u32 *o, int reset)
+{
+	o[0] = ks_c_rmw; o[1] = ks_c_claim; o[2] = ks_c_conc; o[3] = ks_c_cmp; o[4] = ks_c_cmpmm; o[5] = ks_c_conc_info; o[6] = ks_c_leave;
+	if (reset) { ks_c_rmw = ks_c_claim = ks_c_conc = ks_c_cmp = ks_c_cmpmm = ks_c_leave = 0; }
+}
+void crypto_ks_hwstats(u32 *n, u32 *mm, int reset)
+{
+	n[0] = ks_hw_n; *mm = ks_hw_mm; n[1] = ks_hw_busy; n[2] = ks_hw_lost;
+	if (reset) { ks_hw_n = 0; ks_hw_mm = 0; ks_hw_busy = 0; ks_hw_lost = 0; }
+}
+#else
+u32 crypto_ks_hwselftest(const u8 *material, size_t msize, u32 count, u32 *mism_words, u32 *compared)
+{ (void)material; (void)msize; (void)count; *mism_words = 0; *compared = 0; return 0; }
+u32 crypto_ks_hwprobe(int op) { (void)op; return 0; }
+void crypto_ks_hwstats2(u32 *o, int reset) { (void)reset; for (int i = 0; i < 7; i++) { o[i] = 0; } }
+void crypto_ks_hwstats(u32 *n, u32 *mm, int reset)
+{ (void)reset; n[0] = 0; *mm = 0; n[1] = 0; n[2] = 0; }
+#endif
+
+// Montgomery ladder returning both s*P and (s+1)*P in projective form.
+// (x2:z2) = s*P, (x3:z3) = (s+1)*P.  Scalar is used as-is (not trimmed).
+static void scalarmult_pair(fe x2, fe z2, fe x3, fe z3,
+                                        const u8 scalar[32], const u8 p[32],
+                                        int nb_bits)
+{
+	fe x1, t0, t1;
+	fe_frombytes(x1, p);
+	fe_1(x2);        fe_0(z2);
+	fe_copy(x3, x1); fe_1(z3);
+	int swap = 0;
+	for (int pos = nb_bits-1; pos >= 0; --pos) {
+		int b = scalar_bit(scalar, pos);
+		swap ^= b;
+		fe_cswap(x2, x3, swap);
+		fe_cswap(z2, z3, swap);
+		swap = b;
+		fe_sub(t0, x3, z3);
+		fe_sub(t1, x2, z2);
+		fe_add(x2, x2, z2);
+		fe_add(z2, x3, z3);
+		fe_mul(z3, t0, x2);
+		fe_mul(z2, z2, t1);
+		fe_sq (t0, t1    );
+		fe_sq (t1, x2    );
+		fe_add(x3, z3, z2);
+		fe_sub(z2, z3, z2);
+		fe_mul(x2, t1, t0);
+		fe_sub(t1, t1, t0);
+		fe_sq (z2, z2    );
+		fe_mul_small(z3, t1, 121666);
+		fe_sq (x3, x3    );
+		fe_add(t0, t0, z3);
+		fe_mul(z3, x1, z2);
+		fe_mul(z2, t1, t0);
+	}
+	fe_cswap(x2, x3, swap);
+	fe_cswap(z2, z3, swap);
+}
+
+static const u8 ks_step_point[32] = { // u-coordinate of Q = 8*B
+	0x68, 0x99, 0xc9, 0x48, 0xed, 0x6f, 0x71, 0xf1, 0x1e, 0xa9, 0x74,
+	0xad, 0xca, 0xed, 0x78, 0x7a, 0xa1, 0x5c, 0xb6, 0xc8, 0x4d, 0x88,
+	0x3b, 0xd8, 0x2d, 0x5c, 0xd6, 0xaa, 0xd7, 0xa6, 0x5f, 0x27 };
+static const u8 ks_inv2vq[32] = { // 1 / (2 * vq)
+	0x70, 0x45, 0xbc, 0xa0, 0x2d, 0x59, 0xc4, 0x05, 0xca, 0xd1, 0xe0, 0x5d,
+	0xfb, 0x88, 0x35, 0x0c, 0x50, 0xf2, 0xc8, 0x43, 0x33, 0x4d, 0x9a, 0xaa,
+	0x63, 0xda, 0xc6, 0x39, 0x1e, 0xba, 0xce, 0x2a };
+static const u8 ks_uq2a[32] = { // uq + 2A
+	0x74, 0x73, 0xd8, 0x48, 0xed, 0x6f, 0x71, 0xf1, 0x1e, 0xa9, 0x74, 0xad,
+	0xca, 0xed, 0x78, 0x7a, 0xa1, 0x5c, 0xb6, 0xc8, 0x4d, 0x88, 0x3b, 0xd8,
+	0x2d, 0x5c, 0xd6, 0xaa, 0xd7, 0xa6, 0x5f, 0x27 };
+#define KS_A   486662
+#define KS_A2  973324
+
+// Okeya-Sakurai: v(P) from u(P), u(P+Q), constants of Q.  All inputs tight.
+static void ks_recover_v(fe v, const fe uP, const fe uPQ,
+                         const fe uq, const fe c_uq2a, const fe inv2vq)
+{
+	fe t1, t2, t3;
+	fe_mul(t1, uP, uq);   t1[0] += 1;
+	fe_add(t2, uP, c_uq2a);
+	fe_mul(t3, t1, t2);
+	fe_sub(t1, uP, uq);
+	fe_sq (t1, t1);
+	fe_mul(t1, t1, uPQ);
+	fe_sub(t3, t3, t1);   t3[0] -= KS_A2;
+	fe_mul(v, t3, inv2vq);
+}
+
+#define KS2_HDR   16u
+#define KS2_MAGIC 0x4b533032u
+#define KS2_FE    40u
+// buffer: [magic n 8 pad][table (n+1)*(u,v)][pref (n+1) fe]  (n+1 entries; entry n = hop point)
+static u32 ks2_n(const void *buf) { return ((const u32*)buf)[1]; }
+#define KS2_TAB(buf)  ((fe*)((u8*)(buf) + KS2_HDR))
+#define KS2_PREF(buf, n) ((fe*)((u8*)(buf) + KS2_HDR + (size_t)(2*(n)+2) * KS2_FE))
+// bytes needed for table size n
+// = 16 + (n+1)*80 + (n+1)*40 = 16 + 120*(n+1)
+
+// Builds the table of affine j*Q (j=1..n) plus the hop point (2n+1)*Q.
+// Returns n, or 0 if the buffer is too small.
+KS_HOT_ATTR u32 crypto_x25519_stamp2_init(void *buf, size_t buflen)
+{
+	if (buflen < KS2_HDR + 120u * 2) { return 0; }
+	u32 n = (u32)((buflen - KS2_HDR) / 120u) - 1;
+	fe *tab = KS2_TAB(buf);        // entry e: tab[2e] = u, tab[2e+1] = v
+	fe *pref = KS2_PREF(buf, n);
+	fe uq, c_uq2a, inv2vq, up, um, a, b, t, nx, nz, px, pz, cx, cz;
+	fe_frombytes(uq, ks_step_point);
+	fe_frombytes(c_uq2a, ks_uq2a);
+	fe_frombytes(inv2vq, ks_inv2vq);
+	fe_add(up, uq, fe_one);
+	fe_sub(um, uq, fe_one);
+	// projective chain: entry e holds (e+1)*Q as X (u slot) : Z (v slot)
+	static const u8 one[32] = {1};
+	scalarmult_pair(px, pz, cx, cz, one, ks_step_point, 1);   // Q, 2Q
+	for (u32 e = 0; e <= n; e++) {
+		fe_copy(tab[2*e], px);  fe_copy(tab[2*e+1], pz);
+		fe_sub(a, cx, cz);
+		fe_add(b, cx, cz);
+		fe_mul(a, a, up);
+		fe_mul(b, b, um);
+		fe_add(t, a, b);
+		fe_sub(a, a, b);
+		fe_sq (t, t);
+		fe_sq (a, a);
+		fe_mul(nx, t, pz);
+		fe_mul(nz, a, px);
+		fe_copy(px, cx);  fe_copy(pz, cz);
+		fe_copy(cx, nx);  fe_copy(cz, nz);
+	}
+	// one inversion for all n+1 Z values
+	fe acc;  fe_1(acc);
+	for (u32 e = 0; e <= n; e++) {
+		fe_copy(pref[e], acc);
+		fe_mul(acc, acc, tab[2*e+1]);
+	}
+	fe_invert(acc, acc);
+	for (u32 e = n + 1; e-- > 0; ) {
+		fe_mul(t, acc, pref[e]);
+		fe_mul(acc, acc, tab[2*e+1]);
+		fe_mul(tab[2*e], t, tab[2*e]);
+	}
+	// v_e = recover(u_e, u_{e+1}) for e < n (slots hold u of (e+1)Q); slot n is overwritten below
+	for (u32 e = 0; e < n; e++) {
+		ks_recover_v(tab[2*e+1], tab[2*e], tab[2*e+2], uq, c_uq2a, inv2vq);
+	}
+	// hop point (2n+1)Q: ladder on 2n+1 over base Q gives (2n+1)Q and (2n+2)Q
+	u8 sc[32];
+	FOR (i, 0, 32) { sc[i] = 0; }
+	sc[0] = (u8)(2*n + 1);  sc[1] = (u8)((2*n + 1) >> 8);
+	scalarmult_pair(px, pz, cx, cz, sc, ks_step_point, 16);
+	fe_mul(t, pz, cz);
+	fe_invert(t, t);
+	fe_mul(a, t, cz);     fe_mul(px, px, a);     // u(2n+1)Q = px / pz
+	fe_mul(b, t, pz);     fe_mul(cx, cx, b);     // u(2n+2)Q
+	fe_copy(tab[2*n], px);
+	ks_recover_v(tab[2*n+1], px, cx, uq, c_uq2a, inv2vq);
+	((u32*)buf)[0] = KS2_MAGIC;
+	((u32*)buf)[1] = n;
+	return n;
+}
+
+#define KS_CARRY(h) fe_mul_small(h, h, 1)
+
+KS_HOT_ATTR int crypto_x25519_stamp2_search(u8 prv[32], u8 pub[32], u32 *tried,
+                               const u8 seed[32],
+                               const u8 *material, size_t material_size,
+                               const u8 target[32], u32 max_candidates,
+                               void *buf, int hw)
+{
+	*tried = 0;
+	if (((u32*)buf)[0] != KS2_MAGIC) { return 0; }
+	u32 n = ks2_n(buf);
+	if (max_candidates > (1u << 24) - 1024) { max_candidates = (1u << 24) - 1024; }
+	fe *tab = KS2_TAB(buf);
+	fe *pref = KS2_PREF(buf, n);
+	ks_sha_t sha;
+	ks_sha_init(&sha, material, material_size, 32);
+	sha.tw0 = ((u32)target[0] << 24) | ((u32)target[1] << 16) | ((u32)target[2] << 8) | target[3];
+	u32 hw_on = 0;  ks_hw_call_begin();  if (hw) { ks_hw_enter(); }
+
+	fe uq, c_uq2a, inv2vq;
+	fe_frombytes(uq, ks_step_point);
+	fe_frombytes(c_uq2a, ks_uq2a);
+	fe_frombytes(inv2vq, ks_inv2vq);
+
+	// k0: trimmed, bits 0..26 clear.  centre kc = k0 + 8n.
+	u8 k0[32], kc[32], u[32];
+	crypto_eddsa_trim_scalar(k0, seed);
+	k0[0] = 0;  k0[1] = 0;  k0[2] = 0;  k0[3] &= 0xf8;
+	FOR (i, 0, 32) { kc[i] = k0[i]; }
+	{
+		u32 add = n << 3;        // kc = k0 + 8n  (bits below 27 are clear)
+		kc[0] = (u8)add;  kc[1] = (u8)(add >> 8);  kc[2] = (u8)(add >> 16);
+	}
+	// s = kc >> 3 (kc is a multiple of 8): ladder on 8B gives kc*B and (kc+8)*B
+	u8 s[32];
+	FOR (i, 0, 31) { s[i] = (u8)((kc[i] >> 3) | (kc[i+1] << 5)); }
+	s[31] = kc[31] >> 3;
+	fe uc, vc, px, pz, cx, cz, a, b, t, lam, l2, base, u1;
+	scalarmult_pair(px, pz, cx, cz, s, ks_step_point, 252);
+	fe_mul(t, pz, cz);
+	fe_invert(t, t);
+	fe_mul(a, t, cz);   fe_mul(uc, px, a);
+	fe_mul(b, t, pz);   fe_mul(u1, cx, b);
+	ks_recover_v(vc, uc, u1, uq, c_uq2a, inv2vq);
+
+	u32 cnt = 0;            // candidates examined
+	int found = 0;
+	u32 off = 0;            // found candidate: scalar offset from k0 (multiple of 8)
+	u32 round = 0;
+	while (!found && cnt < max_candidates) {
+		u32 centre_off = 8u * (n + round * (2*n + 1));
+		fe_tobytes(u, uc);
+		cnt++;
+		if (ks_cand(&sha, u, target, hw)) {
+			found = 1; off = centre_off;
+			FOR (i, 0, 32) { pub[i] = u[i]; }
+			break;
+		}
+		if (cnt >= max_candidates) { break; }
+		if (hw) { ks_hw_enter(); }             // (re)claim the engine if it is free
+		// forward pass: prefix products of (u_e - uc), e = 0..n (n = hop point)
+		fe acc;  fe_1(acc);
+		for (u32 e = 0; e <= n; e++) {
+			fe_copy(pref[e], acc);
+			fe_sub(t, tab[2*e], uc);
+			fe_mul(acc, acc, t);
+		}
+		fe_invert(acc, acc);
+		fe invh;
+		// hop entry first (it is the last factor)
+		{
+			fe_mul(invh, acc, pref[n]);
+			fe_sub(t, tab[2*n], uc);
+			fe_mul(acc, acc, t);
+		}
+		for (u32 e = n; e-- > 0 && !found; ) {
+			fe inv;
+			fe *uj = &tab[2*e], *vj = &tab[2*e+1];
+			fe_mul(inv, acc, pref[e]);
+			fe_sub(t, *uj, uc);
+			fe_mul(acc, acc, t);
+			fe_add(base, uc, *uj);   base[0] += KS_A;
+			// C + (e+1)Q
+			fe_sub(t, *vj, vc);
+			fe_mul(lam, t, inv);
+			fe_sq_x(l2, lam, base);
+			fe_tobytes(u, l2);
+			cnt++;
+			if (ks_cand(&sha, u, target, hw) && cnt <= max_candidates) {
+				found = 1; off = centre_off + 8u * (e + 1);
+				FOR (i, 0, 32) { pub[i] = u[i]; }
+				break;
+			}
+			// C - (e+1)Q
+			fe_add(t, *vj, vc);
+			fe_mul(lam, t, inv);
+			fe_sq_x(l2, lam, base);
+			fe_tobytes(u, l2);
+			cnt++;
+			if (ks_cand(&sha, u, target, hw) && cnt <= max_candidates) {
+				found = 1; off = centre_off - 8u * (e + 1);
+				FOR (i, 0, 32) { pub[i] = u[i]; }
+				break;
+			}
+			if (cnt >= max_candidates) { break; }
+		}
+		if (found || cnt >= max_candidates) { break; }
+		// hop the centre by (2n+1) steps
+		fe_sub(t, tab[2*n+1], vc);
+		fe_mul(lam, t, invh);
+		fe_add(base, uc, tab[2*n]);  base[0] += KS_A;
+		fe_sq_x(l2, lam, base);                               // new uc
+		fe_sub(t, uc, l2);
+		fe_mul(t, t, lam);
+		fe_sub(t, t, vc);            KS_CARRY(t);              // new vc
+		fe_copy(uc, l2);  fe_copy(vc, t);
+		round++;
+	}
+	if (hw) { ks_hw_leave(hw_on); }
+	*tried = cnt;
+	if (found) {
+		FOR (i, 0, 32) { prv[i] = k0[i]; }
+		prv[0]  = (u8) off;
+		prv[1]  = (u8)(off >>  8);
+		prv[2]  = (u8)(off >> 16);
+		prv[3] |= (u8)(off >> 24);
+	}
+	WIPE_BUFFER(k0);  WIPE_BUFFER(kc);  WIPE_BUFFER(s);
+	return found;
+}
+
+/////////////////////////////////////////////////////////////////////////
+/// Generic hashcash: find a stamp with                                ///
+///   SHA-256(material || stamp) <= target   (big-endian compare)      ///
+/// stamp = counter(4, little-endian) || seed[4..slen).  One call      ///
+/// examines at most max_tries stamps; the caller slices a long search ///
+/// by calling again with a fresh seed.                                ///
+/////////////////////////////////////////////////////////////////////////
+KS_HOT_ATTR int crypto_hashcash_search(u8 *stamp, u32 slen, u32 *tried,
+                               const u8 seed[32],
+                               const u8 *material, size_t material_size,
+                               const u8 target[32], u32 max_tries, int hw)
+{
+	*tried = 0;
+	if (slen < 5 || slen > 32) { return 0; }
+	ks_sha_t sha;
+	ks_sha_init(&sha, material, material_size, slen);
+	sha.tw0 = ((u32)target[0] << 24) | ((u32)target[1] << 16) | ((u32)target[2] << 8) | target[3];
+	ks_hw_call_begin();
+	if (hw) { ks_hw_enter(); }
+	u8 cand[32];
+	FOR (i, 0, slen) { cand[i] = seed[i]; }
+	u32 n = 0;
+	int found = 0;
+	while (n < max_tries) {
+		cand[0] = (u8)n;  cand[1] = (u8)(n >> 8);  cand[2] = (u8)(n >> 16);  cand[3] = (u8)(n >> 24);
+		n++;
+		if (ks_cand(&sha, cand, target, hw)) { found = 1; break; }
+		if (hw && (n & 63) == 0) { ks_hw_enter(); }
+	}
+	if (hw) { ks_hw_leave(0); }
+	*tried = n;
+	if (found) { FOR (i, 0, slen) { stamp[i] = cand[i]; } }
+	return found;
+}

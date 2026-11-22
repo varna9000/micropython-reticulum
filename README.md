@@ -113,6 +113,12 @@ Upload the **contents** of the `firmware/` folder to the **root** of the microco
 mpremote cp -r firmware/ :
 ```
 
+On a board with a small filesystem (a 4 MB ESP32-S3 has ~2 MB for files) copy only what you need, and never the host's `__pycache__` or `.DS_Store` (a plain `cp -r` of `firmware/urns` copies them and can fill the flash). The ESP32-S3 needs, in `/lib`, `ed25519_iram.mpy` (the module the loader tries first: the same build as `ed25519_fast_xtensawin.mpy`, which is its fallback; both must be the current build) and `bz2_fast_xtensawin.mpy`; the `armv6m` files are for RP2040 and `webp_fast_xtensawin.mpy` (115 KB) only for the camera node:
+```bash
+mpremote cp -r firmware/urns :                # then remove any __pycache__ / .DS_Store on the board
+mpremote cp firmware/lib/ed25519_iram.mpy firmware/lib/ed25519_fast_xtensawin.mpy firmware/lib/bz2_fast_xtensawin.mpy :lib/
+```
+
 ### Step 3 — Configure WiFi
 
 Edit `config.py` on the device and set:

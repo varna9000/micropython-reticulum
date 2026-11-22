@@ -64,16 +64,16 @@ The output is `ed25519_fast.mpy` in the build directory.
 
 ## Install
 
-Rename with the architecture suffix and copy to the device:
+Rename with the architecture suffix and copy it into the repo's `firmware/lib/` (deployed to the board's `/lib`; `mpremote cp -r firmware/ :` does it). **On ESP32 the same build must be installed under THREE names, all identical** - `firmware/lib/ed25519_fast_xtensawin.mpy`, `firmware/lib/ed25519_iram.mpy` (the loader tries this one FIRST, because a file-system natmod runs from IRAM, ~80x faster than the built-in/XIP name) and `tools/natmod/ed25519_fast/ed25519_fast_xtensawin.mpy`; `ed25519_iram.mpy` is not a separate build, just the same file under another name. `firmware/tests/test_native_module_files.py` fails if they differ or lack `hashcash`/`x25519_stamp2`; the loader also prefers a module that has those functions over a stale one.
 
 ```bash
 # ESP32-S3
-cp ed25519_fast.mpy firmware/urns/crypto/ed25519_fast_xtensawin.mpy
-mpremote cp firmware/urns/crypto/ed25519_fast_xtensawin.mpy :urns/crypto/ed25519_fast_xtensawin.mpy
+cp ed25519_fast.mpy tools/natmod/ed25519_fast/ed25519_fast_xtensawin.mpy
+cp ed25519_fast.mpy firmware/lib/ed25519_fast_xtensawin.mpy
+cp ed25519_fast.mpy firmware/lib/ed25519_iram.mpy
 
 # RP2040
-cp ed25519_fast.mpy firmware/urns/crypto/ed25519_fast_armv6m.mpy
-mpremote cp firmware/urns/crypto/ed25519_fast_armv6m.mpy :urns/crypto/ed25519_fast_armv6m.mpy
+cp ed25519_fast.mpy firmware/lib/ed25519_fast_armv6m.mpy
 ```
 
 The Python wrapper (`firmware/urns/crypto/ed25519.py`) auto-detects the platform and loads the correct `.mpy` file. If the file is missing or fails to load, it falls back to the pure Python implementation.
@@ -179,3 +179,15 @@ This module uses `crypto_ed25519_*` for RFC 8032 compatibility with reference Re
 **`MemoryError` on import** — The native module needs ~46KB of RAM to load. On ESP32-S3 with PSRAM this is never an issue. On devices without PSRAM, ensure enough free heap.
 
 **Link errors during build (`undefined symbol: memset`)** — Ensure `main.c` includes the inline `memset`/`memcpy`/`memcmp` implementations (they're there by default). The natmod environment has no libc.
+
+## Stamp functions (Reticulum 1.6)
+
+Besides `sign`/`verify`/`publickey`/`x25519`/`x25519_publickey` the module exports (used by `urns/stamps.py`; every one is feature-detected, so an older module just means the pure-Python fallback):
+
+- `x25519_stamp2_init(buf)` / `x25519_stamp2(seed, material, target32, max, buf[, hw])` - link-request key-stamp search: an X25519 key whose public key satisfies `sha256(material + pub) <= target`. `buf` is a 4-byte-aligned bytearray of `16 + 120*(n+1)` bytes, initialised once.
+- `hashcash(material, target32, stamp_len, max_tries, seed32[, hw])` -> `(stamp or None, tried)` - generic `sha256(material + stamp) <= target`, stamp = 4-byte counter + `seed[4:stamp_len]`, `stamp_len` 5..32. One call is one bounded slice; call again with a fresh seed.
+- `hwselftest(material, count)` -> `(bad, bad_words)`, `hwstats(reset)` -> `(hw_hashes, mismatches, found_busy, taken_from_us)` - diagnostics for the hardware path (all zeros off-ESP32-S3).
+
+`hw=1` filters candidates on the ESP32-S3 SHA accelerator (direct register access; every hit is re-verified in software). It backs off to software when the engine is held by the firmware, and the SHA clock is held on from boot until WiFi has joined, so it only engages afterwards. That code is compiled only under `__XTENSA__`; Python must pass `hw` only on an ESP32-S3 (`stamps.HW_SHA`, config `stamps_hw_sha`, default off) because original-ESP32 builds share the `xtensawin` arch but not the register map.
+
+Build notes: `make ARCH=xtensawin OPT=-O2` (the Makefile takes `OPT`, default `-Os`; the shipped module is `-O2`). Needs the xtensa toolchain on `PATH`, `pyelftools` and `ar` in the Python that runs `mpy_ld.py` (a venv with both works), and `MPY_DIR` pointing at a MicroPython checkout (the one used here carries the local `mpy_ld.py` patch for large multi-object modules; whether this module also needs it was not tested). `.bss` variables are not allowed on `armv6m` (the linker rejects them), which is why the non-Xtensa hw stubs have no static state. Check the ARM build with the command above (it compiles and links the stamp code; 54 KB at `-Os`, not shipped). Current `ed25519_fast_xtensawin.mpy` (`-O2`): 66,683 bytes.

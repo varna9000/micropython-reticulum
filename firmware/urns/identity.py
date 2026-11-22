@@ -23,6 +23,44 @@ def _gc_after_crypto():
         gc.collect()
 
 
+# Reticulum 1.6 announce extension (last 18 bytes of app_data):
+# 0xC1, flags, stamp(14), lr_cost fraction, lr_cost integer (MSB = reserved
+# "extended" flag). The stamp is valid when
+# sha256(dest_hash + public_key + name_hash + stamp) <= target(cost).
+ANNOUNCE_STAMPS = True          # parse/strip the extension (reference STAMPS_ENABLED)
+ANNOUNCE_STAMP_COST = 23.5      # required cost (reference Transport.DESTINATION_COST)
+_EXT_MARKER = 0xC1
+_EXT_LEN = 18
+_EXT_STAMP_LEN = 14
+_EXT_COST_CAP = 100             # reference Transport.STAMP_COST_CAP
+
+
+def _split_ext(destination_hash, public_key, name_hash, app_data):
+    """Return (app_data, link_cost_fp). When app_data ends in a valid-format
+    extension whose stamp meets ANNOUNCE_STAMP_COST, the 18 bytes are stripped
+    (empty result -> None) and the announced link-request cost (8.8 fixed
+    point) is returned; otherwise app_data is returned untouched with None."""
+    if (not ANNOUNCE_STAMPS or not app_data or len(app_data) < _EXT_LEN
+            or app_data[-_EXT_LEN] != _EXT_MARKER):
+        return app_data, None
+    anchor = app_data[-1]
+    if anchor & 0x80:
+        return app_data, None               # extended flag: format unknown
+    fp = ((anchor & 0x7F) << 8) | app_data[-2]
+    if fp > _EXT_COST_CAP * 256:
+        return app_data, None
+    try:
+        from . import stamp_check
+        stamp = app_data[-_EXT_LEN + 2:-_EXT_LEN + 2 + _EXT_STAMP_LEN]
+        if not stamp_check.stamp_valid(stamp, ANNOUNCE_STAMP_COST, destination_hash + public_key + name_hash):
+            return app_data, None
+    except Exception as e:
+        log("Announce stamp parsing failed: " + str(e), LOG_ERROR)
+        return app_data, None
+    app_data = app_data[:-_EXT_LEN]
+    return (app_data if len(app_data) else None), fp
+
+
 class Identity:
     CURVE = "Curve25519"
     KEYSIZE = const.KEYSIZE
@@ -41,7 +79,7 @@ class Identity:
     storagepath = "/rns"  # Set by Reticulum.__init__
 
     @staticmethod
-    def remember(packet_hash, destination_hash, public_key, app_data=None):
+    def remember(packet_hash, destination_hash, public_key, app_data=None, link_cost_fp=None):
         if len(public_key) != Identity.KEYSIZE // 8:
             raise TypeError("Invalid public key size: " + str(len(public_key)))
         kd = Identity.known_destinations
@@ -53,17 +91,29 @@ class Identity:
             # boot load. One min-scan per insert (~10ms at the cap): a batched
             # sorted() amortizes to less total work but spikes >100ms in one
             # tick, which reads as UI jank on the T-Deck.
+            try:
+                from .transport import Transport
+                in_use = Transport.is_in_use
+            except Exception:
+                in_use = None
             oldest = None
             oldest_ts = None
             for k in kd:
                 ts = kd[k][0]
-                if oldest_ts is None or ts < oldest_ts:
-                    oldest_ts = ts
-                    oldest = k
-            if oldest is not None:
-                del kd[oldest]
-                log("known_destinations at cap, evicted oldest", LOG_DEBUG)
-        kd[destination_hash] = [time.time(), packet_hash, public_key, app_data]
+                if oldest_ts is not None and ts >= oldest_ts:
+                    continue
+                if in_use is not None and in_use(k):
+                    continue            # a peer we are using keeps its key
+                oldest_ts = ts
+                oldest = k
+            if oldest is None:
+                log("known_destinations full of in-use entries, not recording", LOG_DEBUG)
+                return
+            del kd[oldest]
+            log("known_destinations at cap, evicted oldest", LOG_DEBUG)
+        # [timestamp, packet_hash, public_key, app_data, link_cost_fp]. The link
+        # cost rides in the entry, so it shares the table cap and eviction.
+        kd[destination_hash] = [time.time(), packet_hash, public_key, app_data, link_cost_fp]
 
     @staticmethod
     def recall(target_hash, from_identity_hash=False):
@@ -98,6 +148,15 @@ class Identity:
         if destination_hash in Identity.known_destinations:
             return Identity.known_destinations[destination_hash][3]
         return None
+
+    @staticmethod
+    def recall_link_cost(destination_hash):
+        """Link-request stamp cost (float) the destination announced, or None
+        when unknown / no stamped announce seen."""
+        e = Identity.known_destinations.get(destination_hash)
+        if e is None or len(e) < 5 or e[4] is None:
+            return None
+        return e[4] / 256
 
     @staticmethod
     def full_hash(data):
@@ -198,11 +257,19 @@ class Identity:
             if not only_validate_signature and destination_hash in Identity.known_destinations:
                 cached = Identity.known_destinations[destination_hash]
                 if cached[2] == public_key:
-                    log("Announce from known dest " + destination_hash.hex()[:8] + ", skip verify", LOG_VERBOSE)
-                    Identity.remember(packet.get_hash(), destination_hash, public_key, app_data)
-                    if ratchet:
-                        Identity._remember_ratchet(destination_hash, ratchet)
-                    return True
+                    fast_app, lr_fp = _split_ext(destination_hash, public_key, name_hash, app_data)
+                    stored_fp = cached[4] if len(cached) > 4 else None
+                    if lr_fp == stored_fp:
+                        log("Announce from known dest " + destination_hash.hex()[:8] + ", skip verify", LOG_VERBOSE)
+                        Identity.remember(packet.get_hash(), destination_hash, public_key, fast_app, lr_fp)
+                        if ratchet:
+                            Identity._remember_ratchet(destination_hash, ratchet)
+                        return True
+                    # The announced link-request stamp cost changed (or
+                    # appeared/vanished): never take it on the unsigned fast
+                    # path, a replayed or forged announce could set any cost.
+                    log("Announce from known dest " + destination_hash.hex()[:8]
+                        + " changes the link cost, verifying signature", LOG_VERBOSE)
 
             announced_identity = Identity(create_keys=False)
             announced_identity.load_public_key(public_key)
@@ -255,7 +322,9 @@ class Identity:
                             log("Announce public key mismatch - possible hash collision", LOG_ERROR)
                             return False
 
-                    Identity.remember(packet.get_hash(), destination_hash, public_key, app_data)
+                    # Signature was checked over the full, unstripped app_data.
+                    app_data, lr_fp = _split_ext(destination_hash, public_key, name_hash, app_data)
+                    Identity.remember(packet.get_hash(), destination_hash, public_key, app_data, lr_fp)
 
                     if ratchet:
                         Identity._remember_ratchet(destination_hash, ratchet)
@@ -287,6 +356,7 @@ class Identity:
                     entry[1].hex() if entry[1] else None,  # packet hash
                     entry[2].hex() if entry[2] else None,  # public key
                     entry[3].hex() if isinstance(entry[3], bytes) else None,  # app data
+                    entry[4] if len(entry) > 4 else None,  # link cost (8.8 fixed point)
                 ]
             with open(Identity.storagepath + "/known_destinations.json", "w") as f:
                 json.dump(data, f)
@@ -309,6 +379,7 @@ class Identity:
                     bytes.fromhex(entry[1]) if entry[1] else None,
                     bytes.fromhex(entry[2]) if entry[2] else None,
                     bytes.fromhex(entry[3]) if entry[3] else None,
+                    entry[4] if len(entry) > 4 else None,
                 ]
             # Trim a file written before the cap existed (or by a bigger
             # board) down to this board's cap, oldest first.

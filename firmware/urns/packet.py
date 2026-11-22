@@ -321,11 +321,19 @@ class ProofDestination:
 
 
 class LinkDestination:
-    """Pseudo-destination for packets addressed to a link_id."""
-    def __init__(self, link_id):
+    """Pseudo-destination for packets addressed to a link_id. With `link` given
+    (OutgoingLink.send(create_receipt=True)) it also carries what a PacketReceipt
+    needs: the link's rtt (timeout) and the remote destination whose identity
+    signs the proof."""
+    traffic_timeout_factor = const.TRAFFIC_TIMEOUT_FACTOR
+
+    def __init__(self, link_id, link=None):
         self.hash = link_id
         self.link_id = link_id
         self.type = const.DEST_LINK
+        if link is not None:
+            self.rtt = link.rtt
+            self.destination = link.destination
 
     def encrypt(self, plaintext):
         return plaintext
@@ -342,20 +350,55 @@ class PacketReceipt:
         self.truncated_hash = packet.getTruncatedHash()
         self.sent = True
         self.sent_at = time.time()
+        self._sent_ms = const.ticks_ms()    # timeouts run on ticks: integer-second
+                                            # time.time() and clock syncs must not matter
         self.proved = False
         self.status = PacketReceipt.SENT
         self.destination = packet.destination
         self.delivery_callback = None
         self.timeout_callback = None
         self.concluded_at = None
+        self._concluded_ms = None
         self.proof_packet = None
-        self.timeout = const.DEFAULT_PER_HOP_TIMEOUT
+        self.keep = False       # owner (LXMF) keeps it matchable after a timeout: see Transport.job_loop
+        # Reference PacketReceipt: a link packet times out after
+        # rtt * traffic_timeout_factor; any other packet after the first-hop
+        # timeout (MTU airtime on the next hop + 6 s) plus 6 s per hop. PORT: the
+        # link-packet timeout has a floor (const.LINK_RECEIPT_MIN_TIMEOUT)
+        # instead of the reference's 5 ms, which only works with a float clock
+        # and a measured rtt.
+        dest = packet.destination
+        if getattr(dest, "type", None) == const.DEST_LINK:
+            self.timeout = max((getattr(dest, "rtt", 0) or 0) * LinkDestination.traffic_timeout_factor,
+                               const.LINK_RECEIPT_MIN_TIMEOUT)
+        else:
+            from .transport import Transport
+            dh = getattr(dest, "hash", None)
+            # PORT: + RECEIPT_PEER_CRYPTO_GRACE, the receiver's decrypt/sign time (a
+            # pure-Python peer needs 6-20 s before the proof leaves; the reference
+            # peer is native and has no such delay). The link path has the same idea
+            # in _crypto_grace_s().
+            self.timeout = (Transport.first_hop_timeout(dh)
+                            + Packet.TIMEOUT_PER_HOP * Transport.hops_to(dh)
+                            + const.RECEIPT_PEER_CRYPTO_GRACE)
 
     def get_status(self):
         return self.status
 
     def validate_proof_packet(self, proof_packet):
-        return self.validate_proof(proof_packet.data, proof_packet)
+        """Cheap identifier match first, signature verification only for a match:
+        an IMPLICIT proof (signature only) is addressed to the truncated hash of the
+        packet it proves (proof_packet.destination_hash), an EXPLICIT one carries the
+        full packet hash in front of the signature (checked in validate_proof before
+        any verification). Without this every proof cost one Ed25519 verify per
+        outstanding receipt (~2 s each on a pure-Python board)."""
+        proof = proof_packet.data
+        if len(proof) == const.SIGLENGTH // 8:
+            if getattr(proof_packet, "destination_hash", None) != self.truncated_hash:
+                return False
+        elif len(proof) >= const.HASHLENGTH // 8 and proof[:const.HASHLENGTH // 8] != self.hash:
+            return False
+        return self.validate_proof(proof, proof_packet)
 
     def _proof_identity(self):
         """Identity whose signature proves this packet's delivery.
@@ -389,6 +432,7 @@ class PacketReceipt:
                     self.status = PacketReceipt.DELIVERED
                     self.proved = True
                     self.concluded_at = time.time()
+                    self._concluded_ms = const.ticks_ms()
                     self.proof_packet = proof_packet
                     if self.delivery_callback:
                         try:
@@ -406,6 +450,7 @@ class PacketReceipt:
                 self.status = PacketReceipt.DELIVERED
                 self.proved = True
                 self.concluded_at = time.time()
+                self._concluded_ms = const.ticks_ms()
                 self.proof_packet = proof_packet
                 if self.delivery_callback:
                     try:
@@ -417,12 +462,12 @@ class PacketReceipt:
         return False
 
     def get_rtt(self):
-        if self.concluded_at:
-            return self.concluded_at - self.sent_at
+        if self._concluded_ms is not None:
+            return const.ticks_diff(self._concluded_ms, self._sent_ms) / 1000.0
         return None
 
     def is_timed_out(self):
-        return self.sent_at + self.timeout < time.time()
+        return const.ticks_diff(const.ticks_ms(), self._sent_ms) > self.timeout * 1000
 
     def check_timeout(self):
         if self.status == PacketReceipt.SENT and self.is_timed_out():
@@ -431,6 +476,7 @@ class PacketReceipt:
             else:
                 self.status = PacketReceipt.FAILED
             self.concluded_at = time.time()
+            self._concluded_ms = const.ticks_ms()
             if self.timeout_callback:
                 try:
                     self.timeout_callback(self)

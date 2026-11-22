@@ -64,9 +64,9 @@ async def _send_msg(router, dest_hash, body):
     try:
         msg = router.send_message(dest_hash, body)
         if msg:
-            print("[Sent] -> " + dest_hash.hex()[:8])
+            print("[Queued] -> " + dest_hash.hex()[:8])
         else:
-            print("[Error] Unknown identity: " + dest_hash.hex()[:8])
+            print("[Error] Outbound queue full, not sent: " + dest_hash.hex()[:8])
     except Exception as e:
         print("[Error] Send failed: " + str(e))
     gc.collect()
@@ -123,12 +123,8 @@ async def send_echo_reply(router, source_hash, content):
     try:
         reply_content = "Echo: " + str(content)
         msg = router.send_message(source_hash, reply_content)
-        if msg:
-            if DEBUG >= 1:
-                print("[Echo] Replied to " + source_hash.hex()[:8])
-        else:
-            if DEBUG >= 1:
-                print("[Echo] Cannot reply to " + source_hash.hex()[:8] + " (unknown identity)")
+        if not msg and DEBUG >= 1:
+            print("[Echo] Cannot reply to " + source_hash.hex()[:8] + " (outbound queue full)")
     except Exception as e:
         from urns.log import log, LOG_ERROR
         log("Echo reply error: " + str(e), LOG_ERROR)
@@ -219,6 +215,15 @@ def setup_node(rns, node_name):
 
     router.register_delivery_callback(on_message)
 
+    # Outbound states: "sent" = left this node, "delivered" = the peer's proof
+    # arrived, "failed" = retries exhausted (see docs/lxmf-delivery-semantics.md).
+    def _out_name(m):
+        return m.destination_hash.hex()[:8]
+    router.register_outbound_callbacks(
+        sent=lambda m: print("[Msg] sent -> " + _out_name(m)),
+        delivered=lambda m: print("[Msg] delivered -> " + _out_name(m)),
+        failed=lambda m: print("[Msg] FAILED -> " + _out_name(m) + " (state 0x%02x)" % m.state))
+
     # Announce handler — see other LXMF peers
     def on_announce(destination_hash, display_name):
         if DEBUG >= 1:
@@ -280,7 +285,7 @@ def main():
     # Add periodic re-announce to the event loop
     async def reannounce_loop():
         while True:
-            await asyncio.sleep(120)
+            await asyncio.sleep(3600)   # hourly: a default RNS 1.6.1 hub blocks rebroadcast of faster announcers
             try:
                 router.announce()
                 if DEBUG >= 2:

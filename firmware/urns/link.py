@@ -95,6 +95,20 @@ class Link:
         peer_pub_bytes = packet.data[:32]
         peer_sig_pub_bytes = packet.data[32:64]
 
+        # Link-request key stamp (Reticulum 1.6): a destination that announces a
+        # link cost > 0 only serves initiators whose X25519 public key satisfies
+        # stamp_valid(peer_pub, cost, dest_hash + peer_sig_pub), exactly as the
+        # reference Link.validate_request does. One SHA-256, done BEFORE the
+        # expensive ECDH and signing. Cost 0/unset: no check.
+        link_cost = getattr(destination, "link_cost", None)
+        if link_cost and link_cost > 0:
+            from .stamp_check import stamp_valid
+            if not stamp_valid(peer_pub_bytes, link_cost, destination.hash + peer_sig_pub_bytes):
+                log("Link request to " + destination.hexhash[:8] + " ignored: key stamp below cost "
+                    + str(link_cost), LOG_NOTICE)
+                self.status = Link.CLOSED
+                return
+
         # Parse signalling bytes if present (RNS 0.8+)
         has_signalling = len(packet.data) > ECPUBSIZE
         if has_signalling:
@@ -292,7 +306,7 @@ class Link:
         elif packet.context == const.CTX_RESOURCE_ICL:
             self._handle_resource_cancel(plaintext)
         elif packet.context == const.CTX_RESOURCE_RCL:
-            self._handle_resource_cancel(plaintext)
+            self._handle_resource_cancel(plaintext, True)
         elif packet.context == const.CTX_LINKCLOSE:
             log("Link " + self.link_id.hex()[:8] + " close received", LOG_VERBOSE)
             self.status = Link.CLOSED
@@ -534,7 +548,7 @@ class Link:
                 r.validate_proof(proof_data)
                 return
 
-    def _handle_resource_cancel(self, plaintext):
+    def _handle_resource_cancel(self, plaintext, receiver_cancel=False):
         """Handle resource cancel from remote side."""
         # plaintext = resource hash. signal=False: the peer initiated this
         # cancellation, so echoing a cancel back at it is pure wasted airtime.
@@ -544,7 +558,10 @@ class Link:
                 return
         for r in list(self.outgoing_resources):
             if r.hash == plaintext:
-                r.cancel(signal=False)
+                if receiver_cancel:
+                    r.rejected()
+                else:
+                    r.cancel(signal=False)
                 return
 
     def register_incoming_resource(self, resource):
@@ -709,6 +726,29 @@ class OutgoingLink:
     expected_hops = None
     rebalanced    = None
 
+    # Link-request key stamp (Reticulum 1.6): while the X25519 key is still
+    # being searched the link is PENDING with _stamp_deadline set and no request
+    # on the wire; None otherwise. stamp_timeout is the whole-search budget.
+    STAMP_TIMEOUT = 120
+    # Waiting for another link's turn at the pure-Python search costs none of the
+    # STAMP_TIMEOUT budget, but the whole wait+search is bounded by this multiple.
+    STAMP_QUEUE_FACTOR = 4
+    _stamp_deadline = None
+    _stamp_material = None
+    _stamp_waiting = False
+    _stamp_start_ms = 0
+    _stamp_mark = 0
+    _stamp_hard_ms = 0
+    _stamp_cost     = None
+    _stamp_tried    = 0
+    # Highest announced link-request cost we will try to search (None: derive
+    # from the key-search speed, stamps.default_max_link_cost(); config key
+    # "max_link_stamp_cost"). Above it the link fails at once. close_reason is
+    # "stamp" when the link was closed by a stamp failure (cap, timeout, search
+    # error): retrying the same destination would only repeat the search.
+    max_stamp_cost  = None
+    close_reason    = None
+
     # Pending request states: SENT waits for a response packet or resource
     # advertisement (request timeout applies); RECEIVING means the response
     # is arriving as a resource — its own retry/cancel machinery governs
@@ -717,10 +757,10 @@ class OutgoingLink:
     REQ_RECEIVING = 0x01
 
     def __init__(self, destination, established_callback=None, closed_callback=None,
-                 sign_proofs=False):
+                 sign_proofs=False, stamp_timeout=None):
         from .identity import Identity
         from .crypto import X25519PrivateKey
-        import gc, os
+        import gc
 
         self.destination = destination
         self.status = OutgoingLink.PENDING
@@ -731,6 +771,7 @@ class OutgoingLink:
         self.last_activity = time.time()
         self.last_outbound = time.time()
         self.request_time = time.time()
+        self._request_ms = const.ticks_ms()   # rtt is measured on ticks (time.time() is whole seconds)
         self.rtt = 0                 # measured at handshake (validate_proof)
         self.type = const.DEST_LINK
         self.incoming_resources = []
@@ -773,19 +814,61 @@ class OutgoingLink:
         self.establishment_timeout = (per_hop * (max(1, self.expected_hops) + 1)
                                       + _crypto_grace_s())
 
-        # Generate ephemeral X25519 keypair for ECDH
-        gc.collect()
-        self._prv = X25519PrivateKey.generate()
-        gc.collect()
-        self._pub_bytes = self._prv.public_key().public_bytes()
-
         # Ed25519 keypair for the link. Normally the server never verifies the
         # client's Ed25519, so we fill the request's sig-pub slot with random
         # bytes (only used in the link_id hash) and skip ~2s of keygen. But a
         # Channel ACKs data by PROVING packets, which the peer validates against
         # this sig-pub — so when sign_proofs is set (rnsh) we generate a REAL
         # ephemeral keypair and keep the private key for prove_packet().
-        if sign_proofs:
+        self._sign_proofs = sign_proofs
+
+        # Destination announced a link-request stamp cost (Reticulum 1.6)?
+        cost = None
+        recall = getattr(Identity, "recall_link_cost", None)
+        if recall is not None:
+            cost = recall(destination.hash)
+
+        if cost:
+            # The request's X25519 key must itself satisfy the stamp over
+            # dest_hash + sig_pub, so the sig-pub comes first and the key is
+            # searched in slices on the event loop; the request goes out once
+            # it is found (_send_request). No path to a link_id yet -> a
+            # placeholder keeps pending_links scans (which compare link_id)
+            # safe; the pending list is also how the stamp timeout is serviced.
+            self.link_id = self.hash = b"\x00" * (const.TRUNCATED_HASHLENGTH // 8)
+            self._stamp_cost = cost
+            self._stamp_tried = 0
+            from . import stamps as _st
+            limit = OutgoingLink.max_stamp_cost
+            if limit is None:
+                limit = _st.default_max_link_cost()
+            if cost > limit:
+                self._stamp_failed("announced cost " + str(cost) + " is above the limit "
+                                   + str(limit) + " this board will search")
+                return
+            self._make_sig_keys()
+            budget = self.STAMP_TIMEOUT if stamp_timeout is None else stamp_timeout
+            self._stamp_deadline = time.time() + budget
+            self._stamp_start_ms = self._stamp_mark = const.ticks_ms()
+            self._stamp_hard_ms = int(budget * self.STAMP_QUEUE_FACTOR * 1000)
+            self._stamp_material = destination.hash + self._sig_pub_bytes
+            self.link_id = self.hash = b"\x00" * (const.TRUNCATED_HASHLENGTH // 8)
+            Transport.pending_links.append(self)
+            log("OutLink stamp search for " + destination.hexhash[:8] + " cost " + str(cost), LOG_VERBOSE)
+            self._start_stamp_search()
+            return
+
+        # Generate ephemeral X25519 keypair for ECDH
+        gc.collect()
+        self._prv = X25519PrivateKey.generate()
+        gc.collect()
+        self._pub_bytes = self._prv.public_key().public_bytes()
+        self._make_sig_keys()
+        self._send_request()
+
+    def _make_sig_keys(self):
+        import gc, os
+        if self._sign_proofs:
             from .crypto import Ed25519PrivateKey
             self._sig_prv = Ed25519PrivateKey.generate()
             gc.collect()
@@ -793,6 +876,12 @@ class OutgoingLink:
         else:
             self._sig_prv = None
             self._sig_pub_bytes = os.urandom(32)
+
+    def _send_request(self):
+        """Build and send the link request (key + sig-pub already set)."""
+        from .identity import Identity
+        from .transport import Transport
+        destination = self.destination
 
         # Signalling bytes: propose the next-hop interface's HW_MTU (reference
         # RNS link MTU discovery). Transit nodes clamp the signalling to each
@@ -822,12 +911,114 @@ class OutgoingLink:
         self.link_id = Identity.full_hash(hashable_part)[:const.TRUNCATED_HASHLENGTH // 8]
         self.hash = self.link_id
 
-        # Register as pending
-        from .transport import Transport
-        Transport.pending_links.append(self)
+        # Register as pending (a stamped link is already in the list)
+        if self not in Transport.pending_links:
+            Transport.pending_links.append(self)
 
+        # The establishment clock and the measured RTT start when the request
+        # is actually on the wire, not when a stamp search began.
+        self.request_time = time.time()
+        self._request_ms = const.ticks_ms()
+        self._stamp_deadline = None
         request_packet.send()
         log("OutLink request to " + destination.hexhash[:8] + " link_id=" + self.link_id.hex()[:8], LOG_VERBOSE)
+
+    # --- Link-request key stamp search (Reticulum 1.6) ---------------------
+
+    def _start_stamp_search(self):
+        """Run the key search as a uasyncio task (slices of ~150 ms, yielding
+        between them). Outside a running loop (host tests, scripts) there is
+        nothing to yield to, so search synchronously instead."""
+        import uasyncio as asyncio
+        dest_hash = self.destination.hash       # _close() nulls destination
+        coro = self._stamp_task(dest_hash)
+        try:
+            asyncio.create_task(coro)
+        except Exception:
+            coro.close()
+            self._stamp_run_sync(dest_hash)
+
+    def _stamp_step(self, dest_hash):
+        """One slice. True when finished (key found and request sent, or failed)."""
+        from . import stamps
+        if self.status != OutgoingLink.PENDING or self._stamp_deadline is None:
+            stamps.search_release(self, self._stamp_material)
+            return True
+        now = const.ticks_ms()
+        self._stamp_waiting = not stamps.search_turn(self)
+        if self._stamp_waiting:
+            # Queued behind another pure-Python search: the wait does not burn
+            # this link's budget (pushed out by what elapsed), up to the hard bound.
+            self._stamp_deadline += const.ticks_diff(now, self._stamp_mark) / 1000.0
+            self._stamp_mark = now
+            if const.ticks_diff(now, self._stamp_start_ms) > self._stamp_hard_ms:
+                self._stamp_failed("timeout (queued behind other searches)")
+                return True
+            return False
+        self._stamp_mark = now
+        if time.time() > self._stamp_deadline:
+            self._stamp_failed("timeout")
+            return True
+        prv, pub, tried = stamps.find_link_key(dest_hash, self._sig_pub_bytes,
+                                               self._stamp_cost, stamps.slice_size())
+        self._stamp_tried += tried
+        if prv is None:
+            return False
+        stamps.search_release(self, self._stamp_material)
+        try:
+            from .crypto import X25519PrivateKey
+            key = X25519PrivateKey.from_private_bytes(prv)
+            if key.public_key().public_bytes() != pub:
+                self._stamp_failed("key mismatch")
+                return True
+            self._prv = key
+            self._pub_bytes = pub
+            log("OutLink stamp found after " + str(self._stamp_tried) + " candidates", LOG_VERBOSE)
+            self._send_request()
+        except Exception as e:
+            self._stamp_failed(str(e))
+        return True
+
+    async def _stamp_task(self, dest_hash):
+        import uasyncio as asyncio
+        from . import stamps
+        duty = stamps.Duty(stamps.DUTY_INTERACTIVE, stamps.GRACE_MS)
+        stamps.interactive_enter()
+        try:
+            while True:
+                try:
+                    duty.begin()
+                    if self._stamp_step(dest_hash):
+                        return
+                except Exception as e:
+                    self._stamp_failed(str(e))
+                    return
+                await asyncio.sleep_ms(250 if self._stamp_waiting else duty.rest_ms())
+        finally:
+            stamps.interactive_exit()
+
+    def _stamp_run_sync(self, dest_hash):
+        from . import stamps
+        stamps.interactive_enter()
+        try:
+            while not self._stamp_step(dest_hash):
+                pass
+        finally:
+            stamps.interactive_exit()
+
+    def _stamp_failed(self, why):
+        """Search timed out or failed: close through the normal closed-callback
+        path (Transport drops the closed link from pending_links)."""
+        log("OutLink stamp failed (" + why + ") after " + str(self._stamp_tried)
+            + " candidates", LOG_NOTICE)
+        self._stamp_deadline = None
+        self.close_reason = "stamp"
+        try:
+            from . import stamps
+            stamps.search_release(self, self._stamp_material)
+        except Exception:
+            pass
+        self._close()
 
     def validate_proof(self, packet):
         """Validate server's link proof, complete ECDH handshake, send RTT."""
@@ -887,7 +1078,9 @@ class OutgoingLink:
 
         # Send RTT to complete handshake (server marks link ACTIVE on receiving this)
         from . import umsgpack
-        rtt = time.time() - self.request_time
+        # Measured on the millisecond tick source: time.time() is whole seconds on
+        # MicroPython, which made this 0 or 1 and every rtt-scaled timer wrong.
+        rtt = max(const.ticks_diff(const.ticks_ms(), self._request_ms), 1) / 1000.0
         # Coarse establishment-time RTT (includes path/relay latency): a safe
         # over-estimate used to size Channel windows/timeouts and keepalive.
         self.rtt = rtt
@@ -927,7 +1120,7 @@ class OutgoingLink:
             Transport.pending_links.remove(self)
         Transport.active_links.append(self)
 
-        log("OutLink " + self.link_id.hex()[:8] + " ACTIVE (rtt=" + str(int(rtt * 1000)) + "ms)", LOG_NOTICE)
+        log("OutLink " + self.link_id.hex()[:8] + " ACTIVE (rtt=%.3fs)" % rtt, LOG_NOTICE)
 
         if self.established_callback:
             try:
@@ -935,17 +1128,21 @@ class OutgoingLink:
             except Exception as e:
                 log("OutLink established callback error: " + str(e), LOG_ERROR)
 
-    def send(self, data, context=const.CTX_NONE):
-        """Send encrypted data on this link."""
+    def send(self, data, context=const.CTX_NONE, create_receipt=False):
+        """Send encrypted data on this link. With create_receipt=True returns
+        the PacketReceipt (delivery proof / timeout callbacks), or None when
+        nothing could be transmitted."""
         ciphertext = self._token.encrypt(data)
         from .packet import Packet, LinkDestination
         packet = Packet(
-            LinkDestination(self.link_id), ciphertext,
-            const.PKT_DATA, context=context, create_receipt=False,
+            LinkDestination(self.link_id, self if create_receipt else None), ciphertext,
+            const.PKT_DATA, context=context, create_receipt=create_receipt,
         )
         packet.MTU = self.mtu
-        packet.send()
+        receipt = packet.send()
         self._had_outbound()
+        if create_receipt:
+            return receipt or None
 
     def _had_outbound(self):
         """Stamp the last time we transmitted on this link — see
@@ -1172,7 +1369,7 @@ class OutgoingLink:
         elif packet.context == const.CTX_RESOURCE_REQ:
             self._handle_resource_req(plaintext)
         elif packet.context == const.CTX_RESOURCE_ICL or packet.context == const.CTX_RESOURCE_RCL:
-            self._handle_resource_cancel(plaintext)
+            self._handle_resource_cancel(plaintext, packet.context == const.CTX_RESOURCE_RCL)
         elif packet.context == const.CTX_CHANNEL:
             self._handle_channel(plaintext, packet)
         elif packet.context == const.CTX_LINKCLOSE:
@@ -1246,16 +1443,22 @@ class OutgoingLink:
                 r.validate_proof(proof_data)
                 return
 
-    def _handle_resource_cancel(self, plaintext):
+    def _handle_resource_cancel(self, plaintext, receiver_cancel=False):
         # signal=False: the peer initiated this cancellation, so echoing a
-        # cancel back at it is pure wasted airtime.
+        # cancel back at it is pure wasted airtime. A receiver-side cancel
+        # (RCL) of a resource WE are sending is a rejection (final) only while
+        # the resource is still merely advertised; after parts were requested
+        # it is a failed transfer and retried (Resource.rejected()).
         for r in list(self.incoming_resources):
             if r.hash == plaintext:
                 r.cancel(signal=False)
                 return
         for r in list(self.outgoing_resources):
             if r.hash == plaintext:
-                r.cancel(signal=False)
+                if receiver_cancel:
+                    r.rejected()
+                else:
+                    r.cancel(signal=False)
                 return
 
     def register_incoming_resource(self, resource):
@@ -1303,8 +1506,7 @@ class OutgoingLink:
     def check_keepalive(self):
         """Check link staleness (called by transport job_loop)."""
         if self.status == OutgoingLink.PENDING:
-            if time.time() - self.request_time > self.establishment_timeout:
-                self._establishment_timed_out()
+            self.check_timeout()
             return
         if self.status != OutgoingLink.ACTIVE:
             return
@@ -1379,6 +1581,12 @@ class OutgoingLink:
 
     def check_timeout(self):
         if self.status == OutgoingLink.PENDING:
+            if self._stamp_deadline is not None:
+                # Request not sent yet: only the stamp budget applies (the
+                # search task also checks it; this covers a starved loop).
+                if time.time() > self._stamp_deadline:
+                    self._stamp_failed("timeout")
+                return
             if time.time() - self.request_time > self.establishment_timeout:
                 self._establishment_timed_out()
 
@@ -1422,6 +1630,13 @@ class OutgoingLink:
         if self.status != OutgoingLink.CLOSED:
             self.status = OutgoingLink.CLOSED
             log("OutLink " + self.link_id.hex()[:8] + " closed", LOG_VERBOSE)
+            if self._stamp_material is not None:      # a key search was started: free its turn
+                try:
+                    from . import stamps
+                    stamps.search_release(self, self._stamp_material)
+                except Exception:
+                    pass
+                self._stamp_material = None
             # Fail in-flight requests first so requesters see the failure
             # before the link-closed notification.
             if self.pending_requests:
@@ -1432,6 +1647,20 @@ class OutgoingLink:
                     self.closed_callback(self)
                 except:
                     pass
+        # An outgoing resource still in flight can never finish now: conclude
+        # it as failed so its owner (LXMF) learns of it instead of waiting on
+        # a transfer that is gone.
+        if self.outgoing_resources:
+            from .resource import COMPLETE, FAILED
+            cb = self.resource_concluded_callback
+            for r in list(self.outgoing_resources):
+                if r.status < COMPLETE:
+                    r.status = FAILED
+                    if cb is not None:
+                        try:
+                            cb(r)
+                        except Exception as e:
+                            log("Resource concluded callback error: " + str(e), LOG_ERROR)
         # Break circular refs (MicroPython GC can't collect cycles)
         if self._channel is not None:
             try:

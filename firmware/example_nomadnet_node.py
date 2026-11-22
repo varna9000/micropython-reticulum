@@ -372,7 +372,7 @@ def main():
 
     async def reannounce_loop():
         while True:
-            await asyncio.sleep(300)
+            await asyncio.sleep(3600)   # hourly: a default RNS 1.6.1 hub blocks rebroadcast of faster announcers
             try:
                 dest.announce()
                 if DEBUG >= 2:
