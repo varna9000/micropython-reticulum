@@ -707,6 +707,17 @@ class LXMRouter:
         # A wall-clock sync must not disturb delivery: re-base our timestamps.
         if self._shift_clocks not in Transport.clock_shift_hooks:
             Transport.clock_shift_hooks.append(self._shift_clocks)
+        # The identity cleanup drops a stale destination: forget what the router keyed by it.
+        # (Persisted tickets stay: they were given to us on purpose and outlive the entry.)
+        self.forget_destination = self._forget_destination
+        hooks = getattr(Identity, "forget_hooks", None)
+        if hooks is not None and self.forget_destination not in hooks:
+            hooks.append(self.forget_destination)
+
+    def _forget_destination(self, h):
+        self.peers.pop(h, None)
+        self._proof_latency.pop(h, None)
+        self.path_request_times.pop(h, None)
 
     def _shift_clocks(self, _sh):
         """Transport._shift_clocks hook: move every wall-clock stamp the router
@@ -895,6 +906,7 @@ class LXMRouter:
     # const.py uses for its table sizes. DIRECT links are NOT held idle (the
     # reference keeps them 10 min): see _release_link().
     MAX_PENDING_OUTBOUND   = 8 if const._BIG_RAM else 4
+    MAX_DELIVERED_IDS      = 512 if const._BIG_RAM else 128   # inbound dedup window (message ids)
     _PATH_REQ_TIMES_MAX    = 16      # unbounded in the reference
 
     # -- timing helpers ------------------------------------------------
@@ -1767,6 +1779,11 @@ class LXMRouter:
                    if now - ts > self.MESSAGE_EXPIRY]
         for h in expired:
             del self.delivered_ids[h]
+        # Bounded: an inbound message is recorded even when its source is unknown, so the
+        # 30 days expiry alone leaves the count to whoever sends. Oldest first.
+        ids = self.delivered_ids
+        while len(ids) > LXMRouter.MAX_DELIVERED_IDS:
+            del ids[min(ids, key=ids.get)]
 
     @staticmethod
     def display_name_from_app_data(app_data):

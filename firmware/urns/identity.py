@@ -76,7 +76,124 @@ class Identity:
 
     known_destinations = {}
     known_ratchets = {}
+    forget_hooks = []             # callables(dest_hash): drop state keyed by a destination removed by the cleanup
+    _clean_at = 0                 # when the current/last cleanup pass started
+    _clean_pend = None            # keys the running pass still has to look at
+    _clean_removed = 0
+    _kd_dirty = False             # removed something since the last save
+    _kd_saved = 0
     storagepath = "/rns"  # Set by Reticulum.__init__
+
+    @staticmethod
+    def _evict_oldest(table, ts_idx):
+        """Delete the entry with the oldest timestamp (entry[ts_idx]) that no conversation
+        is using; False when every entry is in use. One min-scan per insert (~10ms at the
+        cap): a batched sorted() amortizes to less total work but spikes >100ms in one tick,
+        which reads as UI jank on the T-Deck."""
+        try:
+            from .transport import Transport
+            in_use = Transport.is_in_use
+        except Exception:
+            in_use = None
+        oldest = None
+        oldest_ts = None
+        for k in table:
+            ts = table[k][ts_idx]
+            if oldest_ts is not None and ts >= oldest_ts:
+                continue
+            if in_use is not None and in_use(k):
+                continue            # a peer we are using keeps its key
+            oldest_ts = ts
+            oldest = k
+        if oldest is None:
+            return False
+        del table[oldest]
+        return True
+
+    @staticmethod
+    def mark_used(destination_hash):
+        """We used this destination (sent to it, delivered from it): note the time in the
+        entry's 6th element (0/absent = never used, > 0 = last use, -1 = retained)."""
+        e = Identity.known_destinations.get(destination_hash)
+        if e is None or (len(e) > 5 and e[5] is not None and e[5] < 0):
+            return
+        while len(e) < 6:
+            e.append(None)
+        e[5] = time.time()
+
+    @staticmethod
+    def retain_destination(destination_hash, retain=True):
+        """Keep (or stop keeping) a destination, e.g. a contact, out of the cleanup.
+        Returns False when the destination is not known (yet)."""
+        e = Identity.known_destinations.get(destination_hash)
+        if e is None:
+            return False
+        while len(e) < 6:
+            e.append(None)
+        e[5] = -1 if retain else time.time()
+        return True
+
+    @staticmethod
+    def clean_step(now, budget=const.KD_CLEAN_BATCH):
+        """Regular cleanup, after reference Identity.clean_known_destinations: remove a known
+        destination that is not retained, not ours, not in use and has no path when it was
+        never used and last announced over KD_UNUSED_LINGER ago, or was used but not for over
+        1.25 x the path timeout; its ratchet and any state registered in forget_hooks go with
+        it. Also drops expired ratchets and ratchets whose destination is gone. Call every job
+        tick: a pass starts every KD_CLEAN_INTERVAL and looks at `budget` entries per call, so
+        the event loop is never held for long. Returns the number of entries removed."""
+        kd = Identity.known_destinations
+        kr = Identity.known_ratchets
+        pend = Identity._clean_pend
+        if pend is None:
+            if now - Identity._clean_at < const.KD_CLEAN_INTERVAL:
+                return 0
+            Identity._clean_at = now
+            if not Identity._kd_saved:
+                Identity._kd_saved = now
+            Identity._clean_removed = 0
+            pend = Identity._clean_pend = list(kd) + [k for k in kr if k not in kd]
+        from .transport import Transport
+        own = [d.hash for d in Transport.destinations]
+        n = 0
+        while pend and n < budget:
+            n += 1
+            dh = pend.pop()
+            e = kd.get(dh)
+            r = kr.get(dh)
+            if r is not None and now - r[1] > const.RATCHET_EXPIRY:
+                del kr[dh]
+                r = None
+            if (e is None and r is None) or dh in own or Transport.is_in_use(dh) or Transport.has_path(dh):
+                continue
+            if e is not None:
+                lu = e[5] if len(e) > 5 and e[5] else 0
+                if lu < 0:
+                    continue                    # retained
+                stale = (now - e[0] > const.KD_UNUSED_LINGER) if lu == 0 else (now - lu > const.KD_PATH_TIMEOUT * 1.25)
+            else:
+                stale = now - r[1] > const.KD_UNUSED_LINGER     # ratchet whose destination is gone
+            if stale:
+                kd.pop(dh, None)
+                kr.pop(dh, None)
+                Transport._seen_blob.pop(dh, None)
+                for h in Identity.forget_hooks:
+                    try:
+                        h(dh)
+                    except Exception:
+                        pass
+                Identity._clean_removed += 1
+        if not pend:
+            Identity._clean_pend = None
+            if Identity._clean_removed:
+                Identity._kd_dirty = True
+                log("Cleaned " + str(Identity._clean_removed) + " stale known destinations", LOG_DEBUG)
+            if Identity._kd_dirty and now - Identity._kd_saved >= const.KD_SAVE_INTERVAL:
+                Identity._kd_dirty = False
+                Identity._kd_saved = now
+                Identity.save_known_destinations()
+            return Identity._clean_removed
+        return 0
 
     @staticmethod
     def remember(packet_hash, destination_hash, public_key, app_data=None, link_cost_fp=None):
@@ -88,32 +205,18 @@ class Identity:
             # LRU-by-announce eviction (the timestamp refreshes on every
             # announce). Unbounded growth on a public hub reached 449 entries
             # / 123KB JSON — a 4.5s flash write at persist and an ever-growing
-            # boot load. One min-scan per insert (~10ms at the cap): a batched
-            # sorted() amortizes to less total work but spikes >100ms in one
-            # tick, which reads as UI jank on the T-Deck.
-            try:
-                from .transport import Transport
-                in_use = Transport.is_in_use
-            except Exception:
-                in_use = None
-            oldest = None
-            oldest_ts = None
-            for k in kd:
-                ts = kd[k][0]
-                if oldest_ts is not None and ts >= oldest_ts:
-                    continue
-                if in_use is not None and in_use(k):
-                    continue            # a peer we are using keeps its key
-                oldest_ts = ts
-                oldest = k
-            if oldest is None:
+            # boot load.
+            if not Identity._evict_oldest(kd, 0):
                 log("known_destinations full of in-use entries, not recording", LOG_DEBUG)
                 return
-            del kd[oldest]
             log("known_destinations at cap, evicted oldest", LOG_DEBUG)
         # [timestamp, packet_hash, public_key, app_data, link_cost_fp]. The link
         # cost rides in the entry, so it shares the table cap and eviction.
-        kd[destination_hash] = [time.time(), packet_hash, public_key, app_data, link_cost_fp]
+        entry = [time.time(), packet_hash, public_key, app_data, link_cost_fp]
+        old = kd.get(destination_hash)
+        if old is not None and len(old) > 5:
+            entry.append(old[5])            # a re-announce keeps "last used" / retained
+        kd[destination_hash] = entry
 
     @staticmethod
     def recall(target_hash, from_identity_hash=False):
@@ -193,8 +296,13 @@ class Identity:
     @staticmethod
     def _remember_ratchet(destination_hash, ratchet):
         try:
-            # Re-announces refresh the received time, like upstream.
-            Identity.known_ratchets[destination_hash] = (ratchet, time.time())
+            # Re-announces refresh the received time, like upstream. Bounded like
+            # known_destinations: every ratcheted destination on a busy hub used to add an
+            # entry for good (30 days expiry is only checked on use).
+            kr = Identity.known_ratchets
+            if destination_hash not in kr and len(kr) >= const.MAX_KNOWN_DESTINATIONS:
+                Identity._evict_oldest(kr, 1)
+            kr[destination_hash] = (ratchet, time.time())
         except Exception as e:
             log("Could not remember ratchet: " + str(e), LOG_ERROR)
 
@@ -358,6 +466,8 @@ class Identity:
                     entry[3].hex() if isinstance(entry[3], bytes) else None,  # app data
                     entry[4] if len(entry) > 4 else None,  # link cost (8.8 fixed point)
                 ]
+                if len(entry) > 5:
+                    data[key_hex].append(entry[5])      # last used / -1 retained
             with open(Identity.storagepath + "/known_destinations.json", "w") as f:
                 json.dump(data, f)
             log("Saved " + str(len(data)) + " known destinations", LOG_DEBUG)
@@ -381,6 +491,8 @@ class Identity:
                     bytes.fromhex(entry[3]) if entry[3] else None,
                     entry[4] if len(entry) > 4 else None,
                 ]
+                if len(entry) > 5:
+                    Identity.known_destinations[dh].append(entry[5])
             # Trim a file written before the cap existed (or by a bigger
             # board) down to this board's cap, oldest first.
             kd = Identity.known_destinations

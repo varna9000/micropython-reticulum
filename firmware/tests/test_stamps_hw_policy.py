@@ -222,6 +222,24 @@ def test_wifi_gating_and_settle_time():
         assert stamps._hw() == 1
 
 
+def test_first_look_with_wifi_long_up_does_not_wait_out_the_settle_time():
+    # Found on the board: the first stamp search after boot, an hour into a connected session,
+    # ran in software for its first 5 s because "WiFi came up" was taken at the first look.
+    with Env() as e:
+        up = [True]
+        _fake_network(up)
+        e.use(Fake())
+        CLK[0] = 10 * 60 * 1000                           # 10 minutes after boot
+        assert stamps._hw() == 1
+        # a first look within the boot grace still waits (the SHA clock is held on until WiFi joined)
+        stamp_hw.hw_reset()
+        stamps._hw_mod = stamp_hw
+        CLK[0] = 20 * 1000
+        assert stamps._hw() == 0
+        CLK[0] += stamp_hw.HW_WIFI_SETTLE_S * 1000 + 1
+        assert stamps._hw() == 1
+
+
 def test_off_by_default_never_touches_the_module():
     with Env() as e:
         f = e.use(Fake())

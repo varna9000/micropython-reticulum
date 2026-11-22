@@ -30,6 +30,7 @@ _PATH_REQUEST_TIMEOUT = 15          # seconds before a waiting send gives up
 _ANNOUNCE_AWAITED_EXTRA = 4         # awaited path answers may exceed the ingress cap by this many
 _IN_USE_MAX = 16                    # destinations protected from table eviction
 _IN_USE_TTL = 1800                  # seconds a conversation peer stays protected
+_PATH_REQ_KEEP = 600                # seconds a sent path request is remembered (rate limit / await window are far shorter)
 _PATH_AWAIT_WINDOW = 60             # seconds an answer to our path request gets queue priority
 _PR_STAMP_TIMEOUT = 30              # seconds to search a path-request stamp before sending unstamped
 _PR_MAX_STAMPING = 2                # concurrent stamp searches (each one is CPU on the event loop)
@@ -1132,6 +1133,8 @@ class Transport:
         from .identity import Identity
         for e in Identity.known_destinations.values():
             e[0] = _sh(e[0])
+            if len(e) > 5 and e[5] and e[5] > 0:
+                e[5] = _sh(e[5])
         for k in Identity.known_ratchets:
             r, received = Identity.known_ratchets[k]
             Identity.known_ratchets[k] = (r, _sh(received))
@@ -1173,6 +1176,11 @@ class Transport:
         if destination_hash not in iu and len(iu) >= _IN_USE_MAX:
             iu.pop(min(iu, key=lambda k: iu[k]), None)
         iu[destination_hash] = now
+        try:
+            from .identity import Identity
+            Identity.mark_used(destination_hash)
+        except Exception:
+            pass
 
     @staticmethod
     def is_in_use(destination_hash):
@@ -1610,6 +1618,12 @@ class Transport:
                 times.pop(0)
             if not times:
                 Transport._announce_rate.pop(dest, None)
+
+        # _path_request_times: a request sent without a waiter (LXMF's own retries) is never
+        # popped by one, so every destination ever asked for would stay for good.
+        for dest in list(Transport._path_request_times.keys()):
+            if now - Transport._path_request_times[dest] > _PATH_REQ_KEEP:
+                Transport._path_request_times.pop(dest, None)
 
         # packet_cache: drop announces no longer referenced by any live path
         if Transport.packet_cache:
@@ -2283,6 +2297,13 @@ class Transport:
                             and now - Transport._last_persist >= const.PERSIST_INTERVAL):
                         Transport._last_persist = now
                         Transport.save_path_table(Transport.persist_path)
+
+                # Known-destination cleanup: a pass every KD_CLEAN_INTERVAL, KD_CLEAN_BATCH
+                # entries per tick (cheap no-op between passes).
+                from .identity import Identity as _I
+                _cs = getattr(_I, "clean_step", None)
+                if _cs is not None:
+                    _cs(now)
 
                 # Periodic collect is a small-board crutch: a Pico-W-class
                 # heap fragments to death over long sessions without it. On

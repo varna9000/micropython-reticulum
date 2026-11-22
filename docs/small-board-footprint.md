@@ -71,12 +71,12 @@ Before = commit 5870adc, after = working tree with the reviewed simplifications.
 | **eager total** | **132,936** | **129,358** | **-3,578** |
 | `resource` (on demand) | 9,724 | 9,613 | -111 |
 | `stamps` (on demand) | 7,425 | 5,463 | -1,962 |
-| `stamp_hw` (new, only with `stamps_hw_sha`) | - | 1,929 | +1,929 |
+| `stamp_hw` (new, only on an ESP32-S3 with `stamps_hw_sha` not turned off) | - | 1,929 | +1,929 |
 | `stamp_check` | 2,089 | 2,122 | +33 |
 | `announce_stamps` | 4,052 | 3,890 | -162 |
 | `interfaces.tcp` | 4,510 | 4,281 | -229 |
 
-The hardware-SHA policy moved out of `stamps.py` into `stamp_hw.py`, which only loads when `stamps_hw_sha` is on: a board
+The hardware-SHA policy moved out of `stamps.py` into `stamp_hw.py`, which only loads on an ESP32-S3 (hardware SHA is on by default there; `stamps_hw_sha: False` turns it off): a board
 without the accelerator never loads those 1,929 B (`stamps` itself is 1,962 B smaller). Worst case on a stamping board
 without the accelerator: eager + `resource` + `stamps` + `stamp_check` + `announce_stamps` = 129,358 + 9,613 + 5,463 + 2,122 + 3,890 = 150,446 B.
 
@@ -105,3 +105,19 @@ matters for RP2040 (bytecode from filesystem is loaded into a ~200 KB heap) and 
 * A board without native crypto needs 3-12 s per announce validation (pure-Python Ed25519 verify), so it cannot hold a connection
   to a hub that pushes ~8 announces/s (the ingress queue stays full, other tasks starve), but it works on a quiet link.
 * With the native module loaded under its IRAM name the same operations take ~12-20 ms.
+
+## Runtime tables on a busy hub (measured on an ESP32-S3, 2 MB PSRAM, public hub ~4-8 announces/s)
+
+Free heap after `gc.collect()` at the first minute was 1.70-1.68 MB (1.81 MB at "running"). A one-hour run of the unfixed tree
+lost ~5-6 KB/min (1.62 MB at minute 8, 1.29 MB at minute 61) and it was a leak, not a table filling up: `Identity.known_ratchets`
+grew 564 -> 2547 entries (about 40 new ratcheted destinations per minute, ~125-150 B each) because nothing ever evicted it. All other
+tables sat at their caps from the first minutes: known_destinations 160, path_table 32, reachable_destinations 32, peers 64,
+packet_hashlist_prev 512 (+ up to 512 current), _pr_tags 32, _seen_blob <= 64.
+With the ratchet table bounded (cap = MAX_KNOWN_DESTINATIONS) free heap stayed flat at 1.68-1.73 MB for 26+ minutes
+(the bounded tables, once full, hold roughly 110-130 KB more than right after boot; the packet-hash window alone is ~1,000 x ~64 B).
+On a 95 KB-heap board the caps, not the leak, are what to shrink: MAX_PACKET_HASHLIST and MAX_KNOWN_DESTINATIONS dominate.
+
+Bounded since the growth hunt: `known_ratchets` (cap = `MAX_KNOWN_DESTINATIONS`), `Transport._path_request_times` (culled after 600 s),
+`LXMRouter.delivered_ids` (cap `MAX_DELIVERED_IDS`: 512 with `_BIG_RAM`, else 128). A regular cleanup (`Identity.clean_step`, see CLAUDE.md) removes stale
+known destinations early; on the busy hub it removed 0 entries in 27 minutes because the 160-entry cap evicts every entry well before the 360 s linger,
+so it only keeps tables small on quieter links. On the board one pass over 160 entries took 10 calls, worst call 5.5 ms (removal path, measured in the REPL).

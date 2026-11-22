@@ -161,8 +161,8 @@ class Reticulum:
             log("Transport mode enabled", LOG_NOTICE)
 
         # Reticulum 1.6 stamps: send stamped (64 B) path requests (default on);
-        # "stamps_hw_sha": True opts in to the ESP32-S3 SHA accelerator for the
-        # native stamp searches (default off, see stamps.HW_SHA).
+        # the ESP32-S3 SHA accelerator is used for the native stamp searches by
+        # default (ESP32-S3 + capable native module only); "stamps_hw_sha": False turns it off.
         # Default: stamped only when the native hashcash makes the search cheap
         # (same rule as stamp_announces); an explicit config value always wins.
         # The stamp modules are NOT imported here: the native-hashcash probe
@@ -179,9 +179,9 @@ class Reticulum:
             from .link import OutgoingLink as _OL
             _OL.max_stamp_cost = float(_mlc)
         Transport.pr_stamp_timeout = self.config.get("pr_stamp_timeout", Transport.pr_stamp_timeout)
-        if self.config.get("stamps_hw_sha", False):
+        if not self.config.get("stamps_hw_sha", True):
             from . import stamps
-            stamps.HW_SHA = True
+            stamps.HW_SHA = False
 
         # Reticulum 1.6 announce stamps: "stamp_announces" (default: on when the
         # native hashcash exists) generates a stamp per SINGLE destination in the

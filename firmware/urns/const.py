@@ -197,6 +197,11 @@ ANNOUNCE_INGRESS_YIELD_MAX_MS = const(3000)   # cap on the proportional yield af
 
 # Maintenance / flood-control (Phase 5/6)
 CULL_INTERVAL         = const(5)           # seconds between table-maintenance passes
+KD_CLEAN_INTERVAL     = const(300)         # seconds between known-destination cleanup passes (reference known_destinations_interval)
+KD_CLEAN_BATCH        = const(16)          # entries examined per job tick of a pass (a pass resumes where it left off)
+KD_UNUSED_LINGER      = const(360)         # a pathless, never used destination goes this long after its last announce
+KD_PATH_TIMEOUT       = const(604800)      # reference PATH_TIMEOUT (7 days): a used one goes after 1.25x this unused
+KD_SAVE_INTERVAL      = const(3600)        # a pass that removed something rewrites known_destinations.json at most this often
 PERSIST_INTERVAL      = const(300)         # seconds between path-table flash writes
 ANNOUNCE_RATE_WINDOW  = const(60)          # per-source announce rate window (s)
 ANNOUNCE_RATE_MAX     = const(6)           # max announces/source/window before throttling rebroadcast

@@ -32,6 +32,20 @@ def hdlc_escape(data):
     return bytes(out)
 
 
+def _sta_up():
+    """True/False: is the WiFi STA link up. None where that does not apply (no network
+    module, STA interface inactive e.g. wired or AP-only boards): then a drop is judged
+    on its lifetime alone, as before."""
+    try:
+        import network
+        w = network.WLAN(network.STA_IF)
+        if not w.active():
+            return None
+        return bool(w.isconnected())
+    except Exception:
+        return None
+
+
 class TCPClientInterface(Interface):
     # Exactly one peer on the far end, so an announce received here must not be
     # echoed back to it (see Transport._rebroadcast_announce).
@@ -83,6 +97,12 @@ class TCPClientInterface(Interface):
     # escalates the back-off above: it retries after reconnect_wait, doubling
     # per consecutive failure up to LOCAL_RETRY_MAX_S.
     LOCAL_RETRY_MAX_S = 30
+    # The back-off escalates only when the hub closed a connection while OUR link (WiFi STA)
+    # stayed up for its whole life. The poll loop samples the link every LINK_POLL_S and
+    # latches a drop; a drop-and-recover shorter than that, between two samples with no
+    # failed I/O on the socket, is not seen (the connection then usually died anyway, and
+    # at worst costs one extra doubling, self-healing after a healthy connection).
+    LINK_POLL_S = 1
 
     def __init__(self, config):
         name = config.get("name", "TCP")
@@ -106,6 +126,8 @@ class TCPClientInterface(Interface):
         self._connected_at = None
         self._local_fails = 0         # consecutive attempts that never reached the hub
         self._assess = False          # a drop/failure not yet judged for the back-off
+        self._link_dropped = False    # our own network link went down during this connection
+        self._link_checked = 0
         self._delay = self.reconnect_wait
         self._cur_wait = self.reconnect_wait
 
@@ -137,6 +159,8 @@ class TCPClientInterface(Interface):
         self._reconnect_count = 0
         self._connected_at = const.ticks_ms()
         self._local_fails = 0
+        self._link_dropped = False
+        self._link_checked = self._connected_at
         self._assess = True
         log("TCP connected to " + self.target_host + ":" + str(self.target_port), LOG_NOTICE)
 
@@ -148,27 +172,39 @@ class TCPClientInterface(Interface):
                 pass
             self._socket = None
 
+    def _sample_link(self, now):
+        """Latch (at most every LINK_POLL_S) that our own network link went down."""
+        if (not self._link_dropped
+                and const.ticks_diff(now, self._link_checked) >= self.LINK_POLL_S * 1000):
+            self._link_checked = now
+            if _sta_up() is False:
+                self._link_dropped = True
+
     def _judge_drop(self, now):
         """First look at a drop (or failed attempt): adjust the back-off."""
         self._assess = False
-        if self._connected_at is None:
-            # Never connected: a local failure, not the hub refusing us.
+        lived = None
+        if self._connected_at is not None:
+            # ticks_diff wraps after ~12.4 days (period 2**30 ms): a connection older than
+            # that reads as its age modulo the period. Half of it reads negative (healthy
+            # here); the rare remainder below BACKOFF_SHORT_S (~3e-5 of connections that
+            # old) is misjudged as short and costs ONE extra doubling of the delay.
+            lived = const.ticks_diff(now, self._connected_at) // 1000
+            if lived < 0 or lived >= self.BACKOFF_HEALTHY_S:
+                self._delay = self.reconnect_wait
+            self._connected_at = None
+        if lived is None or self._link_dropped or _sta_up() is False:
+            # Never connected, or our own link dropped during/at the end of the connection: a
+            # local failure, not the hub refusing us.
+            self._link_dropped = False
             self._local_fails += 1
             wait = self.reconnect_wait * (1 << min(self._local_fails - 1, 4))
             self._cur_wait = min(wait, max(self.LOCAL_RETRY_MAX_S, self.reconnect_wait))
             self._last_reconnect = now
             return
         self._local_fails = 0
-        # ticks_diff wraps after ~12.4 days (period 2**30 ms): a connection older than
-        # that reads as its age modulo the period. Half of it reads negative (healthy
-        # here); the rare remainder below BACKOFF_SHORT_S (~3e-5 of connections that
-        # old) is misjudged as short and costs ONE extra doubling of the delay.
-        lived = const.ticks_diff(now, self._connected_at) // 1000
-        if lived < 0 or lived >= self.BACKOFF_HEALTHY_S:
-            self._delay = self.reconnect_wait
-        elif lived < self.BACKOFF_SHORT_S:
+        if 0 <= lived < self.BACKOFF_SHORT_S:
             self._delay = min(self._delay * 2, self.BACKOFF_MAX_S)
-        self._connected_at = None
         jitter = (os.urandom(1)[0] * self._delay) // 2560     # up to ~10%
         self._cur_wait = self._delay + jitter
         self._last_reconnect = now
@@ -342,6 +378,7 @@ class TCPClientInterface(Interface):
 
             got = 0
             t0 = const.ticks_ms()
+            self._sample_link(t0)
             try:
                 # Re-assert non-blocking before every drain — ESP32 lwIP
                 # bug: send() corrupts the socket's non-blocking state.

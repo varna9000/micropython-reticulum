@@ -123,6 +123,7 @@ def test_find_hashcash_uses_native_when_present_and_rechecks_hits():
 
     ed = importlib.import_module("urns.crypto.ed25519")
     old = getattr(ed, "_native", None)
+    old_hw = stamps.HW_SHA
     ed._native = Fake()
     stamps.reset_native_probe()
     try:
@@ -133,6 +134,7 @@ def test_find_hashcash_uses_native_when_present_and_rechecks_hits():
         assert stamps._hw() == 0
     finally:
         ed._native = old
+        stamps.HW_SHA = old_hw
         stamps.reset_native_probe()
 
 
@@ -403,14 +405,54 @@ class _HwFake:
 
 
 # --------------------------------------------------------------------------
-def test_hw_sha_switch_default_off_and_s3_only():
+_BOOT_HW = r'''
+import sys, types, hashlib, asyncio, os, json, gc, tempfile
+FW, CFG = sys.argv[1], json.loads(sys.argv[2])
+sys.path.insert(0, FW)
+mp = types.ModuleType("micropython"); mp.const = lambda x: x; mp.native = lambda f: f; mp.viper = lambda f: f
+sys.modules["micropython"] = mp
+sys.modules["uhashlib"] = hashlib
+sys.modules["uasyncio"] = asyncio
+sys.modules["machine"] = types.ModuleType("machine")
+uc = types.ModuleType("ucryptolib"); uc.aes = None; sys.modules["ucryptolib"] = uc
+gc.mem_free = lambda: 100000
+gc.threshold = lambda *a: None
+import urns
+from urns import Reticulum
+d = tempfile.mkdtemp(); cfg = d + "/config.json"
+json.dump(dict(CFG, loglevel=0, interfaces=[]), open(cfg, "w"))
+r = Reticulum(cfg); r.setup_interfaces()
+from urns import stamps
+print(json.dumps([stamps.HW_SHA, stamps._hw(), "urns.stamp_hw" in sys.modules]))
+'''
+
+
+def _boot_hw(cfg):
+    import json, os, subprocess, sys, tempfile
+    fw = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = tempfile.mktemp(suffix=".py")
+    open(script, "w").write(_BOOT_HW)
+    p = subprocess.run([sys.executable, "-I", script, fw, json.dumps(cfg)], capture_output=True, text=True, timeout=300)
+    assert p.returncode == 0, p.stderr[-800:]
+    return json.loads(p.stdout.strip().splitlines()[-1])
+
+
+def test_hw_sha_default_on_config_false_off_and_non_s3_never_loads_the_module():
+    # default: switch on, but on this (non-S3) host nothing engages and stamp_hw is never imported
+    assert _boot_hw({}) == [True, 0, False]
+    assert _boot_hw({"stamps_hw_sha": True}) == [True, 0, False]
+    assert _boot_hw({"stamps_hw_sha": False}) == [False, 0, False]
+
+
+def test_hw_sha_switch_default_on_and_s3_only():
     import sys
     ed = importlib.import_module("urns.crypto.ed25519")
     old_nat, old = getattr(ed, "_native", None), stamps.HW_SHA
     ed._native = _HwFake()
     stamps.reset_native_probe()
     stamp_hw.hw_reset()
-    assert stamps.HW_SHA is False and stamps._hw() == 0
+    stamps.HW_SHA = False
+    assert stamps._hw() == 0                              # switch off: never, even on an S3
     stamps.HW_SHA = True
     try:
         orig = getattr(sys.implementation, "_machine", None)

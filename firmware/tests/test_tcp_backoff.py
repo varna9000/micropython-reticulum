@@ -172,6 +172,101 @@ def test_connection_older_than_the_tick_period_costs_one_extra_doubling():
     assert iface._delay == 5
 
 
+# ---- own-link awareness: escalate only when the hub closed while our WiFi stayed up ----
+
+class _Sta:
+    def __init__(self):
+        self.up = True
+        self.orig = tcp._sta_up
+        tcp._sta_up = lambda: self.up
+
+    def close(self):
+        tcp._sta_up = self.orig
+
+
+def _wifi_cycle(iface, mod, sta, lived_s, down_s):
+    """Connection lives lived_s, WiFi drops (sampled by the poll loop), TCP dies, WiFi back after down_s."""
+    _tick(iface, lived_s)
+    sta.up = False
+    mod.net_up[0] = False
+    _now[0] += 1000
+    iface._sample_link(_now[0])
+    iface.online = False                    # the socket error surfaces some time after
+    _tick(iface, down_s)
+    sta.up = True
+    mod.net_up[0] = True
+
+
+def test_forced_wifi_drop_loop_keeps_the_reconnect_delay_short():
+    sta = _Sta()
+    try:
+        iface, mod = _mk()
+        for i in range(60):                 # soak: WiFi forced down every 30-55 s
+            _wifi_cycle(iface, mod, sta, 20 + (i * 7) % 25, 3 + i % 5)
+            t0 = FakeTime.t
+            for _ in range(300):
+                _tick(iface, 1)
+                if iface.online:
+                    break
+            assert iface.online and FakeTime.t - t0 <= iface.LOCAL_RETRY_MAX_S + 2, (i, FakeTime.t - t0)
+            assert iface._delay == 5, (i, iface._delay)
+    finally:
+        sta.close()
+
+
+def test_drop_and_recover_between_polls_is_still_latched():
+    sta = _Sta()
+    try:
+        iface, mod = _mk()
+        _tick(iface, 10)
+        sta.up = False
+        _now[0] += 1000
+        iface._sample_link(_now[0])         # poll sees it down
+        sta.up = True                       # ... and it is back before the hub-side close is judged
+        _tick(iface, 1)
+        iface.online = False
+        iface._reconnect()
+        assert iface._delay == 5 and iface._cur_wait <= iface.LOCAL_RETRY_MAX_S
+    finally:
+        sta.close()
+
+
+def test_hub_closing_fresh_connection_with_wifi_up_still_escalates():
+    sta = _Sta()
+    try:
+        iface, mod = _mk()
+        for _ in range(8):                  # WiFi up and sampled all along; the hub closes after 1 s
+            _tick(iface, 1)
+            iface._sample_link(_now[0])
+            iface.online = False
+            _tick(iface, 1)
+            while not iface.online:
+                _tick(iface, 1)
+        assert iface._delay >= 160, iface._delay
+    finally:
+        sta.close()
+
+
+def test_wifi_down_at_judge_time_does_not_escalate_even_unlatched():
+    sta = _Sta()
+    try:
+        iface, mod = _mk()
+        _tick(iface, 3)
+        iface.online = False                # the poll never saw the link up->down edge
+        sta.up = False
+        iface._reconnect()                  # judged now: link is down
+        assert iface._delay == 5
+        sta.up = True
+        iface, mod = _mk()
+        sta.up = None                       # no WiFi API (host/other platform): lifetime rule as before
+        _tick(iface, 3)
+        iface.online = False
+        iface._reconnect()
+        assert iface._delay == 10
+    finally:
+        sta.close()
+
+
 if __name__ == "__main__":
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

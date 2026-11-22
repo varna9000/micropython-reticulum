@@ -28,6 +28,7 @@ HW_HOLDOFF_S = 5                # software only for this long after a busy/lost 
 HW_WINDOW_S = 300               # sliding window for the event limit
 HW_MAX_EVENTS = 3               # busy/lost events tolerated per window
 HW_WIFI_SETTLE_S = 5            # software only for this long after WiFi (re)connected
+HW_BOOT_GRACE_MS = 60000        # up before the first look, later than this after boot: assume it settled long ago
 
 
 # hardware session state: reason string once disabled, None while usable
@@ -37,6 +38,7 @@ _hw_hold_until = None           # ticks_ms until which hardware is paused
 _hw_events = []                 # ticks_ms of recent busy/lost events
 _hw_last = (0, 0, 0, 0)         # last seen native hwstats (n, mismatches, busy, lost)
 _wifi_up_at = None              # ticks_ms when the STA interface was last seen coming up
+_wifi_down_seen = False         # a down state was observed (so an up state is a real transition)
 
 
 def hw_disabled():
@@ -57,13 +59,14 @@ def hw_disable(reason):
 
 def hw_reset():
     """Forget the hardware session state (tests, or after the owner re-enables)."""
-    global _hw_off, _hw_checked, _hw_hold_until, _hw_events, _hw_last, _wifi_up_at
+    global _hw_off, _hw_checked, _hw_hold_until, _hw_events, _hw_last, _wifi_up_at, _wifi_down_seen
     _hw_off = None
     _hw_checked = False
     _hw_hold_until = None
     _hw_events = []
     _hw_last = (0, 0, 0, 0)
     _wifi_up_at = None
+    _wifi_down_seen = False
 
 
 def _wifi_state():
@@ -138,7 +141,7 @@ def account(nm):
 
 def usable(nm):
     """1 when this slice may use the accelerator, else 0 (never raises)."""
-    global _hw_checked, _hw_hold_until, _wifi_up_at
+    global _hw_checked, _hw_hold_until, _wifi_up_at, _wifi_down_seen
     if _hw_off is not None:
         return 0
     try:
@@ -150,9 +153,13 @@ def usable(nm):
     w = _wifi_state()
     if w is False:
         _wifi_up_at = None
+        _wifi_down_seen = True
         return 0
     if w and _wifi_up_at is None:
-        _wifi_up_at = now
+        # Up at the first look (nobody asked before, e.g. the first search long after boot): it
+        # did not just connect, so do not make that search wait out the settle time. After boot
+        # or an observed down state the settle time applies.
+        _wifi_up_at = now if (_wifi_down_seen or now < HW_BOOT_GRACE_MS) else now - HW_WIFI_SETTLE_S * 1000
     if _wifi_up_at is not None and const.ticks_diff(now, _wifi_up_at) < HW_WIFI_SETTLE_S * 1000:
         return 0
     if _hw_hold_until is not None:

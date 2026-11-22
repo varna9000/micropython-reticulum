@@ -6,6 +6,7 @@
 
 import gc
 import os
+import sys
 import time
 from .crypto import sha256
 
@@ -35,11 +36,11 @@ HASHCASH_NATIVE = 2000          # first native hashcash slice
 HASHCASH_PY = 32                # first pure-Python hashcash slice
 TABLE_N = 64                    # native table entries (buffer = 16 + 120*(n+1) B)
 
-# Opt-in ESP32-S3 SHA accelerator for the native searches (default OFF; config key
-# "stamps_hw_sha": True sets HW_SHA in Reticulum.setup_interfaces). The whole policy
-# (start-up check, session disable, hold-off, WiFi gating) is in stamp_hw.py, which is
-# only imported when this flag is on.
-HW_SHA = False
+# ESP32-S3 SHA accelerator for the native searches (default ON; config key
+# "stamps_hw_sha": False clears HW_SHA in Reticulum.setup_interfaces). It only engages on an
+# ESP32-S3 whose native module has the hardware functions. The whole policy (start-up check,
+# session disable, hold-off, WiFi gating) is in stamp_hw.py, which is only imported on such a board.
+HW_SHA = True
 
 # --- duty-cycle pacing ---------------------------------------------------------
 #
@@ -116,6 +117,11 @@ def _hw(nm=None):
     if not HW_SHA or _hw_mod is False:
         return 0
     if _hw_mod is None:
+        try:
+            if "ESP32S3" not in sys.implementation._machine.replace("-", "").replace(" ", ""):
+                return 0            # not an S3: never load stamp_hw (not cached, nothing else changes)
+        except Exception:
+            return 0
         try:
             from . import stamp_hw
             _hw_mod = stamp_hw
